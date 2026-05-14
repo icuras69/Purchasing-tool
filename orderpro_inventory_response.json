@@ -1,0 +1,635 @@
+﻿{
+    "data":  [
+                 {
+                     "id":  980,
+                     "product_id":  1109,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "10.000",
+                     "product":  {
+                                     "id":  1109,
+                                     "sku":  "5036108207145",
+                                     "name":  "Adult Show Coat - XXSmall"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-22T10:29:05+00:00"
+                 },
+                 {
+                     "id":  981,
+                     "product_id":  1110,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "10.000",
+                     "product":  {
+                                     "id":  1110,
+                                     "sku":  "5036108144112",
+                                     "name":  "Adult Show Coat - XSmall"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-22T10:29:05+00:00"
+                 },
+                 {
+                     "id":  982,
+                     "product_id":  1111,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "5.000",
+                     "product":  {
+                                     "id":  1111,
+                                     "sku":  "5036108036615",
+                                     "name":  "Adult Show Coat - Small"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-22T10:29:05+00:00"
+                 },
+                 {
+                     "id":  983,
+                     "product_id":  1112,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "20.000",
+                     "product":  {
+                                     "id":  1112,
+                                     "sku":  "5036108036622",
+                                     "name":  "Adult Show Coat - Medium"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-22T10:29:05+00:00"
+                 },
+                 {
+                     "id":  984,
+                     "product_id":  1113,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "19.000",
+                     "product":  {
+                                     "id":  1113,
+                                     "sku":  "5036108036639",
+                                     "name":  "Adult Show Coat - Large"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-27T09:26:04+00:00"
+                 },
+                 {
+                     "id":  985,
+                     "product_id":  1114,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "14.000",
+                     "product":  {
+                                     "id":  1114,
+                                     "sku":  "5036108036646",
+                                     "name":  "Adult Show Coat - XLarge"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-28T20:18:26+00:00"
+                 },
+                 {
+                     "id":  986,
+                     "product_id":  1115,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "3.000",
+                     "product":  {
+                                     "id":  1115,
+                                     "sku":  "5036108036653",
+                                     "name":  "Adult Show Coat - XXLarge"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-28T21:28:50+00:00"
+                 },
+                 {
+                     "id":  987,
+                     "product_id":  1116,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "6.000",
+                     "product":  {
+                                     "id":  1116,
+                                     "sku":  "5036108144129",
+                                     "name":  "Adult Show Coat - XXXLarge"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-22T10:29:05+00:00"
+                 },
+                 {
+                     "id":  990,
+                     "product_id":  1120,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "100.000",
+                     "product":  {
+                                     "id":  1120,
+                                     "sku":  "HIGHENERGYSHEEPMINERAL-2",
+                                     "name":  "Agvance High Energy Seaboost Sheep Mineral Bucket - 5x - 20 kg"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  991,
+                     "product_id":  1121,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "50.000",
+                     "product":  {
+                                     "id":  1121,
+                                     "sku":  "HIGHENERGYSHEEPMINERAL10",
+                                     "name":  "Agvance High Energy Seaboost Sheep Mineral Bucket - 10x - 20 kg"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  995,
+                     "product_id":  1127,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "75.000",
+                     "product":  {
+                                     "id":  1127,
+                                     "sku":  "COMFYCALFJACKETS",
+                                     "name":  "Comfy Calf Jacket - Small"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  996,
+                     "product_id":  1128,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "64.000",
+                     "product":  {
+                                     "id":  1128,
+                                     "sku":  "COMFYCALFJACKETL",
+                                     "name":  "Comfy Calf Jacket - Large"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  997,
+                     "product_id":  1129,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "698.000",
+                     "product":  {
+                                     "id":  1129,
+                                     "sku":  "COMFYCALFJACKETSXL",
+                                     "name":  "Comfy Calf Jacket - Extra Large"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  998,
+                     "product_id":  1132,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "11.000",
+                     "product":  {
+                                     "id":  1132,
+                                     "sku":  "5061031801856",
+                                     "name":  "Anyday Coconut Shampoo"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-30T11:02:27+00:00"
+                 },
+                 {
+                     "id":  1000,
+                     "product_id":  1135,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "379.000",
+                     "product":  {
+                                     "id":  1135,
+                                     "sku":  "BEEFCOPPERPLUS20KG",
+                                     "name":  "Beef Digest Copper Plus Block 20kg"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  1002,
+                     "product_id":  1137,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "18.000",
+                     "product":  {
+                                     "id":  1137,
+                                     "sku":  "BTGLL10BX",
+                                     "name":  "Blackthorn Nitrile Milking Gloves - Large x10 boxes"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  1003,
+                     "product_id":  1138,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "5.000",
+                     "product":  {
+                                     "id":  1138,
+                                     "sku":  "BTGLM10BX",
+                                     "name":  "Blackthorn Nitrile Milking Gloves - Medium x10 boxes"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-03-30T07:59:07+00:00"
+                 },
+                 {
+                     "id":  1005,
+                     "product_id":  1140,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "2.000",
+                     "product":  {
+                                     "id":  1140,
+                                     "sku":  "BTGLXL10BX",
+                                     "name":  "Blackthorn Nitrile Milking Gloves - X Large x10boxes"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-24T15:21:03+00:00"
+                 },
+                 {
+                     "id":  1006,
+                     "product_id":  1141,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "2.000",
+                     "product":  {
+                                     "id":  1141,
+                                     "sku":  "BTGLS1BX",
+                                     "name":  "Blackthorn Nitrile Milking Gloves - Small 1 box"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  1007,
+                     "product_id":  1142,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "53.000",
+                     "product":  {
+                                     "id":  1142,
+                                     "sku":  "BTGLM1BX",
+                                     "name":  "Blackthorn Nitrile Milking Gloves - Medium 1 box"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  1008,
+                     "product_id":  1143,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "181.000",
+                     "product":  {
+                                     "id":  1143,
+                                     "sku":  "BTGLL1BX",
+                                     "name":  "Blackthorn Nitrile Milking Gloves - Large 1 box"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  1009,
+                     "product_id":  1144,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "20.000",
+                     "product":  {
+                                     "id":  1144,
+                                     "sku":  "BTGLXL1BX",
+                                     "name":  "Blackthorn Nitrile Milking Gloves - Xl 1 box"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-24T13:19:03+00:00"
+                 },
+                 {
+                     "id":  1010,
+                     "product_id":  1145,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "5.000",
+                     "product":  {
+                                     "id":  1145,
+                                     "sku":  "4018619002373",
+                                     "name":  "Block Holder"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-21T18:13:37+00:00"
+                 },
+                 {
+                     "id":  1012,
+                     "product_id":  1147,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "4.000",
+                     "product":  {
+                                     "id":  1147,
+                                     "sku":  "BOBTEMPLEBLACK2.5KG",
+                                     "name":  "Bob Temple Black Soap - 2.5kg"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-04-30T10:56:14+00:00"
+                 },
+                 {
+                     "id":  1013,
+                     "product_id":  1148,
+                     "warehouse_id":  4,
+                     "location_id":  null,
+                     "lot_id":  null,
+                     "qty":  "3.000",
+                     "product":  {
+                                     "id":  1148,
+                                     "sku":  "BOBOTEMPLEYELLOW1kg",
+                                     "name":  "Bob Temple Charo Soap - 1kg / Yellow"
+                                 },
+                     "warehouse":  {
+                                       "id":  4,
+                                       "name":  "Agvance Trading Warehouse"
+                                   },
+                     "location":  null,
+                     "lot":  null,
+                     "created_at":  "2026-03-30T07:59:07+00:00",
+                     "updated_at":  "2026-03-30T07:59:07+00:00"
+                 }
+             ],
+    "links":  {
+                  "first":  "https://wms.orderpro.cloud/api/v2/inventory?page=1",
+                  "last":  "https://wms.orderpro.cloud/api/v2/inventory?page=24",
+                  "prev":  null,
+                  "next":  "https://wms.orderpro.cloud/api/v2/inventory?page=2"
+              },
+    "meta":  {
+                 "current_page":  1,
+                 "from":  1,
+                 "last_page":  24,
+                 "links":  [
+                               {
+                                   "url":  null,
+                                   "label":  "\u0026laquo; Previous",
+                                   "page":  null,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=1",
+                                   "label":  "1",
+                                   "page":  1,
+                                   "active":  true
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=2",
+                                   "label":  "2",
+                                   "page":  2,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=3",
+                                   "label":  "3",
+                                   "page":  3,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=4",
+                                   "label":  "4",
+                                   "page":  4,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=5",
+                                   "label":  "5",
+                                   "page":  5,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=6",
+                                   "label":  "6",
+                                   "page":  6,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=7",
+                                   "label":  "7",
+                                   "page":  7,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=8",
+                                   "label":  "8",
+                                   "page":  8,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=9",
+                                   "label":  "9",
+                                   "page":  9,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=10",
+                                   "label":  "10",
+                                   "page":  10,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  null,
+                                   "label":  "...",
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=23",
+                                   "label":  "23",
+                                   "page":  23,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=24",
+                                   "label":  "24",
+                                   "page":  24,
+                                   "active":  false
+                               },
+                               {
+                                   "url":  "https://wms.orderpro.cloud/api/v2/inventory?page=2",
+                                   "label":  "Next \u0026raquo;",
+                                   "page":  2,
+                                   "active":  false
+                               }
+                           ],
+                 "path":  "https://wms.orderpro.cloud/api/v2/inventory",
+                 "per_page":  25,
+                 "to":  25,
+                 "total":  591
+             }
+}
