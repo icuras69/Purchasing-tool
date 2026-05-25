@@ -6,6 +6,8 @@ from app.db.session import engine
 from app.routes.health import router as health_router
 from app.routes.products import router as products_router
 from app.routes.inventory import router as inventory_router
+from app.routes.product_suppliers import router as product_suppliers_router
+from app.routes.suppliers import router as suppliers_router
 
 import app.models  # noqa: F401
 
@@ -18,6 +20,8 @@ if settings.database_auto_create_tables:
 app.include_router(health_router)
 app.include_router(products_router)
 app.include_router(inventory_router)
+app.include_router(product_suppliers_router)
+app.include_router(suppliers_router)
 
 @app.get("/")
 def root():

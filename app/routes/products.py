@@ -1,12 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
 from app.schemas.product import ProductCreate, ProductResponse
+from app.schemas.product_supplier import ProductSupplierMappingResponse, WeakMappingResponse
 from app.schemas.forecast import ForecastResponse
 from app.services.forecasting import build_forecast
+from app.routes.product_suppliers import serialize_product_supplier
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -82,6 +85,104 @@ def list_products(db: Session = Depends(get_db)):
         .all()
     )
     return [serialize_product(product) for product in products]
+
+
+@router.get("/unmapped", response_model=list[ProductResponse])
+def list_unmapped_products(db: Session = Depends(get_db)):
+    products = (
+        db.query(Product)
+        .options(
+            selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+        )
+        .filter(~Product.product_suppliers.any())
+        .order_by(Product.id.asc())
+        .all()
+    )
+    return [serialize_product(product) for product in products]
+
+
+@router.get("/weak-mappings", response_model=list[WeakMappingResponse])
+def list_weak_mappings(
+    confidence_threshold: float = Query(0.8, ge=0, le=1),
+    db: Session = Depends(get_db),
+):
+    weak_rows = []
+
+    unmapped_products = (
+        db.query(Product)
+        .filter(~Product.product_suppliers.any())
+        .order_by(Product.id.asc())
+        .all()
+    )
+    for product in unmapped_products:
+        weak_rows.append(
+            {
+                "product_id": product.id,
+                "product_name": product.name,
+                "reason": "no_supplier_mappings",
+            }
+        )
+
+    weak_mappings = (
+        db.query(ProductSupplier)
+        .options(
+            selectinload(ProductSupplier.product),
+            selectinload(ProductSupplier.supplier),
+        )
+        .filter(
+            or_(
+                ProductSupplier.match_status != "matched",
+                ProductSupplier.match_status.is_(None),
+                ProductSupplier.match_confidence < confidence_threshold,
+            )
+        )
+        .order_by(ProductSupplier.product_id.asc(), ProductSupplier.id.asc())
+        .all()
+    )
+    for mapping in weak_mappings:
+        if mapping.match_status != "matched":
+            reason = "match_status_not_matched"
+        elif mapping.match_confidence is not None and mapping.match_confidence < confidence_threshold:
+            reason = "match_confidence_below_threshold"
+        else:
+            reason = "needs_review"
+
+        weak_rows.append(
+            {
+                "product_id": mapping.product_id,
+                "product_name": mapping.product.name if mapping.product else "",
+                "reason": reason,
+                "mapping_id": mapping.id,
+                "supplier_id": mapping.supplier_id,
+                "supplier_name": mapping.supplier.name if mapping.supplier else None,
+                "supplier_sku": mapping.supplier_sku,
+                "supplier_product_name": mapping.supplier_product_name,
+                "match_status": mapping.match_status,
+                "match_method": mapping.match_method,
+                "match_confidence": mapping.match_confidence,
+            }
+        )
+
+    return weak_rows
+
+
+@router.get("/{product_id}/supplier-mappings", response_model=list[ProductSupplierMappingResponse])
+def list_product_supplier_mappings(product_id: int, db: Session = Depends(get_db)):
+    product = db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found.")
+
+    mappings = (
+        db.query(ProductSupplier)
+        .options(
+            selectinload(ProductSupplier.product),
+            selectinload(ProductSupplier.supplier),
+        )
+        .filter(ProductSupplier.product_id == product_id)
+        .order_by(ProductSupplier.is_preferred.desc(), ProductSupplier.id.asc())
+        .all()
+    )
+    return [serialize_product_supplier(mapping) for mapping in mappings]
 
 
 @router.get("/{product_id}", response_model=ProductResponse)
