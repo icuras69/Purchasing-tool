@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -20,3 +22,27 @@ class ProductResponse(BaseModel):
     safety_stock: float
     lead_time_days: int
     min_order_qty: float
+    supplier_count: int = 0
+    preferred_supplier: str | None = None
+    preferred_supplier_id: int | None = None
+    preferred_supplier_sku: str | None = None
+    supplier_mappings: list["ProductSupplierResponse"] = Field(default_factory=list)
+    mapping_status: str = "unmapped"
+
+
+class ProductSupplierResponse(BaseModel):
+    id: int
+    supplier_id: int
+    supplier_name: str | None
+    supplier_sku: str | None
+    supplier_product_name: str | None
+    purchase_price: float | None
+    currency: str | None
+    minimum_order_quantity: float | None
+    pack_size: float | None
+    lead_time_days: int | None
+    is_preferred: bool
+    match_status: str | None
+    match_method: str | None
+    match_confidence: float | None
+    last_synced_at: datetime | None
