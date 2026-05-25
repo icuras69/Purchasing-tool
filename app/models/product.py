@@ -29,3 +29,4 @@ class Product(Base):
     recommendations = relationship("Recommendation", back_populates="product", cascade="all, delete-orphan")
     sales_history_raw = relationship("SalesHistoryRaw", back_populates="product", cascade="all, delete-orphan")
     master_items = relationship("ProductMasterItem", back_populates="product")
+    product_suppliers = relationship("ProductSupplier", back_populates="product", cascade="all, delete-orphan")

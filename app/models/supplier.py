@@ -28,3 +28,4 @@ class Supplier(Base):
 
     aliases = relationship("SupplierAlias", back_populates="supplier", cascade="all, delete-orphan")
     master_items = relationship("ProductMasterItem", back_populates="supplier")
+    product_suppliers = relationship("ProductSupplier", back_populates="supplier", cascade="all, delete-orphan")

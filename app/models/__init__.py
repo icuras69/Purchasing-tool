@@ -8,6 +8,7 @@ from app.models.sales_history_raw import SalesHistoryRaw
 from app.models.supplier import Supplier
 from app.models.supplier_alias import SupplierAlias
 from app.models.product_master_item import ProductMasterItem
+from app.models.product_supplier import ProductSupplier
 
 __all__ = [
     "Product",
@@ -20,4 +21,5 @@ __all__ = [
     "Supplier",
     "SupplierAlias",
     "ProductMasterItem",
+    "ProductSupplier",
 ]
