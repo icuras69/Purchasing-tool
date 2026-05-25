@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     app_name: str = "Purchasing AI"
     debug: bool = True
     database_url: str= "postgresql://postgres:12345678@localhost:5432/purchasing_ai"
+    database_auto_create_tables: bool = False
     openai_api_key: str = ""
     orderpro_base_url: str = ""
     orderpro_api_key: str = ""

@@ -12,7 +12,8 @@ import app.models  # noqa: F401
 
 app = FastAPI(title=settings.app_name)
 
-Base.metadata.create_all(bind=engine)
+if settings.database_auto_create_tables:
+    Base.metadata.create_all(bind=engine)
 
 app.include_router(health_router)
 app.include_router(products_router)
