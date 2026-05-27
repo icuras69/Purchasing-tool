@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/productdisplay.test.ts","./src/productdisplay.ts","./src/types.ts","./src/test/setup.ts"],"errors":true,"version":"6.0.3"}
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/productdisplay.test.ts","./src/productdisplay.ts","./src/types.ts","./src/vite-env.d.ts","./src/test/setup.ts"],"version":"6.0.3"}
