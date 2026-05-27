@@ -96,6 +96,23 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.tab {
+  color: #374151;
+}
+
+.tab.active {
+  background: #1f2937;
+  border-color: #1f2937;
+  color: #ffffff;
+}
+
 .status {
   border-radius: 999px;
   display: inline-block;
@@ -119,6 +136,11 @@ button:disabled {
   border: 1px solid #e5e9ef;
   border-radius: 6px;
   padding: 10px;
+}
+
+.review-need {
+  color: #9f1239;
+  font-weight: 700;
 }
 
 .state {
