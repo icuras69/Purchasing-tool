@@ -53,6 +53,7 @@ def resolve_supplier_context(product: Product) -> dict:
             "purchase_price": preferred.cost_price,
             "currency": None,
             "minimum_order_quantity_used": product.min_order_qty,
+            "moq_source": "product_record",
             "match_status": preferred.match_status,
             "match_method": preferred.match_method,
             "mapping_source": "product_master_item",
@@ -70,6 +71,7 @@ def resolve_supplier_context(product: Product) -> dict:
             "purchase_price": preferred.cost_price,
             "currency": None,
             "minimum_order_quantity_used": product.min_order_qty,
+            "moq_source": "product_record",
             "match_status": preferred.match_status,
             "match_method": preferred.match_method,
             "mapping_source": "product_master_item",
@@ -87,6 +89,7 @@ def resolve_supplier_context(product: Product) -> dict:
             "purchase_price": None,
             "currency": None,
             "minimum_order_quantity_used": product.min_order_qty,
+            "moq_source": "product_record",
             "match_status": None,
             "match_method": None,
             "mapping_source": "legacy_product",
@@ -99,6 +102,7 @@ def resolve_supplier_context(product: Product) -> dict:
             **missing_supplier_context(),
             "supplier_name": product.supplier,
             "minimum_order_quantity_used": product.min_order_qty,
+            "moq_source": "product_record",
             "mapping_source": "legacy_product",
         }
 
@@ -124,11 +128,12 @@ def select_product_supplier(product: Product) -> ProductSupplier | None:
 def product_supplier_context(product: Product, product_supplier: ProductSupplier) -> dict:
     supplier = product_supplier.supplier
     lead_time_days, lead_time_source = resolve_lead_time(product, product_supplier)
-    minimum_order_quantity = (
-        product_supplier.minimum_order_quantity
-        if product_supplier.minimum_order_quantity is not None
-        else product.min_order_qty
-    )
+    if product_supplier.minimum_order_quantity is not None:
+        minimum_order_quantity = product_supplier.minimum_order_quantity
+        moq_source = "product_supplier"
+    else:
+        minimum_order_quantity = product.min_order_qty
+        moq_source = "product_record"
 
     return {
         "supplier_id": product_supplier.supplier_id,
@@ -139,6 +144,7 @@ def product_supplier_context(product: Product, product_supplier: ProductSupplier
         "purchase_price": product_supplier.purchase_price,
         "currency": product_supplier.currency,
         "minimum_order_quantity_used": minimum_order_quantity,
+        "moq_source": moq_source,
         "match_status": product_supplier.match_status,
         "match_method": product_supplier.match_method,
         "mapping_source": "product_supplier",
@@ -170,6 +176,7 @@ def missing_supplier_context() -> dict:
         "purchase_price": None,
         "currency": None,
         "minimum_order_quantity_used": 0,
+        "moq_source": "missing",
         "match_status": None,
         "match_method": None,
         "mapping_source": "missing",
@@ -204,6 +211,29 @@ def resolve_inventory_context(product: Product) -> dict:
     }
 
 
+def build_supplier_context_response(supplier_ctx: dict) -> dict:
+    mapping_source = supplier_ctx["mapping_source"]
+    has_supplier_mapping = mapping_source != "missing" and supplier_ctx["supplier_name"] is not None
+
+    return {
+        "supplier_id": supplier_ctx["supplier_id"],
+        "supplier_name": supplier_ctx["supplier_name"],
+        "supplier_sku": supplier_ctx["supplier_sku"],
+        "supplier_product_name": supplier_ctx["supplier_product_name"],
+        "purchase_price": supplier_ctx["purchase_price"],
+        "currency": supplier_ctx["currency"],
+        "lead_time_days": supplier_ctx["lead_time_days_used"],
+        "lead_time_source": supplier_ctx["lead_time_source"],
+        "minimum_order_quantity": supplier_ctx["minimum_order_quantity_used"],
+        "moq_source": supplier_ctx["moq_source"],
+        "match_status": supplier_ctx["match_status"],
+        "match_method": supplier_ctx["match_method"],
+        "mapping_source": mapping_source,
+        "has_supplier_mapping": has_supplier_mapping,
+        "needs_supplier_mapping": mapping_source == "missing",
+    }
+
+
 def build_forecast(db: Session, product: Product) -> dict:
     if product.is_non_inventory:
         return {
@@ -217,6 +247,23 @@ def build_forecast(db: Session, product: Product) -> dict:
             "matched_sku": None,
             "lead_time_days_used": 0,
             "lead_time_source": "not_applicable",
+            "supplier_context": {
+                "supplier_id": None,
+                "supplier_name": None,
+                "supplier_sku": None,
+                "supplier_product_name": None,
+                "purchase_price": None,
+                "currency": None,
+                "lead_time_days": 0,
+                "lead_time_source": "not_applicable",
+                "minimum_order_quantity": 0,
+                "moq_source": "not_applicable",
+                "match_status": None,
+                "match_method": None,
+                "mapping_source": "not_applicable",
+                "has_supplier_mapping": False,
+                "needs_supplier_mapping": False,
+            },
             "reorder_point": 0.0,
             "recommended_action": "ignore",
             "recommended_qty": 0.0,
@@ -305,6 +352,7 @@ def build_forecast(db: Session, product: Product) -> dict:
         "matched_sku": supplier_ctx["matched_sku"],
         "lead_time_days_used": lead_time_days_used,
         "lead_time_source": supplier_ctx["lead_time_source"],
+        "supplier_context": build_supplier_context_response(supplier_ctx),
         "reorder_point": reorder_point,
         "recommended_action": recommended_action,
         "recommended_qty": recommended_qty,
