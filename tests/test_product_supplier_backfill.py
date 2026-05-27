@@ -105,29 +105,42 @@ def test_backfill_apply_inserts_only_eligible_matched_rows(monkeypatch, session_
     assert mapping.created_at == mapping.updated_at
 
 
-def test_backfill_apply_does_not_duplicate_existing_rows(monkeypatch, session_factory, db_session):
+def test_backfill_apply_updates_existing_rows_without_duplication(monkeypatch, session_factory, db_session):
     product, supplier = _seed_product_and_supplier(db_session)
     db_session.add_all(
         [
-            ProductMasterItem(
-                sku="SKU-1",
-                name="Widget Supplier Name",
-                product_id=product.id,
-                supplier_id=supplier.id,
-                match_status="matched",
-            ),
-            ProductSupplier(
-                product_id=product.id,
-                supplier_id=supplier.id,
-                supplier_sku="SKU-1",
-                supplier_product_name="Already Exists",
-            ),
-        ]
-    )
+                ProductMasterItem(
+                    sku="SKU-1",
+                    name="Widget Supplier Name",
+                    product_id=product.id,
+                    supplier_id=supplier.id,
+                    cost_price=6.75,
+                    match_status="matched",
+                    match_method="exact_sku",
+                ),
+                ProductSupplier(
+                    product_id=product.id,
+                    supplier_id=supplier.id,
+                    supplier_sku="SKU-1",
+                    supplier_product_name="Already Exists",
+                    is_preferred=True,
+                    minimum_order_quantity=10,
+                    pack_size=5,
+                    lead_time_days=4,
+                ),
+            ]
+        )
     db_session.commit()
 
     _run_backfill(monkeypatch, session_factory, "--apply")
 
     mappings = db_session.query(ProductSupplier).all()
     assert len(mappings) == 1
-    assert mappings[0].supplier_product_name == "Already Exists"
+    assert mappings[0].supplier_product_name == "Widget Supplier Name"
+    assert mappings[0].purchase_price == 6.75
+    assert mappings[0].match_status == "matched"
+    assert mappings[0].match_method == "exact_sku"
+    assert mappings[0].is_preferred is True
+    assert mappings[0].minimum_order_quantity == 10
+    assert mappings[0].pack_size == 5
+    assert mappings[0].lead_time_days == 4
