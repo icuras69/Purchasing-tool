@@ -64,3 +64,40 @@ export interface WeakMapping {
   match_method?: string | null;
   match_confidence?: number | null;
 }
+
+export interface ForecastSupplierContext {
+  supplier_id: number | null;
+  supplier_name: string | null;
+  supplier_sku: string | null;
+  supplier_product_name: string | null;
+  purchase_price: number | null;
+  currency: string | null;
+  lead_time_days: number;
+  lead_time_source: string;
+  minimum_order_quantity: number;
+  moq_source: string;
+  match_status: string | null;
+  match_method: string | null;
+  mapping_source: string;
+  has_supplier_mapping: boolean;
+  needs_supplier_mapping: boolean;
+}
+
+export interface ForecastResponse {
+  product_id: number;
+  product_name: string;
+  current_stock: number;
+  inventory_source: string;
+  avg_daily_usage: number;
+  days_until_stockout: number | null;
+  supplier_name: string | null;
+  matched_sku: string | null;
+  lead_time_days_used: number;
+  lead_time_source: string;
+  supplier_context?: ForecastSupplierContext | null;
+  reorder_point: number;
+  recommended_action: string;
+  recommended_qty: number;
+  risk_level: string;
+  explanation: string;
+}

@@ -1,14 +1,15 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+  fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
 } from "./api";
 import { productMatchesQuery, supplierDisplayName } from "./productDisplay";
-import type { Product, ProductSupplierMapping, WeakMapping } from "./types";
+import type { ForecastResponse, ForecastSupplierContext, Product, ProductSupplierMapping, WeakMapping } from "./types";
 
-type TabId = "products" | "unmapped" | "weak" | "mappings";
+type TabId = "products" | "unmapped" | "weak" | "mappings" | "forecast";
 
 interface ResourceState<T> {
   data: T[];
@@ -21,6 +22,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "unmapped", label: "Unmapped Products" },
   { id: "weak", label: "Weak Mappings" },
   { id: "mappings", label: "Supplier Mappings" },
+  { id: "forecast", label: "Forecast" },
 ];
 
 function initialResource<T>(): ResourceState<T> {
@@ -43,6 +45,22 @@ function formatPrice(mapping: Pick<ProductSupplierMapping, "purchase_price" | "c
     return "-";
   }
   return `${mapping.purchase_price}${mapping.currency ? ` ${mapping.currency}` : ""}`;
+}
+
+function mappingSourceLabel(mappingSource: string | null | undefined): string {
+  if (mappingSource === "product_supplier") {
+    return "ProductSupplier clean mapping";
+  }
+  if (mappingSource === "product_master_item") {
+    return "ProductMasterItem fallback";
+  }
+  if (mappingSource === "legacy_product") {
+    return "Legacy product fallback";
+  }
+  if (mappingSource === "missing") {
+    return "Missing supplier mapping";
+  }
+  return formatValue(mappingSource);
 }
 
 function formatBoolean(value: boolean): string {
@@ -241,6 +259,8 @@ function App() {
       {activeTab === "mappings" && (
         <SupplierMappingsTable mappings={filteredSupplierMappings} resource={supplierMappings} />
       )}
+
+      {activeTab === "forecast" && <ForecastPanel />}
     </main>
   );
 }
@@ -497,6 +517,195 @@ function SupplierMappingsTable({
         </tbody>
       </table>
       {mappings.length === 0 && <div className="state">No supplier mappings found.</div>}
+    </section>
+  );
+}
+
+function ForecastPanel() {
+  const [productIdInput, setProductIdInput] = useState("");
+  const [forecast, setForecast] = useState<ForecastResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const productId = Number(productIdInput);
+    if (!Number.isInteger(productId) || productId <= 0) {
+      setError("Enter a valid product ID.");
+      setForecast(null);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    fetchProductForecast(productId)
+      .then((loadedForecast) => {
+        setForecast(loadedForecast);
+        setError(null);
+      })
+      .catch((loadError: Error) => {
+        setForecast(null);
+        setError(loadError.message);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }
+
+  return (
+    <section className="forecast-view" aria-label="Product forecast">
+      <form className="forecast-form" onSubmit={handleSubmit}>
+        <label className="search-label">
+          <span>Product ID</span>
+          <input
+            inputMode="numeric"
+            onChange={(event) => setProductIdInput(event.target.value)}
+            placeholder="Enter product ID"
+            value={productIdInput}
+          />
+        </label>
+        <button type="submit">Fetch Forecast</button>
+      </form>
+
+      {!forecast && !loading && !error && (
+        <div className="state">Enter a product ID to load a forecast.</div>
+      )}
+      {loading && <div className="state">Loading forecast...</div>}
+      {error && <div className="state error">Could not load forecast: {error}</div>}
+      {forecast && !loading && !error && <ForecastDetails forecast={forecast} />}
+    </section>
+  );
+}
+
+function ForecastDetails({ forecast }: { forecast: ForecastResponse }) {
+  return (
+    <div className="forecast-grid">
+      <section className="detail-panel" aria-label="Forecast details">
+        <h2>Forecast</h2>
+        <dl className="detail-list">
+          <div>
+            <dt>Product</dt>
+            <dd>
+              {forecast.product_name} ({forecast.product_id})
+            </dd>
+          </div>
+          <div>
+            <dt>Current stock</dt>
+            <dd>{formatValue(forecast.current_stock)}</dd>
+          </div>
+          <div>
+            <dt>Inventory source</dt>
+            <dd>{formatValue(forecast.inventory_source)}</dd>
+          </div>
+          <div>
+            <dt>Average daily usage</dt>
+            <dd>{formatValue(forecast.avg_daily_usage)}</dd>
+          </div>
+          <div>
+            <dt>Days until stockout</dt>
+            <dd>{formatValue(forecast.days_until_stockout)}</dd>
+          </div>
+          <div>
+            <dt>Reorder point</dt>
+            <dd>{formatValue(forecast.reorder_point)}</dd>
+          </div>
+          <div>
+            <dt>Recommended action</dt>
+            <dd>{formatValue(forecast.recommended_action)}</dd>
+          </div>
+          <div>
+            <dt>Recommended quantity</dt>
+            <dd>{formatValue(forecast.recommended_qty)}</dd>
+          </div>
+          <div>
+            <dt>Risk level</dt>
+            <dd>{formatValue(forecast.risk_level)}</dd>
+          </div>
+          <div>
+            <dt>Explanation</dt>
+            <dd>{formatValue(forecast.explanation)}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <SupplierContextDetails context={forecast.supplier_context ?? null} />
+    </div>
+  );
+}
+
+function SupplierContextDetails({ context }: { context: ForecastSupplierContext | null }) {
+  if (!context) {
+    return (
+      <section className="detail-panel" aria-label="Supplier context">
+        <h2>Supplier Context</h2>
+        <div className="state">No supplier context returned.</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="detail-panel" aria-label="Supplier context">
+      <h2>Supplier Context</h2>
+      {context.needs_supplier_mapping && (
+        <div className="state warning">
+          This product needs supplier mapping before purchasing recommendations can be trusted.
+        </div>
+      )}
+      <dl className="detail-list">
+        <div>
+          <dt>Selected supplier</dt>
+          <dd>{formatValue(context.supplier_name)}</dd>
+        </div>
+        <div>
+          <dt>Supplier ID</dt>
+          <dd>{formatValue(context.supplier_id)}</dd>
+        </div>
+        <div>
+          <dt>Supplier SKU</dt>
+          <dd>{formatValue(context.supplier_sku)}</dd>
+        </div>
+        <div>
+          <dt>Supplier product</dt>
+          <dd>{formatValue(context.supplier_product_name)}</dd>
+        </div>
+        <div>
+          <dt>Purchase price</dt>
+          <dd>{formatPrice(context)}</dd>
+        </div>
+        <div>
+          <dt>Lead time</dt>
+          <dd>
+            {formatValue(context.lead_time_days)} ({formatValue(context.lead_time_source)})
+          </dd>
+        </div>
+        <div>
+          <dt>MOQ</dt>
+          <dd>
+            {formatValue(context.minimum_order_quantity)} ({formatValue(context.moq_source)})
+          </dd>
+        </div>
+        <div>
+          <dt>Match status</dt>
+          <dd>{formatValue(context.match_status)}</dd>
+        </div>
+        <div>
+          <dt>Match method</dt>
+          <dd>{formatValue(context.match_method)}</dd>
+        </div>
+        <div>
+          <dt>Mapping source</dt>
+          <dd>{mappingSourceLabel(context.mapping_source)}</dd>
+        </div>
+        <div>
+          <dt>Has supplier mapping</dt>
+          <dd>{formatBoolean(context.has_supplier_mapping)}</dd>
+        </div>
+        <div>
+          <dt>Needs supplier mapping</dt>
+          <dd>{formatBoolean(context.needs_supplier_mapping)}</dd>
+        </div>
+      </dl>
     </section>
   );
 }

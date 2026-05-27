@@ -1,4 +1,4 @@
-import type { Product, ProductSupplierMapping, WeakMapping } from "./types";
+import type { ForecastResponse, Product, ProductSupplierMapping, WeakMapping } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -29,4 +29,8 @@ export function fetchWeakMappings(): Promise<WeakMapping[]> {
 
 export function fetchProductSuppliers(): Promise<ProductSupplierMapping[]> {
   return fetchJson<ProductSupplierMapping[]>("/product-suppliers/", "supplier mappings");
+}
+
+export function fetchProductForecast(productId: number): Promise<ForecastResponse> {
+  return fetchJson<ForecastResponse>(`/products/${productId}/forecast`, "product forecast");
 }
