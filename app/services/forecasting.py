@@ -110,7 +110,11 @@ def resolve_supplier_context(product: Product) -> dict:
 
 
 def select_product_supplier(product: Product) -> ProductSupplier | None:
-    mappings = list(product.product_suppliers)
+    mappings = [
+        mapping
+        for mapping in product.product_suppliers
+        if mapping.match_status != "rejected"
+    ]
     if not mappings:
         return None
 

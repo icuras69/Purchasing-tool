@@ -3,6 +3,34 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class ProductSupplierCreate(BaseModel):
+    product_id: int
+    supplier_id: int
+    supplier_sku: str | None = None
+    supplier_product_name: str | None = None
+    purchase_price: float | None = None
+    currency: str | None = None
+    minimum_order_quantity: float | None = None
+    pack_size: float | None = None
+    lead_time_days: int | None = None
+    match_status: str | None = None
+    match_method: str | None = None
+    match_confidence: float | None = None
+
+
+class ProductSupplierUpdate(BaseModel):
+    supplier_sku: str | None = None
+    supplier_product_name: str | None = None
+    purchase_price: float | None = None
+    currency: str | None = None
+    minimum_order_quantity: float | None = None
+    pack_size: float | None = None
+    lead_time_days: int | None = None
+    match_status: str | None = None
+    match_method: str | None = None
+    match_confidence: float | None = None
+
+
 class ProductSupplierMappingResponse(BaseModel):
     id: int
     product_id: int

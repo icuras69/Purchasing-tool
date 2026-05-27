@@ -112,3 +112,191 @@ def test_weak_mappings_endpoint(client, db_session):
     assert reasons_by_product[low_conf_product.id] == "match_confidence_below_threshold"
     assert any(item["mapping_id"] == weak_mapping.id for item in payload)
     assert any(item["mapping_id"] == low_conf_mapping.id for item in payload)
+
+
+def test_create_manual_product_supplier_mapping(client, db_session):
+    product = Product(name="Manual Product", current_stock=0)
+    supplier = Supplier(name="Manual Supplier", normalized_name="MANUAL SUPPLIER")
+    db_session.add_all([product, supplier])
+    db_session.commit()
+
+    response = client.post(
+        "/product-suppliers",
+        json={
+            "product_id": product.id,
+            "supplier_id": supplier.id,
+            "supplier_sku": "MANUAL-SKU",
+            "supplier_product_name": "Manual Supplier Product",
+            "purchase_price": 15.5,
+            "currency": "USD",
+            "minimum_order_quantity": 3,
+            "pack_size": 2,
+            "lead_time_days": 5,
+            "match_status": "needs_review",
+            "match_method": "manual",
+            "match_confidence": 1,
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["product_id"] == product.id
+    assert payload["supplier_id"] == supplier.id
+    assert payload["supplier_sku"] == "MANUAL-SKU"
+    assert payload["supplier_product_name"] == "Manual Supplier Product"
+    assert payload["purchase_price"] == 15.5
+    assert payload["currency"] == "USD"
+    assert payload["minimum_order_quantity"] == 3
+    assert payload["pack_size"] == 2
+    assert payload["lead_time_days"] == 5
+    assert payload["is_preferred"] is False
+    assert payload["match_status"] == "needs_review"
+    assert payload["match_method"] == "manual"
+
+
+def test_duplicate_product_supplier_mapping_is_rejected(client, db_session):
+    product, supplier, _mapping = _seed_mapping(db_session)
+
+    response = client.post(
+        "/product-suppliers",
+        json={
+            "product_id": product.id,
+            "supplier_id": supplier.id,
+            "supplier_sku": f"SKU-{product.id}",
+        },
+    )
+
+    assert response.status_code == 409
+
+
+def test_update_product_supplier_safe_commercial_fields(client, db_session):
+    _product, _supplier, mapping = _seed_mapping(db_session, is_preferred=True)
+
+    response = client.patch(
+        f"/product-suppliers/{mapping.id}",
+        json={
+            "supplier_product_name": "Updated Supplier Product",
+            "purchase_price": 22.25,
+            "currency": "EUR",
+            "minimum_order_quantity": 7,
+            "pack_size": 4,
+            "lead_time_days": 9,
+            "match_status": "confirmed",
+            "match_method": "manual_review",
+            "match_confidence": 0.99,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["supplier_product_name"] == "Updated Supplier Product"
+    assert payload["purchase_price"] == 22.25
+    assert payload["currency"] == "EUR"
+    assert payload["minimum_order_quantity"] == 7
+    assert payload["pack_size"] == 4
+    assert payload["lead_time_days"] == 9
+    assert payload["match_status"] == "confirmed"
+    assert payload["match_method"] == "manual_review"
+    assert payload["match_confidence"] == 0.99
+    assert payload["is_preferred"] is True
+
+
+def test_set_preferred_unsets_other_product_mappings(client, db_session):
+    product = Product(name="Preferred Product", current_stock=0)
+    supplier_a = Supplier(name="Supplier A Preferred", normalized_name="SUPPLIER A PREFERRED")
+    supplier_b = Supplier(name="Supplier B Preferred", normalized_name="SUPPLIER B PREFERRED")
+    db_session.add_all([product, supplier_a, supplier_b])
+    db_session.flush()
+    mapping_a = ProductSupplier(
+        product_id=product.id,
+        supplier_id=supplier_a.id,
+        supplier_sku="PREF-A",
+        is_preferred=True,
+        match_status="matched",
+    )
+    mapping_b = ProductSupplier(
+        product_id=product.id,
+        supplier_id=supplier_b.id,
+        supplier_sku="PREF-B",
+        is_preferred=False,
+        match_status="matched",
+    )
+    db_session.add_all([mapping_a, mapping_b])
+    db_session.commit()
+
+    response = client.post(f"/product-suppliers/{mapping_b.id}/set-preferred")
+
+    assert response.status_code == 200
+    assert response.json()["is_preferred"] is True
+    db_session.refresh(mapping_a)
+    db_session.refresh(mapping_b)
+    assert mapping_a.is_preferred is False
+    assert mapping_b.is_preferred is True
+
+
+def test_cannot_set_rejected_mapping_as_preferred(client, db_session):
+    _product, _supplier, mapping = _seed_mapping(db_session, match_status="rejected")
+
+    response = client.post(f"/product-suppliers/{mapping.id}/set-preferred")
+
+    assert response.status_code == 400
+
+
+def test_confirm_mapping_sets_status_confirmed(client, db_session):
+    _product, _supplier, mapping = _seed_mapping(db_session, match_status="needs_review")
+
+    response = client.post(f"/product-suppliers/{mapping.id}/confirm")
+
+    assert response.status_code == 200
+    assert response.json()["match_status"] == "confirmed"
+
+
+def test_reject_mapping_sets_status_rejected_and_unsets_preferred(client, db_session):
+    _product, _supplier, mapping = _seed_mapping(
+        db_session,
+        match_status="matched",
+        is_preferred=True,
+    )
+
+    response = client.post(f"/product-suppliers/{mapping.id}/reject")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["match_status"] == "rejected"
+    assert payload["is_preferred"] is False
+
+
+def test_forecast_respects_preferred_mapping_after_preference_change(client, db_session):
+    product = Product(name="Forecast Preference Product", current_stock=10)
+    supplier_a = Supplier(name="Forecast Supplier A", normalized_name="FORECAST SUPPLIER A")
+    supplier_b = Supplier(name="Forecast Supplier B", normalized_name="FORECAST SUPPLIER B")
+    db_session.add_all([product, supplier_a, supplier_b])
+    db_session.flush()
+    mapping_a = ProductSupplier(
+        product_id=product.id,
+        supplier_id=supplier_a.id,
+        supplier_sku="FORECAST-A",
+        is_preferred=True,
+        match_status="matched",
+        lead_time_days=3,
+    )
+    mapping_b = ProductSupplier(
+        product_id=product.id,
+        supplier_id=supplier_b.id,
+        supplier_sku="FORECAST-B",
+        is_preferred=False,
+        match_status="matched",
+        lead_time_days=4,
+    )
+    db_session.add_all([mapping_a, mapping_b])
+    db_session.commit()
+
+    set_response = client.post(f"/product-suppliers/{mapping_b.id}/set-preferred")
+    forecast_response = client.get(f"/products/{product.id}/forecast")
+
+    assert set_response.status_code == 200
+    assert forecast_response.status_code == 200
+    context = forecast_response.json()["supplier_context"]
+    assert context["supplier_id"] == supplier_b.id
+    assert context["supplier_name"] == "Forecast Supplier B"
+    assert context["supplier_sku"] == "FORECAST-B"
