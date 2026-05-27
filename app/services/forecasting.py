@@ -3,6 +3,7 @@ from math import ceil
 from sqlalchemy.orm import Session
 
 from app.models.product import Product
+from app.models.product_supplier import ProductSupplier
 from app.models.usage_history import UsageHistory
 
 
@@ -30,39 +31,148 @@ def calculate_avg_daily_usage(db: Session, product_id: int) -> float:
 
 
 def resolve_supplier_context(product: Product) -> dict:
-    linked_items = [item for item in product.master_items if item.supplier_id and item.supplier]
+    product_supplier = select_product_supplier(product)
+    if product_supplier:
+        return product_supplier_context(product, product_supplier)
 
+    if product.product_suppliers:
+        return missing_supplier_context()
+
+    linked_items = [item for item in product.master_items if item.supplier_id and item.supplier]
     preferred = None
     if linked_items:
         preferred = next((item for item in linked_items if item.match_status == "matched"), linked_items[0])
 
     if preferred and preferred.supplier and preferred.supplier.lead_time_days is not None:
         return {
+            "supplier_id": preferred.supplier_id,
             "supplier_name": preferred.supplier.name,
             "matched_sku": preferred.sku,
+            "supplier_sku": preferred.sku,
+            "supplier_product_name": preferred.name,
+            "purchase_price": preferred.cost_price,
+            "currency": None,
+            "minimum_order_quantity_used": product.min_order_qty,
+            "match_status": preferred.match_status,
+            "match_method": preferred.match_method,
+            "mapping_source": "product_master_item",
             "lead_time_days_used": int(preferred.supplier.lead_time_days),
             "lead_time_source": "supplier_master",
         }
 
     if preferred and preferred.supplier:
         return {
+            "supplier_id": preferred.supplier_id,
             "supplier_name": preferred.supplier.name,
             "matched_sku": preferred.sku,
+            "supplier_sku": preferred.sku,
+            "supplier_product_name": preferred.name,
+            "purchase_price": preferred.cost_price,
+            "currency": None,
+            "minimum_order_quantity_used": product.min_order_qty,
+            "match_status": preferred.match_status,
+            "match_method": preferred.match_method,
+            "mapping_source": "product_master_item",
             "lead_time_days_used": 0,
             "lead_time_source": "supplier_missing_lead_time",
         }
 
     if product.lead_time_days and product.lead_time_days > 0:
         return {
+            "supplier_id": None,
             "supplier_name": product.supplier,
             "matched_sku": None,
+            "supplier_sku": None,
+            "supplier_product_name": None,
+            "purchase_price": None,
+            "currency": None,
+            "minimum_order_quantity_used": product.min_order_qty,
+            "match_status": None,
+            "match_method": None,
+            "mapping_source": "legacy_product",
             "lead_time_days_used": int(product.lead_time_days),
             "lead_time_source": "product_record",
         }
 
+    if product.supplier:
+        return {
+            **missing_supplier_context(),
+            "supplier_name": product.supplier,
+            "minimum_order_quantity_used": product.min_order_qty,
+            "mapping_source": "legacy_product",
+        }
+
+    return missing_supplier_context()
+
+
+def select_product_supplier(product: Product) -> ProductSupplier | None:
+    mappings = list(product.product_suppliers)
+    if not mappings:
+        return None
+
+    preferred = next((mapping for mapping in mappings if mapping.is_preferred), None)
+    if preferred:
+        return preferred
+
+    matched = [mapping for mapping in mappings if mapping.match_status == "matched"]
+    if matched:
+        return sorted(matched, key=lambda mapping: mapping.id or 0)[0]
+
+    return None
+
+
+def product_supplier_context(product: Product, product_supplier: ProductSupplier) -> dict:
+    supplier = product_supplier.supplier
+    lead_time_days, lead_time_source = resolve_lead_time(product, product_supplier)
+    minimum_order_quantity = (
+        product_supplier.minimum_order_quantity
+        if product_supplier.minimum_order_quantity is not None
+        else product.min_order_qty
+    )
+
     return {
+        "supplier_id": product_supplier.supplier_id,
+        "supplier_name": supplier.name if supplier else None,
+        "matched_sku": product_supplier.supplier_sku,
+        "supplier_sku": product_supplier.supplier_sku,
+        "supplier_product_name": product_supplier.supplier_product_name,
+        "purchase_price": product_supplier.purchase_price,
+        "currency": product_supplier.currency,
+        "minimum_order_quantity_used": minimum_order_quantity,
+        "match_status": product_supplier.match_status,
+        "match_method": product_supplier.match_method,
+        "mapping_source": "product_supplier",
+        "lead_time_days_used": lead_time_days,
+        "lead_time_source": lead_time_source,
+    }
+
+
+def resolve_lead_time(product: Product, product_supplier: ProductSupplier) -> tuple[int, str]:
+    if product_supplier.lead_time_days is not None:
+        return int(product_supplier.lead_time_days), "product_supplier"
+
+    if product_supplier.supplier and product_supplier.supplier.lead_time_days is not None:
+        return int(product_supplier.supplier.lead_time_days), "supplier_master"
+
+    if product.lead_time_days and product.lead_time_days > 0:
+        return int(product.lead_time_days), "product_record"
+
+    return 0, "missing"
+
+
+def missing_supplier_context() -> dict:
+    return {
+        "supplier_id": None,
         "supplier_name": None,
         "matched_sku": None,
+        "supplier_sku": None,
+        "supplier_product_name": None,
+        "purchase_price": None,
+        "currency": None,
+        "minimum_order_quantity_used": 0,
+        "match_status": None,
+        "match_method": None,
+        "mapping_source": "missing",
         "lead_time_days_used": 0,
         "lead_time_source": "missing",
     }
@@ -120,6 +230,7 @@ def build_forecast(db: Session, product: Product) -> dict:
 
     current_stock = inventory_ctx["current_stock"]
     lead_time_days_used = supplier_ctx["lead_time_days_used"]
+    minimum_order_quantity_used = supplier_ctx["minimum_order_quantity_used"]
 
     reorder_point = round(
         calculate_reorder_point(avg_daily_usage, lead_time_days_used, product.safety_stock),
@@ -158,7 +269,7 @@ def build_forecast(db: Session, product: Product) -> dict:
     elif current_stock <= reorder_point:
         recommended_action = "order_now"
         raw_qty = ((lead_time_days_used + 7) * avg_daily_usage) - current_stock
-        recommended_qty = max(raw_qty, product.min_order_qty, 0)
+        recommended_qty = max(raw_qty, minimum_order_quantity_used, 0)
         risk_level = "high"
         explanation = (
             f"Current stock is at or below the reorder point. "
@@ -168,7 +279,7 @@ def build_forecast(db: Session, product: Product) -> dict:
     elif days_until_stockout is not None and days_until_stockout <= lead_time_days_used + 2:
         recommended_action = "order_soon"
         raw_qty = ((lead_time_days_used + 7) * avg_daily_usage) - current_stock
-        recommended_qty = max(raw_qty, product.min_order_qty, 0)
+        recommended_qty = max(raw_qty, minimum_order_quantity_used, 0)
         risk_level = "medium"
         explanation = (
             f"Stock is above the reorder point but may run out soon. "
