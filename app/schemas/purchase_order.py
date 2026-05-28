@@ -21,6 +21,10 @@ class PurchaseOrderLineUpdate(BaseModel):
     notes: str | None = None
 
 
+class PurchaseOrderApprove(BaseModel):
+    approved_by: str | None = None
+
+
 class PurchaseOrderLineResponse(BaseModel):
     id: int
     purchase_order_id: int
@@ -47,6 +51,7 @@ class PurchaseOrderResponse(BaseModel):
     updated_at: datetime
     approved_at: datetime | None
     issued_at: datetime | None
+    received_at: datetime | None
     cancelled_at: datetime | None
     notes: str | None
     total_amount: float | None

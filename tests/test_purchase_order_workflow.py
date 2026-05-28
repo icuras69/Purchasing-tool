@@ -54,6 +54,27 @@ def add_line(client, po_id: int, product_supplier_id: int, quantity: float = 6) 
     return response.json()
 
 
+def submit_po(client, po_id: int) -> dict:
+    response = client.post(f"/purchase-orders/{po_id}/submit-for-approval")
+    assert response.status_code == 200
+    return response.json()
+
+
+def approve_po(client, po_id: int, approved_by: str = "manager") -> dict:
+    response = client.post(
+        f"/purchase-orders/{po_id}/approve",
+        json={"approved_by": approved_by},
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def issue_po(client, po_id: int) -> dict:
+    response = client.post(f"/purchase-orders/{po_id}/issue")
+    assert response.status_code == 200
+    return response.json()
+
+
 def test_create_draft_purchase_order(client, db_session):
     _product, supplier, _mapping = seed_product_supplier(db_session)
 
@@ -66,6 +87,7 @@ def test_create_draft_purchase_order(client, db_session):
     assert payload["created_by"] == "tester"
     assert payload["approved_at"] is None
     assert payload["issued_at"] is None
+    assert payload["received_at"] is None
     assert payload["cancelled_at"] is None
     assert payload["lines"] == []
 
@@ -157,6 +179,107 @@ def test_submit_draft_purchase_order_for_approval(client, db_session):
     assert response.json()["status"] == "pending_approval"
 
 
+def test_cannot_approve_draft_purchase_order_directly(client, db_session):
+    _product, supplier, _mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+
+    response = client.post(
+        f"/purchase-orders/{po['id']}/approve",
+        json={"approved_by": "manager"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Only pending approval purchase orders can be approved."
+
+
+def test_can_approve_pending_purchase_order_with_lines(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+
+    response = client.post(
+        f"/purchase-orders/{po['id']}/approve",
+        json={"approved_by": "manager"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "approved"
+    assert payload["approved_at"] is not None
+    assert payload["approved_by"] == "manager"
+
+
+def test_cannot_approve_purchase_order_with_zero_lines(client, db_session):
+    _product, supplier, _mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    submit_po(client, po["id"])
+
+    response = client.post(
+        f"/purchase-orders/{po['id']}/approve",
+        json={"approved_by": "manager"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Cannot approve a purchase order with no lines."
+
+
+def test_cannot_issue_purchase_order_before_approval(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+
+    response = client.post(f"/purchase-orders/{po['id']}/issue")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Only approved purchase orders can be issued."
+
+
+def test_can_issue_approved_purchase_order(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+    approve_po(client, po["id"])
+
+    response = client.post(f"/purchase-orders/{po['id']}/issue")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "issued"
+    assert payload["issued_at"] is not None
+
+
+def test_cannot_receive_purchase_order_before_issue(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+    approve_po(client, po["id"])
+
+    response = client.post(f"/purchase-orders/{po['id']}/receive")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Only issued purchase orders can be received."
+
+
+def test_can_receive_issued_purchase_order(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+    approve_po(client, po["id"])
+    issue_po(client, po["id"])
+
+    response = client.post(f"/purchase-orders/{po['id']}/receive")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "received"
+    assert payload["received_at"] is not None
+
+
 def test_cancel_draft_purchase_order(client, db_session):
     _product, supplier, _mapping = seed_product_supplier(db_session)
     po = create_po(client, supplier.id)
@@ -166,6 +289,44 @@ def test_cancel_draft_purchase_order(client, db_session):
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"
     assert response.json()["cancelled_at"] is not None
+
+
+def test_can_cancel_approved_purchase_order_before_issue(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+    approve_po(client, po["id"])
+
+    response = client.post(f"/purchase-orders/{po['id']}/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["cancelled_at"] is not None
+
+
+def test_cannot_cancel_issued_or_received_purchase_order(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+    approve_po(client, po["id"])
+    issue_po(client, po["id"])
+
+    issued_cancel_response = client.post(f"/purchase-orders/{po['id']}/cancel")
+    receive_response = client.post(f"/purchase-orders/{po['id']}/receive")
+    received_cancel_response = client.post(f"/purchase-orders/{po['id']}/cancel")
+
+    assert issued_cancel_response.status_code == 400
+    assert issued_cancel_response.json()["detail"] == (
+        "Only draft, pending approval, or approved purchase orders can be cancelled."
+    )
+    assert receive_response.status_code == 200
+    assert receive_response.json()["status"] == "received"
+    assert received_cancel_response.status_code == 400
+    assert received_cancel_response.json()["detail"] == (
+        "Only draft, pending approval, or approved purchase orders can be cancelled."
+    )
 
 
 def test_cannot_edit_lines_after_purchase_order_is_not_draft(client, db_session):

@@ -8,6 +8,7 @@ from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.product_supplier import ProductSupplier
 from app.models.supplier import Supplier
 from app.schemas.purchase_order import (
+    PurchaseOrderApprove,
     PurchaseOrderCreate,
     PurchaseOrderLineCreate,
     PurchaseOrderLineResponse,
@@ -19,6 +20,9 @@ router = APIRouter(prefix="/purchase-orders", tags=["purchase-orders"])
 
 DRAFT = "draft"
 PENDING_APPROVAL = "pending_approval"
+APPROVED = "approved"
+ISSUED = "issued"
+RECEIVED = "received"
 CANCELLED = "cancelled"
 REJECTED_MAPPING = "rejected"
 
@@ -52,6 +56,7 @@ def serialize_purchase_order(po: PurchaseOrder) -> dict:
         "updated_at": po.updated_at,
         "approved_at": po.approved_at,
         "issued_at": po.issued_at,
+        "received_at": po.received_at,
         "cancelled_at": po.cancelled_at,
         "notes": po.notes,
         "total_amount": po.total_amount,
@@ -235,13 +240,63 @@ def submit_purchase_order_for_approval(po_id: int, db: Session = Depends(get_db)
     return serialize_purchase_order(load_purchase_order(db, po.id))
 
 
+@router.post("/{po_id}/approve", response_model=PurchaseOrderResponse)
+def approve_purchase_order(
+    po_id: int,
+    payload: PurchaseOrderApprove | None = None,
+    db: Session = Depends(get_db),
+):
+    po = load_purchase_order(db, po_id)
+    if po.status != PENDING_APPROVAL:
+        raise HTTPException(status_code=400, detail="Only pending approval purchase orders can be approved.")
+    if not po.lines:
+        raise HTTPException(status_code=400, detail="Cannot approve a purchase order with no lines.")
+
+    now = datetime.utcnow()
+    po.status = APPROVED
+    po.approved_at = now
+    po.updated_at = now
+    if payload and payload.approved_by is not None:
+        po.approved_by = payload.approved_by
+    db.commit()
+    return serialize_purchase_order(load_purchase_order(db, po.id))
+
+
+@router.post("/{po_id}/issue", response_model=PurchaseOrderResponse)
+def issue_purchase_order(po_id: int, db: Session = Depends(get_db)):
+    po = load_purchase_order(db, po_id)
+    if po.status != APPROVED:
+        raise HTTPException(status_code=400, detail="Only approved purchase orders can be issued.")
+
+    now = datetime.utcnow()
+    po.status = ISSUED
+    po.issued_at = now
+    po.updated_at = now
+    db.commit()
+    return serialize_purchase_order(load_purchase_order(db, po.id))
+
+
+@router.post("/{po_id}/receive", response_model=PurchaseOrderResponse)
+def receive_purchase_order(po_id: int, db: Session = Depends(get_db)):
+    po = load_purchase_order(db, po_id)
+    if po.status != ISSUED:
+        raise HTTPException(status_code=400, detail="Only issued purchase orders can be received.")
+
+    now = datetime.utcnow()
+    po.status = RECEIVED
+    po.received_at = now
+    po.updated_at = now
+    db.commit()
+    return serialize_purchase_order(load_purchase_order(db, po.id))
+
+
 @router.post("/{po_id}/cancel", response_model=PurchaseOrderResponse)
 def cancel_purchase_order(po_id: int, db: Session = Depends(get_db)):
     po = load_purchase_order(db, po_id)
-    if po.status not in {DRAFT, PENDING_APPROVAL}:
+    if po.status not in {DRAFT, PENDING_APPROVAL, APPROVED}:
         raise HTTPException(
             status_code=400,
-            detail="Only draft or pending approval purchase orders can be cancelled.",
+            detail="Only draft, pending approval, or approved purchase orders can be cancelled.",
         )
 
     now = datetime.utcnow()
