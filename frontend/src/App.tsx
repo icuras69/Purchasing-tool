@@ -4,18 +4,24 @@ import {
   addPurchaseOrderLine,
   approvePurchaseOrder,
   cancelPurchaseOrder,
+  acceptRecommendation,
+  convertRecommendationToDraftPO,
   createDraftPurchaseOrderFromProducts,
   createPurchaseOrder,
   createProductSupplier,
+  createReorderRecommendation,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
   getPurchaseOrder,
+  getRecommendation,
   issuePurchaseOrder,
+  listRecommendations,
   listPurchaseOrders,
   receivePurchaseOrder,
+  rejectRecommendation,
   rejectProductSupplier,
   setPreferredProductSupplier,
   submitPurchaseOrderForApproval,
@@ -30,6 +36,7 @@ import type {
   ProductSupplierInput,
   ProductSupplierMapping,
   PurchaseOrder,
+  PurchaseRecommendation,
   AddPurchaseOrderLineRequest,
   CreatePurchaseOrderRequest,
   DraftFromProductsResponse,
@@ -37,7 +44,14 @@ import type {
   WeakMapping,
 } from "./types";
 
-type TabId = "products" | "unmapped" | "weak" | "mappings" | "forecast" | "purchase-orders";
+type TabId =
+  | "products"
+  | "unmapped"
+  | "weak"
+  | "mappings"
+  | "forecast"
+  | "purchase-orders"
+  | "recommendations";
 
 interface ResourceState<T> {
   data: T[];
@@ -52,6 +66,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "mappings", label: "Supplier Mappings" },
   { id: "forecast", label: "Forecast" },
   { id: "purchase-orders", label: "Purchase Orders" },
+  { id: "recommendations", label: "Recommendations" },
 ];
 
 function initialResource<T>(): ResourceState<T> {
@@ -127,6 +142,30 @@ function purchaseOrderStatusClassName(status: string): string {
     return "status rejected";
   }
   return "status mapped";
+}
+
+function recommendationStatusClassName(status: string): string {
+  if (status === "accepted" || status === "converted_to_po") {
+    return "status mapped";
+  }
+  if (status === "rejected") {
+    return "status rejected";
+  }
+  if (status === "pending_review" || status === "draft") {
+    return "status pending-approval";
+  }
+  return "status needs-review";
+}
+
+function snapshotValue(snapshot: Record<string, unknown> | null | undefined, key: string): string {
+  const value = snapshot?.[key];
+  if (typeof value === "string" || typeof value === "number") {
+    return formatValue(value);
+  }
+  if (typeof value === "boolean") {
+    return formatBoolean(value);
+  }
+  return "-";
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -450,6 +489,8 @@ function App() {
       {activeTab === "forecast" && <ForecastPanel />}
 
       {activeTab === "purchase-orders" && <PurchaseOrdersPanel initialPoId={poToViewId} />}
+
+      {activeTab === "recommendations" && <RecommendationsPanel />}
     </main>
   );
 }
@@ -1331,6 +1372,382 @@ function SupplierContextDetails({ context }: { context: ForecastSupplierContext 
           <dd>{formatBoolean(context.needs_supplier_mapping)}</dd>
         </div>
       </dl>
+    </section>
+  );
+}
+
+function RecommendationsPanel() {
+  const [recommendations, setRecommendations] =
+    useState<ResourceState<PurchaseRecommendation>>(initialResource);
+  const [selectedRecommendation, setSelectedRecommendation] =
+    useState<PurchaseRecommendation | null>(null);
+  const [productId, setProductId] = useState("");
+  const [rejectReason, setRejectReason] = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [loadingAction, setLoadingAction] = useState(false);
+
+  const loadRecommendations = useCallback((active = true) => {
+    listRecommendations()
+      .then((loadedRecommendations) => {
+        if (active) {
+          setRecommendations({ data: loadedRecommendations, loading: false, error: null });
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setRecommendations({ data: [], loading: false, error: loadError.message });
+        }
+      });
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    loadRecommendations(active);
+    return () => {
+      active = false;
+    };
+  }, [loadRecommendations]);
+
+  async function refreshSelected(recommendationId: number) {
+    const loaded = await getRecommendation(recommendationId);
+    setSelectedRecommendation(loaded);
+    loadRecommendations();
+  }
+
+  async function handleSelect(recommendationId: number) {
+    setActionError(null);
+    try {
+      await refreshSelected(recommendationId);
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    }
+  }
+
+  async function handleCreateRecommendation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedProductId = Number(productId);
+    if (!Number.isInteger(parsedProductId) || parsedProductId <= 0) {
+      setActionError("Product ID is required.");
+      return;
+    }
+
+    setLoadingAction(true);
+    setActionError(null);
+    try {
+      const created = await createReorderRecommendation(parsedProductId);
+      setSelectedRecommendation(created);
+      loadRecommendations();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setLoadingAction(false);
+    }
+  }
+
+  async function runRecommendationAction(action: () => Promise<PurchaseRecommendation>) {
+    setLoadingAction(true);
+    setActionError(null);
+    try {
+      const updated = await action();
+      setSelectedRecommendation(updated);
+      loadRecommendations();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setLoadingAction(false);
+    }
+  }
+
+  async function handleRejectRecommendation(recommendation: PurchaseRecommendation) {
+    if (!window.confirm("Reject this recommendation?")) {
+      return;
+    }
+    await runRecommendationAction(() =>
+      rejectRecommendation(recommendation.id, {
+        rejected_reason: rejectReason || null,
+        reviewed_by: "manual",
+      }),
+    );
+  }
+
+  async function handleConvertRecommendation(recommendation: PurchaseRecommendation) {
+    if (
+      !window.confirm(
+        "Convert this recommendation to a draft purchase order? This will not approve or issue it.",
+      )
+    ) {
+      return;
+    }
+    setLoadingAction(true);
+    setActionError(null);
+    try {
+      const converted = await convertRecommendationToDraftPO(recommendation.id);
+      setSelectedRecommendation(converted.recommendation);
+      loadRecommendations();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setLoadingAction(false);
+    }
+  }
+
+  return (
+    <div className="review-stack">
+      <section className="detail-panel" aria-label="Create recommendation">
+        <h2>Generate Reorder Recommendation</h2>
+        <div className="state">
+          Recommendations are advisory. Converting a recommendation only creates a draft purchase
+          order. It does not approve or issue it.
+        </div>
+        <form className="mapping-form" onSubmit={handleCreateRecommendation}>
+          <label>
+            <span>Product ID</span>
+            <input onChange={(event) => setProductId(event.target.value)} value={productId} />
+          </label>
+          <button disabled={loadingAction} type="submit">
+            Generate Reorder Recommendation
+          </button>
+        </form>
+        {actionError && <div className="state error">Recommendation action failed: {actionError}</div>}
+      </section>
+
+      <RecommendationsTable
+        onSelect={handleSelect}
+        recommendations={recommendations.data}
+        resource={recommendations}
+        selectedRecommendationId={selectedRecommendation?.id ?? null}
+      />
+
+      {selectedRecommendation ? (
+        <RecommendationDetail
+          loadingAction={loadingAction}
+          onAccept={(recommendation) =>
+            runRecommendationAction(() =>
+              acceptRecommendation(recommendation.id, { reviewed_by: "manual" }),
+            )
+          }
+          onConvert={handleConvertRecommendation}
+          onReject={handleRejectRecommendation}
+          recommendation={selectedRecommendation}
+          rejectReason={rejectReason}
+          onRejectReasonChange={setRejectReason}
+        />
+      ) : (
+        <div className="state">Select a recommendation to view details.</div>
+      )}
+    </div>
+  );
+}
+
+function RecommendationsTable({
+  onSelect,
+  recommendations,
+  resource,
+  selectedRecommendationId,
+}: {
+  onSelect: (recommendationId: number) => void;
+  recommendations: PurchaseRecommendation[];
+  resource: ResourceState<PurchaseRecommendation>;
+  selectedRecommendationId: number | null;
+}) {
+  if (resource.loading) {
+    return <div className="state">Loading recommendations...</div>;
+  }
+  if (resource.error) {
+    return <div className="state error">Could not load recommendations: {resource.error}</div>;
+  }
+
+  return (
+    <section className="table-wrap" aria-label="Recommendations list">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Product</th>
+            <th>Supplier</th>
+            <th>Qty</th>
+            <th>Unit cost</th>
+            <th>Total</th>
+            <th>Currency</th>
+            <th>Confidence</th>
+            <th>Status</th>
+            <th>Generated by</th>
+            <th>Created</th>
+            <th>Converted PO</th>
+            <th>View</th>
+          </tr>
+        </thead>
+        <tbody>
+          {recommendations.map((recommendation) => (
+            <tr key={recommendation.id}>
+              <td>{recommendation.id}</td>
+              <td>
+                {recommendation.product_name ?? "-"} ({recommendation.product_id})
+              </td>
+              <td>{formatValue(recommendation.supplier_name)}</td>
+              <td>{formatValue(recommendation.recommended_quantity)}</td>
+              <td>{formatValue(recommendation.estimated_unit_cost)}</td>
+              <td>{formatValue(recommendation.estimated_total_cost)}</td>
+              <td>{formatValue(recommendation.currency)}</td>
+              <td>{formatValue(recommendation.confidence)}</td>
+              <td>
+                <span className={recommendationStatusClassName(recommendation.status)}>
+                  {recommendation.status}
+                </span>
+              </td>
+              <td>{formatValue(recommendation.generated_by)}</td>
+              <td>{formatDate(recommendation.created_at)}</td>
+              <td>{formatValue(recommendation.converted_purchase_order_id)}</td>
+              <td>
+                <button onClick={() => onSelect(recommendation.id)} type="button">
+                  {selectedRecommendationId === recommendation.id ? "Viewing" : "View"}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {recommendations.length === 0 && <div className="state">No recommendations found.</div>}
+    </section>
+  );
+}
+
+function RecommendationDetail({
+  loadingAction,
+  onAccept,
+  onConvert,
+  onReject,
+  onRejectReasonChange,
+  recommendation,
+  rejectReason,
+}: {
+  loadingAction: boolean;
+  onAccept: (recommendation: PurchaseRecommendation) => void;
+  onConvert: (recommendation: PurchaseRecommendation) => void;
+  onReject: (recommendation: PurchaseRecommendation) => void;
+  onRejectReasonChange: (value: string) => void;
+  recommendation: PurchaseRecommendation;
+  rejectReason: string;
+}) {
+  const canAccept = recommendation.status === "pending_review" || recommendation.status === "draft";
+  const canReject = recommendation.status !== "rejected" && recommendation.status !== "converted_to_po";
+  const canConvert = recommendation.status === "accepted";
+  const supplierSnapshot = recommendation.supplier_context_snapshot;
+  const forecastSnapshot = recommendation.forecast_snapshot;
+
+  return (
+    <section className="detail-panel" aria-label="Recommendation details">
+      <div className="section-header">
+        <h2>Recommendation {recommendation.id}</h2>
+        <div className="action-row">
+          {canAccept && (
+            <button disabled={loadingAction} onClick={() => onAccept(recommendation)} type="button">
+              Accept
+            </button>
+          )}
+          {canReject && (
+            <>
+              <input
+                aria-label="Reject reason"
+                onChange={(event) => onRejectReasonChange(event.target.value)}
+                placeholder="Reject reason"
+                value={rejectReason}
+              />
+              <button disabled={loadingAction} onClick={() => onReject(recommendation)} type="button">
+                Reject
+              </button>
+            </>
+          )}
+          {canConvert && (
+            <button disabled={loadingAction} onClick={() => onConvert(recommendation)} type="button">
+              Convert to Draft PO
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="state warning">
+        Advisory only. Draft purchase orders still require human approval before issuing.
+      </div>
+      <dl className="detail-list">
+        <div>
+          <dt>Status</dt>
+          <dd>
+            <span className={recommendationStatusClassName(recommendation.status)}>
+              {recommendation.status}
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt>Reason</dt>
+          <dd>{formatValue(recommendation.reason)}</dd>
+        </div>
+        <div>
+          <dt>Recommended quantity</dt>
+          <dd>{formatValue(recommendation.recommended_quantity)}</dd>
+        </div>
+        <div>
+          <dt>Estimated cost</dt>
+          <dd>
+            {formatValue(recommendation.estimated_total_cost)} {formatValue(recommendation.currency)}
+          </dd>
+        </div>
+      </dl>
+
+      <section className="nested-panel" aria-label="Recommendation supplier snapshot">
+        <h3>Supplier Context Snapshot</h3>
+        <dl className="detail-list">
+          <div>
+            <dt>Supplier</dt>
+            <dd>{snapshotValue(supplierSnapshot, "supplier_name")}</dd>
+          </div>
+          <div>
+            <dt>Supplier SKU</dt>
+            <dd>{snapshotValue(supplierSnapshot, "supplier_sku")}</dd>
+          </div>
+          <div>
+            <dt>Supplier product</dt>
+            <dd>{snapshotValue(supplierSnapshot, "supplier_product_name")}</dd>
+          </div>
+          <div>
+            <dt>Mapping source</dt>
+            <dd>{snapshotValue(supplierSnapshot, "mapping_source")}</dd>
+          </div>
+          <div>
+            <dt>Lead time</dt>
+            <dd>{snapshotValue(supplierSnapshot, "lead_time_days")}</dd>
+          </div>
+          <div>
+            <dt>MOQ</dt>
+            <dd>{snapshotValue(supplierSnapshot, "minimum_order_quantity")}</dd>
+          </div>
+          <div>
+            <dt>Purchase price</dt>
+            <dd>{snapshotValue(supplierSnapshot, "purchase_price")}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="nested-panel" aria-label="Recommendation forecast snapshot">
+        <h3>Forecast Snapshot</h3>
+        <dl className="detail-list">
+          <div>
+            <dt>Recommended action</dt>
+            <dd>{snapshotValue(forecastSnapshot, "recommended_action")}</dd>
+          </div>
+          <div>
+            <dt>Risk level</dt>
+            <dd>{snapshotValue(forecastSnapshot, "risk_level")}</dd>
+          </div>
+          <div>
+            <dt>Reorder point</dt>
+            <dd>{snapshotValue(forecastSnapshot, "reorder_point")}</dd>
+          </div>
+          <div>
+            <dt>Explanation</dt>
+            <dd>{snapshotValue(forecastSnapshot, "explanation")}</dd>
+          </div>
+        </dl>
+      </section>
     </section>
   );
 }

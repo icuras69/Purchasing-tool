@@ -9,6 +9,10 @@ import type {
   ProductSupplierInput,
   ProductSupplierMapping,
   PurchaseOrder,
+  PurchaseRecommendation,
+  RecommendationAcceptRequest,
+  RecommendationConvertResponse,
+  RecommendationRejectRequest,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
@@ -221,4 +225,61 @@ export function cancelPurchaseOrder(poId: number): Promise<PurchaseOrder> {
   return sendJson<PurchaseOrder>(`/purchase-orders/${poId}/cancel`, "purchase order", {
     method: "POST",
   });
+}
+
+export function listRecommendations(): Promise<PurchaseRecommendation[]> {
+  return fetchJson<PurchaseRecommendation[]>("/recommendations", "recommendations");
+}
+
+export function getRecommendation(recommendationId: number): Promise<PurchaseRecommendation> {
+  return fetchJson<PurchaseRecommendation>(
+    `/recommendations/${recommendationId}`,
+    "recommendation",
+  );
+}
+
+export function createReorderRecommendation(productId: number): Promise<PurchaseRecommendation> {
+  return sendJson<PurchaseRecommendation>(
+    `/recommendations/reorder/${productId}`,
+    "recommendation",
+    { method: "POST" },
+  );
+}
+
+export function acceptRecommendation(
+  recommendationId: number,
+  payload: RecommendationAcceptRequest = {},
+): Promise<PurchaseRecommendation> {
+  return sendJson<PurchaseRecommendation>(
+    `/recommendations/${recommendationId}/accept`,
+    "recommendation",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function rejectRecommendation(
+  recommendationId: number,
+  payload: RecommendationRejectRequest = {},
+): Promise<PurchaseRecommendation> {
+  return sendJson<PurchaseRecommendation>(
+    `/recommendations/${recommendationId}/reject`,
+    "recommendation",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function convertRecommendationToDraftPO(
+  recommendationId: number,
+): Promise<RecommendationConvertResponse> {
+  return sendJson<RecommendationConvertResponse>(
+    `/recommendations/${recommendationId}/convert-to-draft-po`,
+    "recommendation",
+    { method: "POST" },
+  );
 }

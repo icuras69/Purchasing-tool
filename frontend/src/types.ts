@@ -204,3 +204,56 @@ export interface DraftFromProductsResponse {
     skipped_products: DraftFromProductsSkippedProduct[];
   };
 }
+
+export type RecommendationStatus =
+  | "draft"
+  | "pending_review"
+  | "accepted"
+  | "rejected"
+  | "converted_to_po"
+  | string;
+
+export interface PurchaseRecommendation {
+  id: number;
+  product_id: number;
+  product_name: string | null;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  product_supplier_id: number | null;
+  converted_purchase_order_id: number | null;
+  recommendation_type: string;
+  status: RecommendationStatus;
+  recommended_quantity: number;
+  recommended_supplier_name: string | null;
+  recommended_supplier_sku: string | null;
+  estimated_unit_cost: number | null;
+  estimated_total_cost: number | null;
+  currency: string | null;
+  reason: string | null;
+  confidence: number | null;
+  input_snapshot: Record<string, unknown> | null;
+  forecast_snapshot: Record<string, unknown> | null;
+  supplier_context_snapshot: Record<string, unknown> | null;
+  model_name: string | null;
+  prompt_version: string | null;
+  generated_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  rejected_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecommendationAcceptRequest {
+  reviewed_by?: string | null;
+}
+
+export interface RecommendationRejectRequest {
+  rejected_reason?: string | null;
+  reviewed_by?: string | null;
+}
+
+export interface RecommendationConvertResponse {
+  recommendation: PurchaseRecommendation;
+  purchase_order: PurchaseOrder;
+}

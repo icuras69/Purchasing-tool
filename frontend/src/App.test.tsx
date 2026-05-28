@@ -5,26 +5,39 @@ import App from "./App";
 import {
   confirmProductSupplier,
   addPurchaseOrderLine,
+  acceptRecommendation,
   approvePurchaseOrder,
   cancelPurchaseOrder,
+  convertRecommendationToDraftPO,
   createDraftPurchaseOrderFromProducts,
   createPurchaseOrder,
   createProductSupplier,
+  createReorderRecommendation,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
   getPurchaseOrder,
+  getRecommendation,
   issuePurchaseOrder,
+  listRecommendations,
   listPurchaseOrders,
   receivePurchaseOrder,
+  rejectRecommendation,
   rejectProductSupplier,
   setPreferredProductSupplier,
   submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
 } from "./api";
-import type { ForecastResponse, Product, ProductSupplierMapping, PurchaseOrder, WeakMapping } from "./types";
+import type {
+  ForecastResponse,
+  Product,
+  ProductSupplierMapping,
+  PurchaseOrder,
+  PurchaseRecommendation,
+  WeakMapping,
+} from "./types";
 
 vi.mock("./api", () => ({
   fetchProducts: vi.fn(),
@@ -39,6 +52,12 @@ vi.mock("./api", () => ({
   unsetPreferredProductSupplier: vi.fn(),
   listPurchaseOrders: vi.fn(),
   getPurchaseOrder: vi.fn(),
+  listRecommendations: vi.fn(),
+  getRecommendation: vi.fn(),
+  createReorderRecommendation: vi.fn(),
+  acceptRecommendation: vi.fn(),
+  rejectRecommendation: vi.fn(),
+  convertRecommendationToDraftPO: vi.fn(),
   createDraftPurchaseOrderFromProducts: vi.fn(),
   createPurchaseOrder: vi.fn(),
   addPurchaseOrderLine: vi.fn(),
@@ -194,6 +213,53 @@ function mockPurchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrde
   };
 }
 
+function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): PurchaseRecommendation {
+  return {
+    id: 900,
+    product_id: 1,
+    product_name: "Mapped Product",
+    supplier_id: 10,
+    supplier_name: "Acme Supplies",
+    product_supplier_id: 100,
+    converted_purchase_order_id: null,
+    recommendation_type: "reorder",
+    status: "pending_review",
+    recommended_quantity: 6,
+    recommended_supplier_name: "Acme Supplies",
+    recommended_supplier_sku: "ACME-1",
+    estimated_unit_cost: 9.5,
+    estimated_total_cost: 57,
+    currency: "USD",
+    reason: "Stock is below reorder point.",
+    confidence: null,
+    input_snapshot: {},
+    forecast_snapshot: {
+      recommended_action: "order_now",
+      risk_level: "high",
+      reorder_point: 12,
+      explanation: "Stock is below reorder point.",
+    },
+    supplier_context_snapshot: {
+      supplier_name: "Acme Supplies",
+      supplier_sku: "ACME-1",
+      supplier_product_name: "Acme Product Pack",
+      mapping_source: "product_supplier",
+      lead_time_days: 4,
+      minimum_order_quantity: 6,
+      purchase_price: 9.5,
+    },
+    model_name: null,
+    prompt_version: null,
+    generated_by: "system",
+    reviewed_by: null,
+    reviewed_at: null,
+    rejected_reason: null,
+    created_at: "2026-05-28T10:00:00",
+    updated_at: "2026-05-28T10:00:00",
+    ...overrides,
+  };
+}
+
 function mockDraftFromProductsResponse(overrides: Partial<PurchaseOrder> = {}) {
   return {
     purchase_order: mockPurchaseOrder(overrides),
@@ -218,6 +284,17 @@ beforeEach(() => {
   vi.mocked(unsetPreferredProductSupplier).mockResolvedValue(mockSupplierMapping({ is_preferred: false }));
   vi.mocked(listPurchaseOrders).mockResolvedValue([]);
   vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+  vi.mocked(listRecommendations).mockResolvedValue([]);
+  vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+  vi.mocked(createReorderRecommendation).mockResolvedValue(mockRecommendation());
+  vi.mocked(acceptRecommendation).mockResolvedValue(mockRecommendation({ status: "accepted" }));
+  vi.mocked(rejectRecommendation).mockResolvedValue(
+    mockRecommendation({ status: "rejected", rejected_reason: "Too early." }),
+  );
+  vi.mocked(convertRecommendationToDraftPO).mockResolvedValue({
+    recommendation: mockRecommendation({ status: "converted_to_po", converted_purchase_order_id: 500 }),
+    purchase_order: mockPurchaseOrder({ id: 500, status: "draft" }),
+  });
   vi.mocked(createDraftPurchaseOrderFromProducts).mockResolvedValue(
     mockDraftFromProductsResponse({ status: "draft" }),
   );
@@ -255,6 +332,7 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Supplier Mappings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
     expect(await screen.findByText("No products found.")).toBeInTheDocument();
   });
 
@@ -891,6 +969,139 @@ describe("App mapping review workflow", () => {
     expect(
       await screen.findByText(
         "Purchase order action failed: Cannot approve a purchase order with no lines.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("recommendations tab renders with the advisory safety message", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    expect(await screen.findByText("No recommendations found.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Recommendations are advisory. Converting a recommendation only creates a draft purchase order. It does not approve or issue it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("generate recommendation calls the reorder endpoint", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await userEvent.type(screen.getByLabelText("Product ID"), "1");
+    await userEvent.click(screen.getByRole("button", { name: "Generate Reorder Recommendation" }));
+
+    expect(createReorderRecommendation).toHaveBeenCalledWith(1);
+    expect(await screen.findByText("Recommendation 900")).toBeInTheDocument();
+  });
+
+  it("recommendation list displays status and quantity", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    expect(await screen.findByText("Mapped Product (1)")).toBeInTheDocument();
+    expect(screen.getByText("pending_review")).toBeInTheDocument();
+    expect(screen.getByText("6")).toBeInTheDocument();
+    expect(screen.getByText("57")).toBeInTheDocument();
+    expect(screen.getByText("system")).toBeInTheDocument();
+  });
+
+  it("recommendation detail displays supplier and forecast snapshots", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+    vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    expect(await screen.findByText("Recommendation 900")).toBeInTheDocument();
+    const detail = screen.getByLabelText("Recommendation details");
+    expect(within(detail).getAllByText("Stock is below reorder point.").length).toBeGreaterThan(0);
+    expect(screen.getByText("ACME-1")).toBeInTheDocument();
+    expect(screen.getByText("Acme Product Pack")).toBeInTheDocument();
+    expect(screen.getByText("product_supplier")).toBeInTheDocument();
+    expect(screen.getByText("order_now")).toBeInTheDocument();
+    expect(screen.getByText("high")).toBeInTheDocument();
+  });
+
+  it("accept recommendation calls the accept endpoint", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+    vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Accept" }));
+
+    expect(acceptRecommendation).toHaveBeenCalledWith(900, { reviewed_by: "manual" });
+  });
+
+  it("reject recommendation confirms before calling reject endpoint", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+    vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.type(await screen.findByLabelText("Reject reason"), "Too early");
+    await userEvent.click(screen.getByRole("button", { name: "Reject" }));
+
+    expect(window.confirm).toHaveBeenCalledWith("Reject this recommendation?");
+    expect(rejectRecommendation).toHaveBeenCalledWith(900, {
+      rejected_reason: "Too early",
+      reviewed_by: "manual",
+    });
+  });
+
+  it("convert recommendation confirms before calling convert endpoint", async () => {
+    const accepted = mockRecommendation({ status: "accepted" });
+    vi.mocked(listRecommendations).mockResolvedValue([accepted]);
+    vi.mocked(getRecommendation).mockResolvedValue(accepted);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Convert to Draft PO" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      "Convert this recommendation to a draft purchase order? This will not approve or issue it.",
+    );
+    expect(convertRecommendationToDraftPO).toHaveBeenCalledWith(900);
+  });
+
+  it("convert button is hidden for rejected recommendations", async () => {
+    const rejected = mockRecommendation({ status: "rejected" });
+    vi.mocked(listRecommendations).mockResolvedValue([rejected]);
+    vi.mocked(getRecommendation).mockResolvedValue(rejected);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await screen.findByText("Recommendation 900");
+
+    expect(screen.queryByRole("button", { name: "Convert to Draft PO" })).not.toBeInTheDocument();
+  });
+
+  it("backend recommendation errors display clearly", async () => {
+    vi.mocked(createReorderRecommendation).mockRejectedValue(
+      new Error("Product does not have a valid ProductSupplier mapping."),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await userEvent.type(screen.getByLabelText("Product ID"), "99");
+    await userEvent.click(screen.getByRole("button", { name: "Generate Reorder Recommendation" }));
+
+    expect(
+      await screen.findByText(
+        "Recommendation action failed: Product does not have a valid ProductSupplier mapping.",
       ),
     ).toBeInTheDocument();
   });
