@@ -48,3 +48,4 @@ class ProductSupplier(Base):
 
     product = relationship("Product", back_populates="product_suppliers")
     supplier = relationship("Supplier", back_populates="product_suppliers")
+    purchase_order_lines = relationship("PurchaseOrderLine", back_populates="product_supplier")

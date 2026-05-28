@@ -1,5 +1,5 @@
 from app.models.product import Product
-from app.models.purchase_order import PurchaseOrder
+from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.usage_history import UsageHistory
 from app.models.inventory_snapshot import InventorySnapshot
 from app.models.inventory_position import InventoryPosition
@@ -13,6 +13,7 @@ from app.models.product_supplier import ProductSupplier
 __all__ = [
     "Product",
     "PurchaseOrder",
+    "PurchaseOrderLine",
     "UsageHistory",
     "InventorySnapshot",
     "InventoryPosition",
