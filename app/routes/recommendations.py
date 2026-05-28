@@ -10,6 +10,11 @@ from app.schemas.recommendation import (
     RecommendationRejectRequest,
     RecommendationResponse,
 )
+from app.schemas.llm import LLMRecommendationExplanationResponse
+from app.services.llm_recommendation_service import (
+    LLMRecommendationError,
+    generate_llm_explanation_for_recommendation,
+)
 from app.services.recommendations import (
     RecommendationError,
     accept_recommendation,
@@ -137,3 +142,14 @@ def convert_recommendation_to_draft_po_route(
         "recommendation": serialize_recommendation(load_recommendation(db, updated.id)),
         "purchase_order": serialize_purchase_order(po),
     }
+
+
+@router.post("/{recommendation_id}/generate-llm-explanation", response_model=LLMRecommendationExplanationResponse)
+def generate_llm_explanation_route(
+    recommendation_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return generate_llm_explanation_for_recommendation(db, recommendation_id)
+    except LLMRecommendationError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.message) from error

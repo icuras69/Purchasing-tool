@@ -52,3 +52,21 @@ Any future LLM-generated recommendation must preserve:
 ## Human Approval Rule
 
 LLM recommendations are advisory only. LLM output may create or update recommendation records only through controlled backend services. LLM output may only lead to draft purchase order creation, never purchase order approval, issuing, receiving, inventory mutation, or external supplier ordering.
+
+## Current Implementation State
+
+The current backend LLM layer uses `MockLLMProvider` only. It is deterministic, performs no network calls, requires no API key, and is suitable for tests and local development. Real OpenAI integration is intentionally disabled until a later task adds structured output calls, provider configuration, observability, and production key handling.
+
+The mock service can generate explanation text for an existing recommendation and update only safe explanation-related fields:
+
+- `reason`
+- `explanation`
+- `confidence`
+- `model_name`
+- `prompt_version`
+
+It does not change recommendation status, create purchase orders, approve purchase orders, issue purchase orders, update inventory, or modify supplier/product mappings.
+
+## Next Real-Provider Step
+
+The next LLM task should add a real provider behind explicit configuration, use structured outputs, store an output snapshot if a dedicated field exists, and keep the same guardrail contract. The LLM remains advisory text only; human review and the existing draft PO workflow stay mandatory.

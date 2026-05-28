@@ -43,3 +43,21 @@ AI output must flow through recommendation review. A recommendation can be accep
 ## Data Integrity
 
 AI output must not directly update database models. The backend should validate action intent, required output shape, and explanation text before storing any AI-assisted recommendation.
+
+## Mock Provider Guardrails
+
+The current LLM service skeleton is mock-only. `MockLLMProvider` generates deterministic recommendation explanation output and never calls external services. `OpenAIProvider` is present only as a disabled placeholder and raises instead of making a network call.
+
+LLM explanation output must include:
+
+- `suggested_action`
+- `summary`
+- `explanation`
+- `risk_flags`
+- `missing_data_warnings`
+- `confidence`
+- `structured_data_citations`
+
+Only `reorder`, `wait`, and `review` are accepted as explanation-level suggested actions. Forbidden operational actions such as approving, issuing, receiving, placing external orders, updating inventory, deleting mappings, or bypassing approval must be rejected before any recommendation fields are updated.
+
+The explanation endpoint may update only safe recommendation explanation fields. It must not change review status, create purchase orders, submit purchase orders, approve purchase orders, issue purchase orders, or receive purchase orders.
