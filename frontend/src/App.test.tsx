@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -7,6 +7,7 @@ import {
   addPurchaseOrderLine,
   approvePurchaseOrder,
   cancelPurchaseOrder,
+  createDraftPurchaseOrderFromProducts,
   createPurchaseOrder,
   createProductSupplier,
   fetchProductForecast,
@@ -38,6 +39,7 @@ vi.mock("./api", () => ({
   unsetPreferredProductSupplier: vi.fn(),
   listPurchaseOrders: vi.fn(),
   getPurchaseOrder: vi.fn(),
+  createDraftPurchaseOrderFromProducts: vi.fn(),
   createPurchaseOrder: vi.fn(),
   addPurchaseOrderLine: vi.fn(),
   updatePurchaseOrderLine: vi.fn(),
@@ -192,6 +194,16 @@ function mockPurchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrde
   };
 }
 
+function mockDraftFromProductsResponse(overrides: Partial<PurchaseOrder> = {}) {
+  return {
+    purchase_order: mockPurchaseOrder(overrides),
+    summary: {
+      created_line_count: 1,
+      skipped_products: [],
+    },
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(fetchProducts).mockResolvedValue([]);
@@ -206,6 +218,9 @@ beforeEach(() => {
   vi.mocked(unsetPreferredProductSupplier).mockResolvedValue(mockSupplierMapping({ is_preferred: false }));
   vi.mocked(listPurchaseOrders).mockResolvedValue([]);
   vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+  vi.mocked(createDraftPurchaseOrderFromProducts).mockResolvedValue(
+    mockDraftFromProductsResponse({ status: "draft" }),
+  );
   vi.mocked(createPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
   vi.mocked(addPurchaseOrderLine).mockResolvedValue(mockPurchaseOrder());
   vi.mocked(submitPurchaseOrderForApproval).mockResolvedValue(
@@ -263,6 +278,149 @@ describe("App mapping review workflow", () => {
     expect(await screen.findByText("Unmapped Product")).toBeInTheDocument();
     expect(screen.getByText("Needs supplier mapping")).toBeInTheDocument();
     expect(screen.getByText("unmapped")).toBeInTheDocument();
+  });
+
+  it("selects mapped products for draft PO generation", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([
+      mockProduct({
+        id: 7,
+        name: "Selectable Product",
+        preferred_supplier: "Draft Supplier",
+        preferred_supplier_id: 6,
+      }),
+    ]);
+
+    render(<App />);
+
+    await screen.findByText("Selectable Product");
+    await userEvent.click(screen.getByLabelText("Select Selectable Product for draft PO"));
+
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+    expect(screen.getByText("7 · Selectable Product · Draft Supplier")).toBeInTheDocument();
+    expect(screen.getByText("Preferred supplier IDs in selection: 6")).toBeInTheDocument();
+  });
+
+  it("keeps generate draft PO disabled when no products are selected", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([mockProduct({ id: 7, name: "Mapped Product" })]);
+
+    render(<App />);
+
+    await screen.findByText("Mapped Product");
+    expect(screen.getByRole("button", { name: "Generate Draft PO" })).toBeDisabled();
+    expect(screen.getByText("Select mapped products from the table below.")).toBeInTheDocument();
+  });
+
+  it("requires supplier_id before generating a draft PO", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([mockProduct({ id: 7, name: "Mapped Product" })]);
+
+    render(<App />);
+
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByLabelText("Select Mapped Product for draft PO"));
+    await userEvent.clear(screen.getByLabelText("Supplier ID"));
+    await userEvent.click(screen.getByRole("button", { name: "Generate Draft PO" }));
+
+    expect(await screen.findByText("Supplier ID is required.")).toBeInTheDocument();
+    expect(createDraftPurchaseOrderFromProducts).not.toHaveBeenCalled();
+  });
+
+  it("disables unmapped products for draft PO selection", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([
+      mockProduct({
+        id: 8,
+        name: "Unmapped Product",
+        mapping_status: "unmapped",
+        supplier_count: 0,
+        preferred_supplier: null,
+        preferred_supplier_id: null,
+      }),
+    ]);
+
+    render(<App />);
+
+    await screen.findByText("Unmapped Product");
+    expect(screen.getByLabelText("Select Unmapped Product for draft PO")).toBeDisabled();
+  });
+
+  it("generates a draft PO and displays the result", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([
+      mockProduct({
+        id: 7,
+        name: "Mapped Product",
+        preferred_supplier_id: 6,
+      }),
+    ]);
+    vi.mocked(createDraftPurchaseOrderFromProducts).mockResolvedValue(
+      mockDraftFromProductsResponse({ id: 501, status: "draft" }),
+    );
+
+    render(<App />);
+
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByLabelText("Select Mapped Product for draft PO"));
+    await userEvent.type(screen.getByLabelText("Supplier ID"), "6");
+    await userEvent.click(screen.getByRole("button", { name: "Generate Draft PO" }));
+
+    expect(createDraftPurchaseOrderFromProducts).toHaveBeenCalledWith({
+      supplier_id: 6,
+      product_ids: [7],
+      created_by: "manual",
+      notes: "Draft generated from product selection",
+    });
+    const resultPanel = await screen.findByLabelText("Draft PO generation result");
+    expect(within(resultPanel).getByText("Draft PO 501 created")).toBeInTheDocument();
+    expect(within(resultPanel).getByText("draft")).toBeInTheDocument();
+    expect(within(resultPanel).getByText("1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View Draft PO" })).toBeInTheDocument();
+  });
+
+  it("displays skipped product summary after draft PO generation", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([mockProduct({ id: 7, name: "Mapped Product" })]);
+    vi.mocked(createDraftPurchaseOrderFromProducts).mockResolvedValue({
+      purchase_order: mockPurchaseOrder({ id: 502, status: "draft" }),
+      summary: {
+        created_line_count: 1,
+        skipped_products: [
+          {
+            product_id: 9,
+            product_name: "Skipped Product",
+            reason: "No ProductSupplier mapping exists for this product.",
+          },
+        ],
+      },
+    });
+
+    render(<App />);
+
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByLabelText("Select Mapped Product for draft PO"));
+    await userEvent.type(screen.getByLabelText("Supplier ID"), "6");
+    await userEvent.click(screen.getByRole("button", { name: "Generate Draft PO" }));
+
+    expect(await screen.findByText("Skipped Products")).toBeInTheDocument();
+    expect(
+      screen.getByText("Skipped Product: No ProductSupplier mapping exists for this product."),
+    ).toBeInTheDocument();
+  });
+
+  it("displays backend errors from draft PO generation", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([mockProduct({ id: 7, name: "Mapped Product" })]);
+    vi.mocked(createDraftPurchaseOrderFromProducts).mockRejectedValue(
+      new Error("No valid purchase order lines could be created."),
+    );
+
+    render(<App />);
+
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByLabelText("Select Mapped Product for draft PO"));
+    await userEvent.type(screen.getByLabelText("Supplier ID"), "6");
+    await userEvent.click(screen.getByRole("button", { name: "Generate Draft PO" }));
+
+    expect(
+      await screen.findByText(
+        "Draft generation failed: No valid purchase order lines could be created.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows supplier mapping product and supplier fields", async () => {

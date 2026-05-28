@@ -183,3 +183,24 @@ export interface UpdatePurchaseOrderLineRequest {
 export interface ApprovePurchaseOrderRequest {
   approved_by?: string | null;
 }
+
+export interface DraftFromProductsRequest {
+  supplier_id: number;
+  product_ids: number[];
+  created_by?: string | null;
+  notes?: string | null;
+}
+
+export interface DraftFromProductsSkippedProduct {
+  product_id: number;
+  product_name: string | null;
+  reason: string;
+}
+
+export interface DraftFromProductsResponse {
+  purchase_order: PurchaseOrder;
+  summary: {
+    created_line_count: number;
+    skipped_products: DraftFromProductsSkippedProduct[];
+  };
+}

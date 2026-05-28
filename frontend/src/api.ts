@@ -3,6 +3,8 @@ import type {
   AddPurchaseOrderLineRequest,
   ApprovePurchaseOrderRequest,
   CreatePurchaseOrderRequest,
+  DraftFromProductsRequest,
+  DraftFromProductsResponse,
   Product,
   ProductSupplierInput,
   ProductSupplierMapping,
@@ -44,6 +46,17 @@ async function parseJsonResponse<T>(response: Response, label: string): Promise<
       const errorBody = await response.json();
       if (typeof errorBody.detail === "string") {
         detail = errorBody.detail;
+      } else if (errorBody.detail?.message) {
+        const skippedProducts = Array.isArray(errorBody.detail.skipped_products)
+          ? errorBody.detail.skipped_products
+              .map((product: { product_id: number; product_name: string | null; reason: string }) =>
+                `${product.product_name ?? product.product_id}: ${product.reason}`,
+              )
+              .join("; ")
+          : "";
+        detail = skippedProducts
+          ? `${errorBody.detail.message} Skipped products: ${skippedProducts}`
+          : errorBody.detail.message;
       }
     } catch {
       detail = null;
@@ -138,6 +151,19 @@ export function createPurchaseOrder(payload: CreatePurchaseOrderRequest): Promis
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function createDraftPurchaseOrderFromProducts(
+  payload: DraftFromProductsRequest,
+): Promise<DraftFromProductsResponse> {
+  return sendJson<DraftFromProductsResponse>(
+    "/purchase-orders/draft-from-products",
+    "draft purchase order",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function addPurchaseOrderLine(

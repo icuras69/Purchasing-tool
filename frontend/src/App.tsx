@@ -4,6 +4,7 @@ import {
   addPurchaseOrderLine,
   approvePurchaseOrder,
   cancelPurchaseOrder,
+  createDraftPurchaseOrderFromProducts,
   createPurchaseOrder,
   createProductSupplier,
   fetchProductForecast,
@@ -31,6 +32,7 @@ import type {
   PurchaseOrder,
   AddPurchaseOrderLineRequest,
   CreatePurchaseOrderRequest,
+  DraftFromProductsResponse,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
@@ -177,6 +179,8 @@ function App() {
   const [createMappingError, setCreateMappingError] = useState<string | null>(null);
   const [createMappingSuccess, setCreateMappingSuccess] = useState<string | null>(null);
   const [creatingMapping, setCreatingMapping] = useState(false);
+  const [selectedProductIdsForDraft, setSelectedProductIdsForDraft] = useState<number[]>([]);
+  const [poToViewId, setPoToViewId] = useState<number | null>(null);
 
   const loadProducts = useCallback((active = true) => {
     fetchProducts()
@@ -292,6 +296,19 @@ function App() {
     }
   }
 
+  function toggleProductForDraft(productId: number) {
+    setSelectedProductIdsForDraft((current) =>
+      current.includes(productId)
+        ? current.filter((selectedId) => selectedId !== productId)
+        : [...current, productId],
+    );
+  }
+
+  function handleViewGeneratedPo(poId: number) {
+    setPoToViewId(poId);
+    setActiveTab("purchase-orders");
+  }
+
   const filteredProducts = useMemo(
     () => products.data.filter((product) => productMatchesQuery(product, query)),
     [products.data, query],
@@ -370,12 +387,21 @@ function App() {
       </nav>
 
       {activeTab === "products" && (
-        <ProductTable
-          expandedProductId={expandedProductId}
-          onExpandedProductIdChange={setExpandedProductId}
-          products={filteredProducts}
-          resource={products}
-        />
+        <div className="review-stack">
+          <DraftPoFromProductsPanel
+            onViewPurchaseOrder={handleViewGeneratedPo}
+            products={products.data}
+            selectedProductIds={selectedProductIdsForDraft}
+          />
+          <ProductTable
+            expandedProductId={expandedProductId}
+            onExpandedProductIdChange={setExpandedProductId}
+            onToggleDraftSelection={toggleProductForDraft}
+            products={filteredProducts}
+            resource={products}
+            selectedProductIds={selectedProductIdsForDraft}
+          />
+        </div>
       )}
 
       {activeTab === "unmapped" && (
@@ -423,7 +449,7 @@ function App() {
 
       {activeTab === "forecast" && <ForecastPanel />}
 
-      {activeTab === "purchase-orders" && <PurchaseOrdersPanel />}
+      {activeTab === "purchase-orders" && <PurchaseOrdersPanel initialPoId={poToViewId} />}
     </main>
   );
 }
@@ -431,15 +457,19 @@ function App() {
 interface ProductTableProps {
   expandedProductId: number | null;
   onExpandedProductIdChange: (productId: number | null) => void;
+  onToggleDraftSelection: (productId: number) => void;
   products: Product[];
   resource: ResourceState<Product>;
+  selectedProductIds: number[];
 }
 
 function ProductTable({
   expandedProductId,
   onExpandedProductIdChange,
+  onToggleDraftSelection,
   products,
   resource,
+  selectedProductIds,
 }: ProductTableProps) {
   if (resource.loading) {
     return <div className="state">Loading products...</div>;
@@ -453,6 +483,7 @@ function ProductTable({
       <table>
         <thead>
           <tr>
+            <th>Select</th>
             <th>Product ID</th>
             <th>Product name</th>
             <th>Current stock</th>
@@ -472,6 +503,15 @@ function ProductTable({
             return (
               <Fragment key={product.id}>
                 <tr>
+                  <td>
+                    <input
+                      aria-label={`Select ${product.name} for draft PO`}
+                      checked={selectedProductIds.includes(product.id)}
+                      disabled={product.mapping_status === "unmapped"}
+                      onChange={() => onToggleDraftSelection(product.id)}
+                      type="checkbox"
+                    />
+                  </td>
                   <td>{product.id}</td>
                   <td>{product.name}</td>
                   <td>{formatValue(product.current_stock)}</td>
@@ -493,7 +533,7 @@ function ProductTable({
                 </tr>
                 {isExpanded && (
                   <tr>
-                    <td colSpan={8}>
+                    <td colSpan={9}>
                       <div className="mapping-panel">
                         <table>
                           <thead>
@@ -531,6 +571,146 @@ function ProductTable({
         </tbody>
       </table>
       {products.length === 0 && <div className="state">No products found.</div>}
+    </section>
+  );
+}
+
+function DraftPoFromProductsPanel({
+  onViewPurchaseOrder,
+  products,
+  selectedProductIds,
+}: {
+  onViewPurchaseOrder: (poId: number) => void;
+  products: Product[];
+  selectedProductIds: number[];
+}) {
+  const [supplierId, setSupplierId] = useState("");
+  const [createdBy, setCreatedBy] = useState("manual");
+  const [notes, setNotes] = useState("Draft generated from product selection");
+  const [creating, setCreating] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [result, setResult] = useState<DraftFromProductsResponse | null>(null);
+
+  const selectedProducts = products.filter((product) => selectedProductIds.includes(product.id));
+  const selectedSupplierIds = Array.from(
+    new Set(
+      selectedProducts
+        .map((product) => product.preferred_supplier_id)
+        .filter((value): value is number => value !== null && value !== undefined),
+    ),
+  );
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedSupplierId = Number(supplierId);
+    if (selectedProductIds.length === 0) {
+      setValidationError("Select at least one mapped product.");
+      return;
+    }
+    if (!Number.isInteger(parsedSupplierId) || parsedSupplierId <= 0) {
+      setValidationError("Supplier ID is required.");
+      return;
+    }
+
+    setCreating(true);
+    setValidationError(null);
+    setCreateError(null);
+    setResult(null);
+    try {
+      const created = await createDraftPurchaseOrderFromProducts({
+        supplier_id: parsedSupplierId,
+        product_ids: selectedProductIds,
+        created_by: createdBy || "manual",
+        notes: notes || "Draft generated from product selection",
+      });
+      setResult(created);
+    } catch (loadError) {
+      setCreateError((loadError as Error).message);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <section className="detail-panel" aria-label="Generate draft purchase order">
+      <div className="section-header">
+        <h2>Generate Draft PO</h2>
+        <span className="action-state">{selectedProductIds.length} selected</span>
+      </div>
+      <div className="state">
+        This only creates a draft purchase order. It does not submit, approve, issue, or send it.
+      </div>
+      {selectedProducts.length > 0 && (
+        <div className="selected-products">
+          {selectedProducts.map((product) => (
+            <span className="selected-pill" key={product.id}>
+              {product.id} · {product.name} · {supplierDisplayName(product)}
+            </span>
+          ))}
+        </div>
+      )}
+      {selectedSupplierIds.length > 0 && (
+        <div className="action-state">
+          Preferred supplier IDs in selection: {selectedSupplierIds.join(", ")}
+        </div>
+      )}
+      <form className="mapping-form" onSubmit={handleSubmit}>
+        <label>
+          <span>Supplier ID</span>
+          <input onChange={(event) => setSupplierId(event.target.value)} value={supplierId} />
+        </label>
+        <label>
+          <span>Created by</span>
+          <input onChange={(event) => setCreatedBy(event.target.value)} value={createdBy} />
+        </label>
+        <label>
+          <span>Notes</span>
+          <input onChange={(event) => setNotes(event.target.value)} value={notes} />
+        </label>
+        <button disabled={creating || selectedProductIds.length === 0} type="submit">
+          {creating ? "Generating..." : "Generate Draft PO"}
+        </button>
+      </form>
+      {selectedProductIds.length === 0 && (
+        <div className="action-state">Select mapped products from the table below.</div>
+      )}
+      {validationError && <div className="state error">{validationError}</div>}
+      {createError && <div className="state error">Draft generation failed: {createError}</div>}
+      {result && (
+        <div className="result-panel" aria-label="Draft PO generation result">
+          <h3>Draft PO {result.purchase_order.id} created</h3>
+          <dl className="detail-list">
+            <div>
+              <dt>Status</dt>
+              <dd>
+                <span className={purchaseOrderStatusClassName(result.purchase_order.status)}>
+                  {result.purchase_order.status}
+                </span>
+              </dd>
+            </div>
+            <div>
+              <dt>Created lines</dt>
+              <dd>{result.summary.created_line_count}</dd>
+            </div>
+          </dl>
+          {result.summary.skipped_products.length > 0 && (
+            <div className="nested-panel">
+              <h3>Skipped Products</h3>
+              <ul className="skip-list">
+                {result.summary.skipped_products.map((product) => (
+                  <li key={product.product_id}>
+                    {product.product_name ?? product.product_id}: {product.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <button onClick={() => onViewPurchaseOrder(result.purchase_order.id)} type="button">
+            View Draft PO
+          </button>
+        </div>
+      )}
     </section>
   );
 }
@@ -1155,7 +1335,7 @@ function SupplierContextDetails({ context }: { context: ForecastSupplierContext 
   );
 }
 
-function PurchaseOrdersPanel() {
+function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
   const [purchaseOrders, setPurchaseOrders] = useState<ResourceState<PurchaseOrder>>(initialResource);
   const [selectedPo, setSelectedPo] = useState<PurchaseOrder | null>(null);
   const [selectedPoError, setSelectedPoError] = useState<string | null>(null);
@@ -1202,6 +1382,12 @@ function PurchaseOrdersPanel() {
       setSelectedPoError((loadError as Error).message);
     }
   }
+
+  useEffect(() => {
+    if (initialPoId) {
+      handleSelect(initialPoId);
+    }
+  }, [initialPoId]);
 
   async function handleCreate(payload: CreatePurchaseOrderRequest) {
     setCreating(true);
