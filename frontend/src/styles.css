@@ -131,11 +131,66 @@ button:disabled {
   color: #be123c;
 }
 
+.needs-review {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.rejected {
+  background: #f3f4f6;
+  color: #4b5563;
+}
+
+.row-rejected {
+  background: #fafafa;
+  color: #6b7280;
+}
+
 .mapping-panel {
   background: #fbfcfe;
   border: 1px solid #e5e9ef;
   border-radius: 6px;
   padding: 10px;
+}
+
+.review-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.mapping-form {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.mapping-form label {
+  color: #374151;
+  display: grid;
+  font-size: 13px;
+  gap: 6px;
+}
+
+.mapping-form input {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 8px 9px;
+}
+
+.mapping-form button {
+  align-self: end;
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.action-state {
+  color: #5b6472;
+  font-size: 12px;
+  padding: 7px 0;
 }
 
 .forecast-view {
@@ -208,6 +263,10 @@ button:disabled {
   color: #b42318;
 }
 
+.success {
+  color: #166534;
+}
+
 .warning {
   background: #fff7ed;
   border: 1px solid #fed7aa;
@@ -227,7 +286,8 @@ button:disabled {
   }
 
   .forecast-form,
-  .forecast-grid {
+  .forecast-grid,
+  .mapping-form {
     display: grid;
     grid-template-columns: 1fr;
   }

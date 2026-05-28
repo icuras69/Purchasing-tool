@@ -3,11 +3,16 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import {
+  confirmProductSupplier,
+  createProductSupplier,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
+  rejectProductSupplier,
+  setPreferredProductSupplier,
+  unsetPreferredProductSupplier,
 } from "./api";
 import type { ForecastResponse, Product, ProductSupplierMapping, WeakMapping } from "./types";
 
@@ -17,6 +22,11 @@ vi.mock("./api", () => ({
   fetchWeakMappings: vi.fn(),
   fetchProductSuppliers: vi.fn(),
   fetchProductForecast: vi.fn(),
+  createProductSupplier: vi.fn(),
+  confirmProductSupplier: vi.fn(),
+  rejectProductSupplier: vi.fn(),
+  setPreferredProductSupplier: vi.fn(),
+  unsetPreferredProductSupplier: vi.fn(),
 }));
 
 const productDefaults: Product = {
@@ -124,11 +134,18 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   vi.mocked(fetchProducts).mockResolvedValue([]);
   vi.mocked(fetchUnmappedProducts).mockResolvedValue([]);
   vi.mocked(fetchWeakMappings).mockResolvedValue([]);
   vi.mocked(fetchProductSuppliers).mockResolvedValue([]);
   vi.mocked(fetchProductForecast).mockResolvedValue(mockForecast());
+  vi.mocked(createProductSupplier).mockResolvedValue(mockSupplierMapping());
+  vi.mocked(confirmProductSupplier).mockResolvedValue(mockSupplierMapping({ match_status: "confirmed" }));
+  vi.mocked(rejectProductSupplier).mockResolvedValue(mockSupplierMapping({ match_status: "rejected" }));
+  vi.mocked(setPreferredProductSupplier).mockResolvedValue(mockSupplierMapping({ is_preferred: true }));
+  vi.mocked(unsetPreferredProductSupplier).mockResolvedValue(mockSupplierMapping({ is_preferred: false }));
+  vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
 describe("App mapping review workflow", () => {
@@ -294,5 +311,86 @@ describe("App mapping review workflow", () => {
 
     expect(await screen.findByText("ProductMasterItem fallback")).toBeInTheDocument();
     expect(screen.getByText("Fallback Supplier")).toBeInTheDocument();
+  });
+
+  it("confirm button calls the confirm endpoint and refreshes mappings", async () => {
+    vi.mocked(fetchProductSuppliers).mockResolvedValue([mockSupplierMapping({ is_preferred: false })]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(confirmProductSupplier).toHaveBeenCalledWith(100);
+    expect(fetchProductSuppliers).toHaveBeenCalledTimes(2);
+  });
+
+  it("reject button confirms before calling the reject endpoint", async () => {
+    vi.mocked(fetchProductSuppliers).mockResolvedValue([mockSupplierMapping({ is_preferred: false })]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByRole("button", { name: "Reject" }));
+
+    expect(window.confirm).toHaveBeenCalledWith("Reject this supplier mapping?");
+    expect(rejectProductSupplier).toHaveBeenCalledWith(100);
+  });
+
+  it("set preferred button calls the set-preferred endpoint", async () => {
+    vi.mocked(fetchProductSuppliers).mockResolvedValue([mockSupplierMapping({ is_preferred: false })]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByRole("button", { name: "Set Preferred" }));
+
+    expect(setPreferredProductSupplier).toHaveBeenCalledWith(100);
+  });
+
+  it("validates product_id and supplier_id before creating a mapping", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Unmapped Products" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create Mapping" }));
+
+    expect(await screen.findByText("Product ID is required.")).toBeInTheDocument();
+    expect(createProductSupplier).not.toHaveBeenCalled();
+
+    await userEvent.type(screen.getByLabelText("Product ID"), "2");
+    await userEvent.click(screen.getByRole("button", { name: "Create Mapping" }));
+
+    expect(await screen.findByText("Supplier ID is required.")).toBeInTheDocument();
+    expect(createProductSupplier).not.toHaveBeenCalled();
+  });
+
+  it("creates mapping with default manual review fields", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Unmapped Products" }));
+    await userEvent.type(screen.getByLabelText("Product ID"), "2");
+    await userEvent.type(screen.getByLabelText("Supplier ID"), "3");
+    await userEvent.type(screen.getByLabelText("Supplier SKU"), "NEW-SKU");
+    await userEvent.click(screen.getByRole("button", { name: "Create Mapping" }));
+
+    expect(createProductSupplier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        product_id: 2,
+        supplier_id: 3,
+        supplier_sku: "NEW-SKU",
+        match_status: "needs_review",
+        match_method: "manual",
+      }),
+    );
+  });
+
+  it("displays rejected mapping status distinctly", async () => {
+    vi.mocked(fetchProductSuppliers).mockResolvedValue([
+      mockSupplierMapping({ is_preferred: false, match_status: "rejected" }),
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+
+    const rejected = await screen.findByText("rejected");
+    expect(rejected).toHaveClass("rejected");
   });
 });

@@ -51,6 +51,21 @@ export interface ProductSupplierMapping {
   last_synced_at: string | null;
 }
 
+export interface ProductSupplierInput {
+  product_id: number;
+  supplier_id: number;
+  supplier_sku?: string | null;
+  supplier_product_name?: string | null;
+  purchase_price?: number | null;
+  currency?: string | null;
+  minimum_order_quantity?: number | null;
+  pack_size?: number | null;
+  lead_time_days?: number | null;
+  match_status?: string | null;
+  match_method?: string | null;
+  match_confidence?: number | null;
+}
+
 export interface WeakMapping {
   product_id: number;
   product_name: string;
