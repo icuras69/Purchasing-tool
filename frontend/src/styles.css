@@ -226,6 +226,42 @@ button:disabled {
   margin: 0 0 12px;
 }
 
+.section-header {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.nested-panel {
+  background: #fbfcfe;
+  border: 1px solid #e5e9ef;
+  border-radius: 6px;
+  margin: 16px 0;
+  padding: 12px;
+}
+
+.nested-panel h3 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+.nested-table {
+  margin-top: 16px;
+}
+
+.inline-form {
+  display: grid;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.inline-form input {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
 .detail-list {
   display: grid;
   gap: 10px;

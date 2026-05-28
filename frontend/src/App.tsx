@@ -1,15 +1,22 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   confirmProductSupplier,
+  addPurchaseOrderLine,
+  cancelPurchaseOrder,
+  createPurchaseOrder,
   createProductSupplier,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
+  getPurchaseOrder,
+  listPurchaseOrders,
   rejectProductSupplier,
   setPreferredProductSupplier,
+  submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
+  updatePurchaseOrderLine,
 } from "./api";
 import { productMatchesQuery, supplierDisplayName } from "./productDisplay";
 import type {
@@ -18,10 +25,14 @@ import type {
   Product,
   ProductSupplierInput,
   ProductSupplierMapping,
+  PurchaseOrder,
+  AddPurchaseOrderLineRequest,
+  CreatePurchaseOrderRequest,
+  UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
 
-type TabId = "products" | "unmapped" | "weak" | "mappings" | "forecast";
+type TabId = "products" | "unmapped" | "weak" | "mappings" | "forecast" | "purchase-orders";
 
 interface ResourceState<T> {
   data: T[];
@@ -35,6 +46,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "weak", label: "Weak Mappings" },
   { id: "mappings", label: "Supplier Mappings" },
   { id: "forecast", label: "Forecast" },
+  { id: "purchase-orders", label: "Purchase Orders" },
 ];
 
 function initialResource<T>(): ResourceState<T> {
@@ -88,6 +100,23 @@ function statusClassName(status: string | null | undefined): string {
     return "status rejected";
   }
   return "status needs-review";
+}
+
+function purchaseOrderStatusClassName(status: string): string {
+  if (status === "draft") {
+    return "status needs-review";
+  }
+  if (status === "cancelled") {
+    return "status rejected";
+  }
+  return "status mapped";
+}
+
+function formatDate(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+  return new Date(value).toLocaleString();
 }
 
 function weakMappingReason(mapping: WeakMapping): string {
@@ -378,6 +407,8 @@ function App() {
       )}
 
       {activeTab === "forecast" && <ForecastPanel />}
+
+      {activeTab === "purchase-orders" && <PurchaseOrdersPanel />}
     </main>
   );
 }
@@ -1106,6 +1137,533 @@ function SupplierContextDetails({ context }: { context: ForecastSupplierContext 
         </div>
       </dl>
     </section>
+  );
+}
+
+function PurchaseOrdersPanel() {
+  const [purchaseOrders, setPurchaseOrders] = useState<ResourceState<PurchaseOrder>>(initialResource);
+  const [selectedPo, setSelectedPo] = useState<PurchaseOrder | null>(null);
+  const [selectedPoError, setSelectedPoError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [lineActionLoading, setLineActionLoading] = useState(false);
+  const [headerActionLoading, setHeaderActionLoading] = useState(false);
+
+  const loadPurchaseOrders = useCallback((active = true) => {
+    listPurchaseOrders()
+      .then((loadedPurchaseOrders) => {
+        if (active) {
+          setPurchaseOrders({ data: loadedPurchaseOrders, loading: false, error: null });
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setPurchaseOrders({ data: [], loading: false, error: loadError.message });
+        }
+      });
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    loadPurchaseOrders(active);
+    return () => {
+      active = false;
+    };
+  }, [loadPurchaseOrders]);
+
+  async function refreshSelected(poId: number) {
+    const loadedPo = await getPurchaseOrder(poId);
+    setSelectedPo(loadedPo);
+    loadPurchaseOrders();
+  }
+
+  async function handleSelect(poId: number) {
+    setSelectedPoError(null);
+    setActionError(null);
+    try {
+      await refreshSelected(poId);
+    } catch (loadError) {
+      setSelectedPo(null);
+      setSelectedPoError((loadError as Error).message);
+    }
+  }
+
+  async function handleCreate(payload: CreatePurchaseOrderRequest) {
+    setCreating(true);
+    setActionError(null);
+    try {
+      const created = await createPurchaseOrder(payload);
+      setSelectedPo(created);
+      loadPurchaseOrders();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleAddLine(payload: AddPurchaseOrderLineRequest) {
+    if (!selectedPo) {
+      return;
+    }
+    setLineActionLoading(true);
+    setActionError(null);
+    try {
+      const updated = await addPurchaseOrderLine(selectedPo.id, payload);
+      setSelectedPo(updated);
+      loadPurchaseOrders();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setLineActionLoading(false);
+    }
+  }
+
+  async function handleUpdateLine(lineId: number, payload: UpdatePurchaseOrderLineRequest) {
+    if (!selectedPo) {
+      return;
+    }
+    setLineActionLoading(true);
+    setActionError(null);
+    try {
+      const updated = await updatePurchaseOrderLine(selectedPo.id, lineId, payload);
+      setSelectedPo(updated);
+      loadPurchaseOrders();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setLineActionLoading(false);
+    }
+  }
+
+  async function handleSubmitForApproval() {
+    if (!selectedPo) {
+      return;
+    }
+    setHeaderActionLoading(true);
+    setActionError(null);
+    try {
+      const updated = await submitPurchaseOrderForApproval(selectedPo.id);
+      setSelectedPo(updated);
+      loadPurchaseOrders();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setHeaderActionLoading(false);
+    }
+  }
+
+  async function handleCancel() {
+    if (!selectedPo || !window.confirm("Cancel this purchase order?")) {
+      return;
+    }
+    setHeaderActionLoading(true);
+    setActionError(null);
+    try {
+      const updated = await cancelPurchaseOrder(selectedPo.id);
+      setSelectedPo(updated);
+      loadPurchaseOrders();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setHeaderActionLoading(false);
+    }
+  }
+
+  return (
+    <div className="review-stack">
+      <CreatePurchaseOrderForm creating={creating} onCreate={handleCreate} />
+      <PurchaseOrdersTable
+        onSelect={handleSelect}
+        purchaseOrders={purchaseOrders.data}
+        resource={purchaseOrders}
+        selectedPoId={selectedPo?.id ?? null}
+      />
+      {selectedPoError && <div className="state error">Could not load PO: {selectedPoError}</div>}
+      {actionError && <div className="state error">Purchase order action failed: {actionError}</div>}
+      {selectedPo ? (
+        <PurchaseOrderDetail
+          headerActionLoading={headerActionLoading}
+          lineActionLoading={lineActionLoading}
+          onAddLine={handleAddLine}
+          onCancel={handleCancel}
+          onSubmitForApproval={handleSubmitForApproval}
+          onUpdateLine={handleUpdateLine}
+          purchaseOrder={selectedPo}
+        />
+      ) : (
+        <div className="state">Select a purchase order to view details.</div>
+      )}
+    </div>
+  );
+}
+
+function CreatePurchaseOrderForm({
+  creating,
+  onCreate,
+}: {
+  creating: boolean;
+  onCreate: (payload: CreatePurchaseOrderRequest) => Promise<void>;
+}) {
+  const [supplierId, setSupplierId] = useState("");
+  const [notes, setNotes] = useState("");
+  const [createdBy, setCreatedBy] = useState("");
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedSupplierId = Number(supplierId);
+    if (!Number.isInteger(parsedSupplierId) || parsedSupplierId <= 0) {
+      setValidationError("Supplier ID is required.");
+      return;
+    }
+    setValidationError(null);
+    await onCreate({
+      supplier_id: parsedSupplierId,
+      notes: notes || null,
+      created_by: createdBy || null,
+    });
+  }
+
+  return (
+    <section className="detail-panel" aria-label="Create draft purchase order">
+      <h2>Create Draft PO</h2>
+      <form className="mapping-form" onSubmit={handleSubmit}>
+        <label>
+          <span>Supplier ID</span>
+          <input onChange={(event) => setSupplierId(event.target.value)} value={supplierId} />
+        </label>
+        <label>
+          <span>Notes</span>
+          <input onChange={(event) => setNotes(event.target.value)} value={notes} />
+        </label>
+        <label>
+          <span>Created by</span>
+          <input onChange={(event) => setCreatedBy(event.target.value)} value={createdBy} />
+        </label>
+        <button disabled={creating} type="submit">
+          {creating ? "Creating..." : "Create Draft PO"}
+        </button>
+      </form>
+      {validationError && <div className="state error">{validationError}</div>}
+    </section>
+  );
+}
+
+function PurchaseOrdersTable({
+  onSelect,
+  purchaseOrders,
+  resource,
+  selectedPoId,
+}: {
+  onSelect: (poId: number) => void;
+  purchaseOrders: PurchaseOrder[];
+  resource: ResourceState<PurchaseOrder>;
+  selectedPoId: number | null;
+}) {
+  if (resource.loading) {
+    return <div className="state">Loading purchase orders...</div>;
+  }
+  if (resource.error) {
+    return <div className="state error">Could not load purchase orders: {resource.error}</div>;
+  }
+
+  return (
+    <section className="table-wrap" aria-label="Purchase orders list">
+      <table>
+        <thead>
+          <tr>
+            <th>PO ID</th>
+            <th>Supplier</th>
+            <th>Status</th>
+            <th>Total</th>
+            <th>Currency</th>
+            <th>Created</th>
+            <th>Notes</th>
+            <th>Lines</th>
+            <th>View</th>
+          </tr>
+        </thead>
+        <tbody>
+          {purchaseOrders.map((po) => (
+            <tr key={po.id}>
+              <td>{po.id}</td>
+              <td>{formatValue(po.supplier_name)}</td>
+              <td>
+                <span className={purchaseOrderStatusClassName(po.status)}>{po.status}</span>
+              </td>
+              <td>{formatValue(po.total_amount)}</td>
+              <td>{formatValue(po.currency)}</td>
+              <td>{formatDate(po.created_at)}</td>
+              <td>{formatValue(po.notes)}</td>
+              <td>{po.lines.length}</td>
+              <td>
+                <button onClick={() => onSelect(po.id)} type="button">
+                  {selectedPoId === po.id ? "Viewing" : "View"}
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {purchaseOrders.length === 0 && <div className="state">No purchase orders found.</div>}
+    </section>
+  );
+}
+
+function PurchaseOrderDetail({
+  headerActionLoading,
+  lineActionLoading,
+  onAddLine,
+  onCancel,
+  onSubmitForApproval,
+  onUpdateLine,
+  purchaseOrder,
+}: {
+  headerActionLoading: boolean;
+  lineActionLoading: boolean;
+  onAddLine: (payload: AddPurchaseOrderLineRequest) => Promise<void>;
+  onCancel: () => void;
+  onSubmitForApproval: () => void;
+  onUpdateLine: (lineId: number, payload: UpdatePurchaseOrderLineRequest) => Promise<void>;
+  purchaseOrder: PurchaseOrder;
+}) {
+  const canEdit = purchaseOrder.status === "draft";
+  const canCancel = purchaseOrder.status === "draft" || purchaseOrder.status === "pending_approval";
+
+  return (
+    <section className="detail-panel" aria-label="Purchase order details">
+      <div className="section-header">
+        <h2>Purchase Order {purchaseOrder.id}</h2>
+        <div className="action-row">
+          {canEdit && (
+            <button disabled={headerActionLoading} onClick={onSubmitForApproval} type="button">
+              Submit for Approval
+            </button>
+          )}
+          {canCancel && (
+            <button disabled={headerActionLoading} onClick={onCancel} type="button">
+              Cancel
+            </button>
+          )}
+        </div>
+      </div>
+      {canEdit && (
+        <div className="state">
+          Submit for approval only moves this draft into review; it does not issue the PO.
+        </div>
+      )}
+      <dl className="detail-list">
+        <div>
+          <dt>Supplier</dt>
+          <dd>{formatValue(purchaseOrder.supplier_name)}</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd>
+            <span className={purchaseOrderStatusClassName(purchaseOrder.status)}>
+              {purchaseOrder.status}
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt>Notes</dt>
+          <dd>{formatValue(purchaseOrder.notes)}</dd>
+        </div>
+        <div>
+          <dt>Total</dt>
+          <dd>
+            {formatValue(purchaseOrder.total_amount)} {formatValue(purchaseOrder.currency)}
+          </dd>
+        </div>
+        <div>
+          <dt>Created</dt>
+          <dd>{formatDate(purchaseOrder.created_at)}</dd>
+        </div>
+        <div>
+          <dt>Updated</dt>
+          <dd>{formatDate(purchaseOrder.updated_at)}</dd>
+        </div>
+        <div>
+          <dt>Cancelled</dt>
+          <dd>{formatDate(purchaseOrder.cancelled_at)}</dd>
+        </div>
+      </dl>
+
+      {canEdit && <AddPurchaseOrderLineForm loading={lineActionLoading} onAddLine={onAddLine} />}
+      <PurchaseOrderLinesTable
+        canEdit={canEdit}
+        lineActionLoading={lineActionLoading}
+        onUpdateLine={onUpdateLine}
+        purchaseOrder={purchaseOrder}
+      />
+    </section>
+  );
+}
+
+function AddPurchaseOrderLineForm({
+  loading,
+  onAddLine,
+}: {
+  loading: boolean;
+  onAddLine: (payload: AddPurchaseOrderLineRequest) => Promise<void>;
+}) {
+  const [productSupplierId, setProductSupplierId] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [notes, setNotes] = useState("");
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedProductSupplierId = Number(productSupplierId);
+    const parsedQuantity = Number(quantity);
+
+    if (!Number.isInteger(parsedProductSupplierId) || parsedProductSupplierId <= 0) {
+      setValidationError("ProductSupplier ID is required.");
+      return;
+    }
+    if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) {
+      setValidationError("Quantity must be greater than zero.");
+      return;
+    }
+
+    setValidationError(null);
+    await onAddLine({
+      product_supplier_id: parsedProductSupplierId,
+      quantity: parsedQuantity,
+      notes: notes || null,
+    });
+  }
+
+  return (
+    <section className="nested-panel" aria-label="Add purchase order line">
+      <h3>Add Line</h3>
+      <form className="mapping-form" onSubmit={handleSubmit}>
+        <label>
+          <span>ProductSupplier ID</span>
+          <input
+            onChange={(event) => setProductSupplierId(event.target.value)}
+            value={productSupplierId}
+          />
+        </label>
+        <label>
+          <span>Quantity</span>
+          <input onChange={(event) => setQuantity(event.target.value)} value={quantity} />
+        </label>
+        <label>
+          <span>Notes</span>
+          <input onChange={(event) => setNotes(event.target.value)} value={notes} />
+        </label>
+        <button disabled={loading} type="submit">
+          {loading ? "Adding..." : "Add Line"}
+        </button>
+      </form>
+      {validationError && <div className="state error">{validationError}</div>}
+    </section>
+  );
+}
+
+function PurchaseOrderLinesTable({
+  canEdit,
+  lineActionLoading,
+  onUpdateLine,
+  purchaseOrder,
+}: {
+  canEdit: boolean;
+  lineActionLoading: boolean;
+  onUpdateLine: (lineId: number, payload: UpdatePurchaseOrderLineRequest) => Promise<void>;
+  purchaseOrder: PurchaseOrder;
+}) {
+  return (
+    <section className="table-wrap nested-table" aria-label="Purchase order lines">
+      <table>
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>ProductSupplier ID</th>
+            <th>Supplier SKU</th>
+            <th>Supplier product</th>
+            <th>Quantity</th>
+            <th>Unit cost</th>
+            <th>Currency</th>
+            <th>Line total</th>
+            <th>MOQ</th>
+            <th>Pack size</th>
+            <th>Lead time</th>
+            <th>Notes</th>
+            {canEdit && <th>Edit</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {purchaseOrder.lines.map((line) => (
+            <tr key={line.id}>
+              <td>{formatValue(line.product_name ?? line.product_id)}</td>
+              <td>{line.product_supplier_id}</td>
+              <td>{formatValue(line.supplier_sku)}</td>
+              <td>{formatValue(line.supplier_product_name)}</td>
+              <td>{formatValue(line.quantity)}</td>
+              <td>{formatValue(line.unit_cost)}</td>
+              <td>{formatValue(line.currency)}</td>
+              <td>{formatValue(line.line_total)}</td>
+              <td>{formatValue(line.minimum_order_quantity)}</td>
+              <td>{formatValue(line.pack_size)}</td>
+              <td>{formatValue(line.lead_time_days)}</td>
+              <td>{formatValue(line.notes)}</td>
+              {canEdit && (
+                <td>
+                  <InlineLineEditor
+                    disabled={lineActionLoading}
+                    line={line}
+                    onUpdateLine={onUpdateLine}
+                  />
+                </td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {purchaseOrder.lines.length === 0 && <div className="state">No lines added yet.</div>}
+    </section>
+  );
+}
+
+function InlineLineEditor({
+  disabled,
+  line,
+  onUpdateLine,
+}: {
+  disabled: boolean;
+  line: PurchaseOrder["lines"][number];
+  onUpdateLine: (lineId: number, payload: UpdatePurchaseOrderLineRequest) => Promise<void>;
+}) {
+  const [quantity, setQuantity] = useState(String(line.quantity));
+  const [notes, setNotes] = useState(line.notes ?? "");
+
+  return (
+    <form
+      className="inline-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onUpdateLine(line.id, {
+          quantity: Number(quantity),
+          notes: notes || null,
+        });
+      }}
+    >
+      <input
+        aria-label={`Quantity for line ${line.id}`}
+        onChange={(event) => setQuantity(event.target.value)}
+        value={quantity}
+      />
+      <input
+        aria-label={`Notes for line ${line.id}`}
+        onChange={(event) => setNotes(event.target.value)}
+        value={notes}
+      />
+      <button disabled={disabled} type="submit">
+        Save
+      </button>
+    </form>
   );
 }
 

@@ -116,3 +116,65 @@ export interface ForecastResponse {
   risk_level: string;
   explanation: string;
 }
+
+export type PurchaseOrderStatus =
+  | "draft"
+  | "pending_approval"
+  | "approved"
+  | "issued"
+  | "received"
+  | "cancelled"
+  | string;
+
+export interface PurchaseOrderLine {
+  id: number;
+  purchase_order_id: number;
+  product_id: number;
+  product_name?: string | null;
+  product_supplier_id: number;
+  supplier_sku: string | null;
+  supplier_product_name: string | null;
+  quantity: number;
+  unit_cost: number | null;
+  currency: string | null;
+  line_total: number | null;
+  minimum_order_quantity: number | null;
+  pack_size: number | null;
+  lead_time_days: number | null;
+  notes: string | null;
+}
+
+export interface PurchaseOrder {
+  id: number;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  status: PurchaseOrderStatus;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+  issued_at: string | null;
+  cancelled_at: string | null;
+  notes: string | null;
+  total_amount: number | null;
+  currency: string | null;
+  created_by: string | null;
+  approved_by: string | null;
+  lines: PurchaseOrderLine[];
+}
+
+export interface CreatePurchaseOrderRequest {
+  supplier_id: number;
+  notes?: string | null;
+  created_by?: string | null;
+}
+
+export interface AddPurchaseOrderLineRequest {
+  product_supplier_id: number;
+  quantity: number;
+  notes?: string | null;
+}
+
+export interface UpdatePurchaseOrderLineRequest {
+  quantity?: number | null;
+  notes?: string | null;
+}

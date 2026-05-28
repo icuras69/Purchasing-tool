@@ -1,8 +1,12 @@
 import type {
   ForecastResponse,
+  AddPurchaseOrderLineRequest,
+  CreatePurchaseOrderRequest,
   Product,
   ProductSupplierInput,
   ProductSupplierMapping,
+  PurchaseOrder,
+  UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
 
@@ -34,7 +38,16 @@ async function sendJson<T>(
 
 async function parseJsonResponse<T>(response: Response, label: string): Promise<T> {
   if (!response.ok) {
-    throw new Error(`Failed to load ${label} (${response.status})`);
+    let detail: string | null = null;
+    try {
+      const errorBody = await response.json();
+      if (typeof errorBody.detail === "string") {
+        detail = errorBody.detail;
+      }
+    } catch {
+      detail = null;
+    }
+    throw new Error(detail ?? `Failed to load ${label} (${response.status})`);
   }
 
   return response.json();
@@ -109,4 +122,54 @@ export function unsetPreferredProductSupplier(mappingId: number): Promise<Produc
     "product supplier",
     { method: "POST" },
   );
+}
+
+export function listPurchaseOrders(): Promise<PurchaseOrder[]> {
+  return fetchJson<PurchaseOrder[]>("/purchase-orders", "purchase orders");
+}
+
+export function getPurchaseOrder(poId: number): Promise<PurchaseOrder> {
+  return fetchJson<PurchaseOrder>(`/purchase-orders/${poId}`, "purchase order");
+}
+
+export function createPurchaseOrder(payload: CreatePurchaseOrderRequest): Promise<PurchaseOrder> {
+  return sendJson<PurchaseOrder>("/purchase-orders", "purchase order", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function addPurchaseOrderLine(
+  poId: number,
+  payload: AddPurchaseOrderLineRequest,
+): Promise<PurchaseOrder> {
+  return sendJson<PurchaseOrder>(`/purchase-orders/${poId}/lines`, "purchase order line", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updatePurchaseOrderLine(
+  poId: number,
+  lineId: number,
+  payload: UpdatePurchaseOrderLineRequest,
+): Promise<PurchaseOrder> {
+  return sendJson<PurchaseOrder>(`/purchase-orders/${poId}/lines/${lineId}`, "purchase order line", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function submitPurchaseOrderForApproval(poId: number): Promise<PurchaseOrder> {
+  return sendJson<PurchaseOrder>(
+    `/purchase-orders/${poId}/submit-for-approval`,
+    "purchase order",
+    { method: "POST" },
+  );
+}
+
+export function cancelPurchaseOrder(poId: number): Promise<PurchaseOrder> {
+  return sendJson<PurchaseOrder>(`/purchase-orders/${poId}/cancel`, "purchase order", {
+    method: "POST",
+  });
 }

@@ -4,17 +4,23 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import {
   confirmProductSupplier,
+  addPurchaseOrderLine,
+  cancelPurchaseOrder,
+  createPurchaseOrder,
   createProductSupplier,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
+  getPurchaseOrder,
+  listPurchaseOrders,
   rejectProductSupplier,
   setPreferredProductSupplier,
+  submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
 } from "./api";
-import type { ForecastResponse, Product, ProductSupplierMapping, WeakMapping } from "./types";
+import type { ForecastResponse, Product, ProductSupplierMapping, PurchaseOrder, WeakMapping } from "./types";
 
 vi.mock("./api", () => ({
   fetchProducts: vi.fn(),
@@ -27,6 +33,13 @@ vi.mock("./api", () => ({
   rejectProductSupplier: vi.fn(),
   setPreferredProductSupplier: vi.fn(),
   unsetPreferredProductSupplier: vi.fn(),
+  listPurchaseOrders: vi.fn(),
+  getPurchaseOrder: vi.fn(),
+  createPurchaseOrder: vi.fn(),
+  addPurchaseOrderLine: vi.fn(),
+  updatePurchaseOrderLine: vi.fn(),
+  submitPurchaseOrderForApproval: vi.fn(),
+  cancelPurchaseOrder: vi.fn(),
 }));
 
 const productDefaults: Product = {
@@ -133,6 +146,45 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
   };
 }
 
+function mockPurchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrder {
+  return {
+    id: 500,
+    supplier_id: 10,
+    supplier_name: "Acme Supplies",
+    status: "draft",
+    created_at: "2026-05-28T10:00:00",
+    updated_at: "2026-05-28T10:00:00",
+    approved_at: null,
+    issued_at: null,
+    cancelled_at: null,
+    notes: "Draft PO",
+    total_amount: 19,
+    currency: "USD",
+    created_by: "tester",
+    approved_by: null,
+    lines: [
+      {
+        id: 700,
+        purchase_order_id: 500,
+        product_id: 1,
+        product_name: null,
+        product_supplier_id: 100,
+        supplier_sku: "ACME-1",
+        supplier_product_name: "Acme Product Pack",
+        quantity: 2,
+        unit_cost: 9.5,
+        currency: "USD",
+        line_total: 19,
+        minimum_order_quantity: 1,
+        pack_size: 1,
+        lead_time_days: 4,
+        notes: "Line notes",
+      },
+    ],
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(fetchProducts).mockResolvedValue([]);
@@ -145,6 +197,16 @@ beforeEach(() => {
   vi.mocked(rejectProductSupplier).mockResolvedValue(mockSupplierMapping({ match_status: "rejected" }));
   vi.mocked(setPreferredProductSupplier).mockResolvedValue(mockSupplierMapping({ is_preferred: true }));
   vi.mocked(unsetPreferredProductSupplier).mockResolvedValue(mockSupplierMapping({ is_preferred: false }));
+  vi.mocked(listPurchaseOrders).mockResolvedValue([]);
+  vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+  vi.mocked(createPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+  vi.mocked(addPurchaseOrderLine).mockResolvedValue(mockPurchaseOrder());
+  vi.mocked(submitPurchaseOrderForApproval).mockResolvedValue(
+    mockPurchaseOrder({ status: "pending_approval" }),
+  );
+  vi.mocked(cancelPurchaseOrder).mockResolvedValue(
+    mockPurchaseOrder({ status: "cancelled", cancelled_at: "2026-05-28T11:00:00" }),
+  );
   vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
@@ -157,6 +219,7 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Weak Mappings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Mappings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
     expect(await screen.findByText("No products found.")).toBeInTheDocument();
   });
 
@@ -392,5 +455,96 @@ describe("App mapping review workflow", () => {
 
     const rejected = await screen.findByText("rejected");
     expect(rejected).toHaveClass("rejected");
+  });
+
+  it("purchase orders tab renders and lists a draft PO", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+
+    expect(await screen.findByText("Acme Supplies")).toBeInTheDocument();
+    expect(screen.getByText("draft")).toBeInTheDocument();
+    expect(screen.getByText("Draft PO")).toBeInTheDocument();
+    expect(screen.getByText("19")).toBeInTheDocument();
+  });
+
+  it("create draft PO form validates supplier_id", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create Draft PO" }));
+
+    expect(await screen.findByText("Supplier ID is required.")).toBeInTheDocument();
+    expect(createPurchaseOrder).not.toHaveBeenCalled();
+  });
+
+  it("add line form validates product supplier and quantity", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await screen.findByText("Purchase Order 500");
+    await userEvent.click(screen.getByRole("button", { name: "Add Line" }));
+
+    expect(await screen.findByText("ProductSupplier ID is required.")).toBeInTheDocument();
+    expect(addPurchaseOrderLine).not.toHaveBeenCalled();
+
+    await userEvent.type(screen.getByLabelText("ProductSupplier ID"), "100");
+    await userEvent.click(screen.getByRole("button", { name: "Add Line" }));
+
+    expect(await screen.findByText("Quantity must be greater than zero.")).toBeInTheDocument();
+    expect(addPurchaseOrderLine).not.toHaveBeenCalled();
+  });
+
+  it("shows backend error when adding an invalid PO line", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+    vi.mocked(addPurchaseOrderLine).mockRejectedValue(
+      new Error("ProductSupplier belongs to a different supplier."),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.type(screen.getByLabelText("ProductSupplier ID"), "101");
+    await userEvent.type(screen.getByLabelText("Quantity"), "3");
+    await userEvent.click(screen.getByRole("button", { name: "Add Line" }));
+
+    expect(
+      await screen.findByText(
+        "Purchase order action failed: ProductSupplier belongs to a different supplier.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("submit for approval calls the correct endpoint", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Submit for Approval" }));
+
+    expect(submitPurchaseOrderForApproval).toHaveBeenCalledWith(500);
+  });
+
+  it("cancel purchase order asks for confirmation", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    expect(window.confirm).toHaveBeenCalledWith("Cancel this purchase order?");
+    expect(cancelPurchaseOrder).toHaveBeenCalledWith(500);
   });
 });
