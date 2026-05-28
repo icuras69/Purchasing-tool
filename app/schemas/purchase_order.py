@@ -10,6 +10,13 @@ class PurchaseOrderCreate(BaseModel):
     created_by: str | None = None
 
 
+class DraftPurchaseOrderFromProductsCreate(BaseModel):
+    supplier_id: int
+    product_ids: list[int]
+    notes: str | None = None
+    created_by: str | None = None
+
+
 class PurchaseOrderLineCreate(BaseModel):
     product_supplier_id: int
     quantity: float
@@ -59,3 +66,19 @@ class PurchaseOrderResponse(BaseModel):
     created_by: str | None
     approved_by: str | None
     lines: list[PurchaseOrderLineResponse] = []
+
+
+class DraftPurchaseOrderSkippedProductResponse(BaseModel):
+    product_id: int
+    product_name: str | None
+    reason: str
+
+
+class DraftPurchaseOrderSummaryResponse(BaseModel):
+    created_line_count: int
+    skipped_products: list[DraftPurchaseOrderSkippedProductResponse]
+
+
+class DraftPurchaseOrderFromProductsResponse(BaseModel):
+    purchase_order: PurchaseOrderResponse
+    summary: DraftPurchaseOrderSummaryResponse

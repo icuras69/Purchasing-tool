@@ -8,12 +8,18 @@ from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.product_supplier import ProductSupplier
 from app.models.supplier import Supplier
 from app.schemas.purchase_order import (
+    DraftPurchaseOrderFromProductsCreate,
+    DraftPurchaseOrderFromProductsResponse,
     PurchaseOrderApprove,
     PurchaseOrderCreate,
     PurchaseOrderLineCreate,
     PurchaseOrderLineResponse,
     PurchaseOrderLineUpdate,
     PurchaseOrderResponse,
+)
+from app.services.purchase_order_drafting import (
+    DraftPurchaseOrderError,
+    create_draft_purchase_order_from_products,
 )
 
 router = APIRouter(prefix="/purchase-orders", tags=["purchase-orders"])
@@ -153,6 +159,56 @@ def create_purchase_order(payload: PurchaseOrderCreate, db: Session = Depends(ge
     db.add(po)
     db.commit()
     return serialize_purchase_order(load_purchase_order(db, po.id))
+
+
+def serialize_skipped_products(skipped_products) -> list[dict]:
+    return [
+        {
+            "product_id": skipped.product_id,
+            "product_name": skipped.product_name,
+            "reason": skipped.reason,
+        }
+        for skipped in skipped_products
+    ]
+
+
+@router.post(
+    "/draft-from-products",
+    response_model=DraftPurchaseOrderFromProductsResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_draft_purchase_order_from_product_recommendations(
+    payload: DraftPurchaseOrderFromProductsCreate,
+    db: Session = Depends(get_db),
+):
+    if not payload.product_ids:
+        raise HTTPException(status_code=400, detail="At least one product_id is required.")
+
+    try:
+        result = create_draft_purchase_order_from_products(
+            db,
+            supplier_id=payload.supplier_id,
+            product_ids=payload.product_ids,
+            created_by=payload.created_by,
+            notes=payload.notes,
+        )
+    except DraftPurchaseOrderError as error:
+        status_code = 404 if error.message == "Supplier not found." else 400
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "message": error.message,
+                "skipped_products": serialize_skipped_products(error.skipped_products),
+            },
+        ) from error
+
+    return {
+        "purchase_order": serialize_purchase_order(load_purchase_order(db, result.purchase_order.id)),
+        "summary": {
+            "created_line_count": result.created_line_count,
+            "skipped_products": serialize_skipped_products(result.skipped_products),
+        },
+    }
 
 
 @router.get("", response_model=list[PurchaseOrderResponse])
