@@ -136,6 +136,26 @@ button:disabled {
   color: #9a3412;
 }
 
+.pending-approval {
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+.approved {
+  background: #ecfdf3;
+  color: #027a48;
+}
+
+.issued {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.received {
+  background: #f0fdf4;
+  color: #15803d;
+}
+
 .rejected {
   background: #f3f4f6;
   color: #4b5563;
@@ -185,6 +205,26 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.approval-form {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.approval-form label {
+  color: #374151;
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+}
+
+.approval-form input {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
 }
 
 .action-state {

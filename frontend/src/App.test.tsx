@@ -5,6 +5,7 @@ import App from "./App";
 import {
   confirmProductSupplier,
   addPurchaseOrderLine,
+  approvePurchaseOrder,
   cancelPurchaseOrder,
   createPurchaseOrder,
   createProductSupplier,
@@ -14,7 +15,9 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   getPurchaseOrder,
+  issuePurchaseOrder,
   listPurchaseOrders,
+  receivePurchaseOrder,
   rejectProductSupplier,
   setPreferredProductSupplier,
   submitPurchaseOrderForApproval,
@@ -39,6 +42,9 @@ vi.mock("./api", () => ({
   addPurchaseOrderLine: vi.fn(),
   updatePurchaseOrderLine: vi.fn(),
   submitPurchaseOrderForApproval: vi.fn(),
+  approvePurchaseOrder: vi.fn(),
+  issuePurchaseOrder: vi.fn(),
+  receivePurchaseOrder: vi.fn(),
   cancelPurchaseOrder: vi.fn(),
 }));
 
@@ -156,6 +162,7 @@ function mockPurchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrde
     updated_at: "2026-05-28T10:00:00",
     approved_at: null,
     issued_at: null,
+    received_at: null,
     cancelled_at: null,
     notes: "Draft PO",
     total_amount: 19,
@@ -203,6 +210,19 @@ beforeEach(() => {
   vi.mocked(addPurchaseOrderLine).mockResolvedValue(mockPurchaseOrder());
   vi.mocked(submitPurchaseOrderForApproval).mockResolvedValue(
     mockPurchaseOrder({ status: "pending_approval" }),
+  );
+  vi.mocked(approvePurchaseOrder).mockResolvedValue(
+    mockPurchaseOrder({
+      status: "approved",
+      approved_at: "2026-05-28T11:00:00",
+      approved_by: "manager",
+    }),
+  );
+  vi.mocked(issuePurchaseOrder).mockResolvedValue(
+    mockPurchaseOrder({ status: "issued", issued_at: "2026-05-28T12:00:00" }),
+  );
+  vi.mocked(receivePurchaseOrder).mockResolvedValue(
+    mockPurchaseOrder({ status: "received", received_at: "2026-05-28T13:00:00" }),
   );
   vi.mocked(cancelPurchaseOrder).mockResolvedValue(
     mockPurchaseOrder({ status: "cancelled", cancelled_at: "2026-05-28T11:00:00" }),
@@ -546,5 +566,174 @@ describe("App mapping review workflow", () => {
 
     expect(window.confirm).toHaveBeenCalledWith("Cancel this purchase order?");
     expect(cancelPurchaseOrder).toHaveBeenCalledWith(500);
+  });
+
+  it("pending approval PO shows approve action and hides line editing", async () => {
+    const pendingPo = mockPurchaseOrder({ status: "pending_approval" });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([pendingPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(pendingPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add Line" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+  });
+
+  it("approved PO shows issue action and no line editing", async () => {
+    const approvedPo = mockPurchaseOrder({
+      status: "approved",
+      approved_at: "2026-05-28T11:00:00",
+    });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([approvedPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(approvedPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("button", { name: "Issue" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Issue only marks this PO as internally issued. It does not send it externally."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add Line" })).not.toBeInTheDocument();
+  });
+
+  it("issued PO shows receive action and no line editing", async () => {
+    const issuedPo = mockPurchaseOrder({
+      status: "issued",
+      approved_at: "2026-05-28T11:00:00",
+      issued_at: "2026-05-28T12:00:00",
+    });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([issuedPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(issuedPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("button", { name: "Receive" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add Line" })).not.toBeInTheDocument();
+  });
+
+  it("received PO shows no workflow action buttons", async () => {
+    const receivedPo = mockPurchaseOrder({
+      status: "received",
+      approved_at: "2026-05-28T11:00:00",
+      issued_at: "2026-05-28T12:00:00",
+      received_at: "2026-05-28T13:00:00",
+    });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([receivedPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(receivedPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await screen.findByText("Purchase Order 500");
+
+    expect(screen.queryByRole("button", { name: "Submit for Approval" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Issue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Receive" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  });
+
+  it("cancelled PO shows no workflow action buttons", async () => {
+    const cancelledPo = mockPurchaseOrder({
+      status: "cancelled",
+      cancelled_at: "2026-05-28T11:00:00",
+    });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([cancelledPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(cancelledPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await screen.findByText("Purchase Order 500");
+
+    expect(screen.queryByRole("button", { name: "Submit for Approval" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Issue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Receive" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  });
+
+  it("approve action calls the approve endpoint with approved_by", async () => {
+    const pendingPo = mockPurchaseOrder({ status: "pending_approval" });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([pendingPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(pendingPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.type(await screen.findByLabelText("Approved by"), "manager");
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(approvePurchaseOrder).toHaveBeenCalledWith(500, { approved_by: "manager" });
+  });
+
+  it("issue action confirms before calling the issue endpoint", async () => {
+    const approvedPo = mockPurchaseOrder({ status: "approved" });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([approvedPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(approvedPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Issue" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      "Mark this purchase order as internally issued? This will not send it externally.",
+    );
+    expect(issuePurchaseOrder).toHaveBeenCalledWith(500);
+  });
+
+  it("receive action confirms before calling the receive endpoint", async () => {
+    const issuedPo = mockPurchaseOrder({ status: "issued" });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([issuedPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(issuedPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Receive" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      "Mark this purchase order as received? This will not update stock yet.",
+    );
+    expect(receivePurchaseOrder).toHaveBeenCalledWith(500);
+  });
+
+  it("shows backend errors from approval workflow actions", async () => {
+    const pendingPo = mockPurchaseOrder({ status: "pending_approval" });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([pendingPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(pendingPo);
+    vi.mocked(approvePurchaseOrder).mockRejectedValue(
+      new Error("Cannot approve a purchase order with no lines."),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    expect(
+      await screen.findByText(
+        "Purchase order action failed: Cannot approve a purchase order with no lines.",
+      ),
+    ).toBeInTheDocument();
   });
 });

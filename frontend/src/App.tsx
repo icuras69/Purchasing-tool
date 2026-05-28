@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } f
 import {
   confirmProductSupplier,
   addPurchaseOrderLine,
+  approvePurchaseOrder,
   cancelPurchaseOrder,
   createPurchaseOrder,
   createProductSupplier,
@@ -11,7 +12,9 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   getPurchaseOrder,
+  issuePurchaseOrder,
   listPurchaseOrders,
+  receivePurchaseOrder,
   rejectProductSupplier,
   setPreferredProductSupplier,
   submitPurchaseOrderForApproval,
@@ -105,6 +108,18 @@ function statusClassName(status: string | null | undefined): string {
 function purchaseOrderStatusClassName(status: string): string {
   if (status === "draft") {
     return "status needs-review";
+  }
+  if (status === "pending_approval") {
+    return "status pending-approval";
+  }
+  if (status === "approved") {
+    return "status approved";
+  }
+  if (status === "issued") {
+    return "status issued";
+  }
+  if (status === "received") {
+    return "status received";
   }
   if (status === "cancelled") {
     return "status rejected";
@@ -1253,6 +1268,57 @@ function PurchaseOrdersPanel() {
     }
   }
 
+  async function handleApprove(approvedBy: string | null) {
+    if (!selectedPo) {
+      return;
+    }
+    setHeaderActionLoading(true);
+    setActionError(null);
+    try {
+      const updated = await approvePurchaseOrder(selectedPo.id, { approved_by: approvedBy });
+      setSelectedPo(updated);
+      loadPurchaseOrders();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setHeaderActionLoading(false);
+    }
+  }
+
+  async function handleIssue() {
+    if (!selectedPo || !window.confirm("Mark this purchase order as internally issued? This will not send it externally.")) {
+      return;
+    }
+    setHeaderActionLoading(true);
+    setActionError(null);
+    try {
+      const updated = await issuePurchaseOrder(selectedPo.id);
+      setSelectedPo(updated);
+      loadPurchaseOrders();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setHeaderActionLoading(false);
+    }
+  }
+
+  async function handleReceive() {
+    if (!selectedPo || !window.confirm("Mark this purchase order as received? This will not update stock yet.")) {
+      return;
+    }
+    setHeaderActionLoading(true);
+    setActionError(null);
+    try {
+      const updated = await receivePurchaseOrder(selectedPo.id);
+      setSelectedPo(updated);
+      loadPurchaseOrders();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setHeaderActionLoading(false);
+    }
+  }
+
   async function handleCancel() {
     if (!selectedPo || !window.confirm("Cancel this purchase order?")) {
       return;
@@ -1286,7 +1352,10 @@ function PurchaseOrdersPanel() {
           headerActionLoading={headerActionLoading}
           lineActionLoading={lineActionLoading}
           onAddLine={handleAddLine}
+          onApprove={handleApprove}
           onCancel={handleCancel}
+          onIssue={handleIssue}
+          onReceive={handleReceive}
           onSubmitForApproval={handleSubmitForApproval}
           onUpdateLine={handleUpdateLine}
           purchaseOrder={selectedPo}
@@ -1415,7 +1484,10 @@ function PurchaseOrderDetail({
   headerActionLoading,
   lineActionLoading,
   onAddLine,
+  onApprove,
   onCancel,
+  onIssue,
+  onReceive,
   onSubmitForApproval,
   onUpdateLine,
   purchaseOrder,
@@ -1423,13 +1495,20 @@ function PurchaseOrderDetail({
   headerActionLoading: boolean;
   lineActionLoading: boolean;
   onAddLine: (payload: AddPurchaseOrderLineRequest) => Promise<void>;
+  onApprove: (approvedBy: string | null) => Promise<void>;
   onCancel: () => void;
+  onIssue: () => void;
+  onReceive: () => void;
   onSubmitForApproval: () => void;
   onUpdateLine: (lineId: number, payload: UpdatePurchaseOrderLineRequest) => Promise<void>;
   purchaseOrder: PurchaseOrder;
 }) {
+  const [approvedBy, setApprovedBy] = useState("");
   const canEdit = purchaseOrder.status === "draft";
   const canCancel = purchaseOrder.status === "draft" || purchaseOrder.status === "pending_approval";
+  const canApprove = purchaseOrder.status === "pending_approval";
+  const canIssue = purchaseOrder.status === "approved";
+  const canReceive = purchaseOrder.status === "issued";
 
   return (
     <section className="detail-panel" aria-label="Purchase order details">
@@ -1439,6 +1518,36 @@ function PurchaseOrderDetail({
           {canEdit && (
             <button disabled={headerActionLoading} onClick={onSubmitForApproval} type="button">
               Submit for Approval
+            </button>
+          )}
+          {canApprove && (
+            <form
+              className="approval-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                onApprove(approvedBy || null);
+              }}
+            >
+              <label>
+                <span>Approved by</span>
+                <input
+                  onChange={(event) => setApprovedBy(event.target.value)}
+                  value={approvedBy}
+                />
+              </label>
+              <button disabled={headerActionLoading} type="submit">
+                Approve
+              </button>
+            </form>
+          )}
+          {canIssue && (
+            <button disabled={headerActionLoading} onClick={onIssue} type="button">
+              Issue
+            </button>
+          )}
+          {canReceive && (
+            <button disabled={headerActionLoading} onClick={onReceive} type="button">
+              Receive
             </button>
           )}
           {canCancel && (
@@ -1451,6 +1560,11 @@ function PurchaseOrderDetail({
       {canEdit && (
         <div className="state">
           Submit for approval only moves this draft into review; it does not issue the PO.
+        </div>
+      )}
+      {canIssue && (
+        <div className="state warning">
+          Issue only marks this PO as internally issued. It does not send it externally.
         </div>
       )}
       <dl className="detail-list">
@@ -1483,6 +1597,18 @@ function PurchaseOrderDetail({
         <div>
           <dt>Updated</dt>
           <dd>{formatDate(purchaseOrder.updated_at)}</dd>
+        </div>
+        <div>
+          <dt>Approved</dt>
+          <dd>{formatDate(purchaseOrder.approved_at)}</dd>
+        </div>
+        <div>
+          <dt>Issued</dt>
+          <dd>{formatDate(purchaseOrder.issued_at)}</dd>
+        </div>
+        <div>
+          <dt>Received</dt>
+          <dd>{formatDate(purchaseOrder.received_at)}</dd>
         </div>
         <div>
           <dt>Cancelled</dt>

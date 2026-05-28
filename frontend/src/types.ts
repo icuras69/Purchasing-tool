@@ -153,6 +153,7 @@ export interface PurchaseOrder {
   updated_at: string;
   approved_at: string | null;
   issued_at: string | null;
+  received_at: string | null;
   cancelled_at: string | null;
   notes: string | null;
   total_amount: number | null;
@@ -177,4 +178,8 @@ export interface AddPurchaseOrderLineRequest {
 export interface UpdatePurchaseOrderLineRequest {
   quantity?: number | null;
   notes?: string | null;
+}
+
+export interface ApprovePurchaseOrderRequest {
+  approved_by?: string | null;
 }

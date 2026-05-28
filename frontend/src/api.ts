@@ -1,6 +1,7 @@
 import type {
   ForecastResponse,
   AddPurchaseOrderLineRequest,
+  ApprovePurchaseOrderRequest,
   CreatePurchaseOrderRequest,
   Product,
   ProductSupplierInput,
@@ -166,6 +167,28 @@ export function submitPurchaseOrderForApproval(poId: number): Promise<PurchaseOr
     "purchase order",
     { method: "POST" },
   );
+}
+
+export function approvePurchaseOrder(
+  poId: number,
+  payload: ApprovePurchaseOrderRequest = {},
+): Promise<PurchaseOrder> {
+  return sendJson<PurchaseOrder>(`/purchase-orders/${poId}/approve`, "purchase order", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function issuePurchaseOrder(poId: number): Promise<PurchaseOrder> {
+  return sendJson<PurchaseOrder>(`/purchase-orders/${poId}/issue`, "purchase order", {
+    method: "POST",
+  });
+}
+
+export function receivePurchaseOrder(poId: number): Promise<PurchaseOrder> {
+  return sendJson<PurchaseOrder>(`/purchase-orders/${poId}/receive`, "purchase order", {
+    method: "POST",
+  });
 }
 
 export function cancelPurchaseOrder(poId: number): Promise<PurchaseOrder> {
