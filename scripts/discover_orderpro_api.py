@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -46,6 +46,30 @@ STOCK_COUNT_ENDPOINTS = [
 ]
 
 MAX_TEXT_PREVIEW_CHARS = 300
+
+SUPPLIER_RELATIONSHIP_KEYS = {
+    "supplier",
+    "supplier_id",
+    "supplier_code",
+    "supplier_name",
+    "vendor",
+    "vendor_id",
+    "supplier_sku",
+}
+
+PURCHASING_FIELD_KEYS = {
+    "cost",
+    "cost_price",
+    "currency",
+    "lead_time",
+    "lead_time_days",
+    "minimum_order_quantity",
+    "moq",
+    "pack_size",
+    "purchase_price",
+    "supplier_price",
+    "unit_cost",
+}
 
 
 def response_style(payload: Any) -> str:
@@ -162,6 +186,70 @@ def sanitized_text_preview(text: str | None, max_chars: int = MAX_TEXT_PREVIEW_C
     return cleaned[:max_chars]
 
 
+def collect_matching_key_paths(payload: Any, wanted_keys: set[str], prefix: str = "") -> dict[str, Any]:
+    matches: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if key_text.lower() in wanted_keys:
+                matches[path] = summarized_value(value)
+            matches.update(collect_matching_key_paths(value, wanted_keys, path))
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload[:3]):
+            path = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            matches.update(collect_matching_key_paths(value, wanted_keys, path))
+    return matches
+
+
+def summarized_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {"type": "object", "keys": sorted(str(key) for key in value.keys())}
+    if isinstance(value, list):
+        return {"type": "array", "length_sampled": len(value)}
+    if isinstance(value, str):
+        return sanitized_text_preview(value, max_chars=120)
+    return value
+
+
+def scan_supplier_relationship_fields(payload: Any) -> dict[str, Any]:
+    return {
+        "supplier_fields": collect_matching_key_paths(payload, SUPPLIER_RELATIONSHIP_KEYS),
+        "purchasing_fields": collect_matching_key_paths(payload, PURCHASING_FIELD_KEYS),
+    }
+
+
+def first_record_from_payload(payload: Any) -> Any | None:
+    records = extract_records(payload)
+    return records[0] if records else None
+
+
+def inspect_first_purchase_order_item(payload: Any) -> dict[str, Any]:
+    order = first_record_from_payload(payload)
+    items = None
+    if isinstance(order, dict):
+        for key in ("items", "lines", "purchase_order_items", "order_items"):
+            if isinstance(order.get(key), list):
+                items = order[key]
+                break
+    first_item = items[0] if items else None
+    return {
+        "order_keys": sorted(str(key) for key in order.keys()) if isinstance(order, dict) else [],
+        "item_keys": sorted(str(key) for key in first_item.keys()) if isinstance(first_item, dict) else [],
+        "item_supplier_scan": scan_supplier_relationship_fields(first_item) if first_item is not None else {},
+    }
+
+
+def inspect_first_inventory_product(payload: Any) -> dict[str, Any]:
+    inventory_row = first_record_from_payload(payload)
+    product = inventory_row.get("product") if isinstance(inventory_row, dict) else None
+    return {
+        "inventory_row_keys": sorted(str(key) for key in inventory_row.keys()) if isinstance(inventory_row, dict) else [],
+        "product_keys": sorted(str(key) for key in product.keys()) if isinstance(product, dict) else [],
+        "product_supplier_scan": scan_supplier_relationship_fields(product) if product is not None else {},
+    }
+
+
 def sample_filename(endpoint: str) -> str:
     parsed = urlparse(endpoint)
     if parsed.scheme and parsed.netloc:
@@ -231,6 +319,138 @@ def discover_endpoint(
             "is_json": None,
             "error": str(error),
         }
+
+
+def discover_json_for_analysis(client: OrderProClient, endpoint: str) -> dict[str, Any]:
+    try:
+        page = client.generic_get_raw(endpoint)
+        if not page.is_json:
+            return {
+                "endpoint": endpoint,
+                "ok": False,
+                "status_code": page.status_code,
+                "content_type": page.content_type,
+                "error": "Response was not JSON.",
+                "text_preview": sanitized_text_preview(page.text),
+            }
+        return {
+            "endpoint": endpoint,
+            "ok": True,
+            "status_code": page.status_code,
+            "content_type": page.content_type,
+            "payload": page.payload,
+        }
+    except OrderProHTTPError as error:
+        return {
+            "endpoint": endpoint,
+            "ok": False,
+            "status_code": error.status_code,
+            "content_type": error.content_type,
+            "error": error.message,
+        }
+    except OrderProClientError as error:
+        return {
+            "endpoint": endpoint,
+            "ok": False,
+            "status_code": None,
+            "content_type": None,
+            "error": str(error),
+        }
+
+
+def product_detail_endpoints(product: dict[str, Any]) -> list[str]:
+    endpoints: list[str] = []
+    product_id = product.get("id")
+    sku = product.get("sku")
+
+    if product_id is not None:
+        id_path = f"/products/{product_id}"
+        endpoints.extend(
+            [
+                id_path,
+                f"{id_path}?include=supplier",
+                f"{id_path}?with=supplier",
+                f"{id_path}?relations=supplier",
+                f"{id_path}/supplier",
+            ]
+        )
+    if sku:
+        endpoints.append(f"/products/{quote(str(sku), safe='')}")
+
+    return endpoints
+
+
+def discover_product_supplier_relationships(
+    client: OrderProClient,
+    *,
+    product_limit: int = 3,
+) -> dict[str, Any]:
+    product_page = discover_json_for_analysis(client, "/products")
+    products = extract_records(product_page.get("payload")) if product_page.get("ok") else []
+    selected_products = [product for product in products if isinstance(product, dict)][:product_limit]
+
+    detail_results = []
+    for product in selected_products:
+        product_identity = {
+            "id": product.get("id"),
+            "sku": product.get("sku"),
+            "name": product.get("name"),
+            "list_supplier_scan": scan_supplier_relationship_fields(product),
+        }
+        for endpoint in product_detail_endpoints(product):
+            detail = discover_json_for_analysis(client, endpoint)
+            result = {
+                "product": product_identity,
+                "endpoint": endpoint,
+                "ok": detail["ok"],
+                "status_code": detail.get("status_code"),
+                "content_type": detail.get("content_type"),
+            }
+            if detail["ok"]:
+                result.update(scan_supplier_relationship_fields(detail["payload"]))
+                result["first_record_keys"] = summarize_json_shape(detail["payload"])["first_record_keys"]
+            else:
+                result["error"] = detail.get("error")
+            detail_results.append(result)
+
+    purchase_orders = discover_json_for_analysis(client, "/purchase-orders")
+    inventory = discover_json_for_analysis(client, "/inventory")
+
+    return {
+        "products_sampled": [
+            {"id": product.get("id"), "sku": product.get("sku"), "name": product.get("name")}
+            for product in selected_products
+        ],
+        "detail_results": detail_results,
+        "purchase_order_item_inspection": inspect_first_purchase_order_item(purchase_orders["payload"])
+        if purchase_orders.get("ok")
+        else {"error": purchase_orders.get("error"), "status_code": purchase_orders.get("status_code")},
+        "inventory_product_inspection": inspect_first_inventory_product(inventory["payload"])
+        if inventory.get("ok")
+        else {"error": inventory.get("error"), "status_code": inventory.get("status_code")},
+    }
+
+
+def print_product_supplier_relationship_discovery(result: dict[str, Any]) -> None:
+    print("\nProduct Supplier Relationship Discovery")
+    print(f"Products sampled: {json.dumps(result['products_sampled'], default=str)}")
+    for detail in result["detail_results"]:
+        product = detail["product"]
+        print(f"\nProduct: id={product.get('id')} sku={product.get('sku')} name={product.get('name')}")
+        print(f"Endpoint: {detail['endpoint']}")
+        print(f"Status: {detail.get('status_code')}")
+        print(f"OK: {detail['ok']}")
+        if not detail["ok"]:
+            print(f"Error: {detail.get('error')}")
+            continue
+        print(f"Supplier fields: {json.dumps(detail['supplier_fields'], default=str)}")
+        print(f"Purchasing fields: {json.dumps(detail['purchasing_fields'], default=str)}")
+        print(f"First record keys: {', '.join(detail.get('first_record_keys') or []) or '-'}")
+
+    print("\nPurchase order item inspection")
+    print(json.dumps(result["purchase_order_item_inspection"], indent=2, default=str))
+    print("\nInventory nested product inspection")
+    print(json.dumps(result["inventory_product_inspection"], indent=2, default=str))
 
 
 def non_json_summary(text: str | None) -> dict[str, Any]:
@@ -361,6 +581,17 @@ def main() -> int:
         help="Additional full OrderPro URL to test. Unknown hosts are refused.",
     )
     parser.add_argument(
+        "--discover-product-suppliers",
+        action="store_true",
+        help="Sample product detail endpoints and related payloads to find supplier relationship fields.",
+    )
+    parser.add_argument(
+        "--product-sample-size",
+        type=int,
+        default=3,
+        help="Number of products from the first /products page to use for supplier relationship discovery.",
+    )
+    parser.add_argument(
         "--endpoint",
         action="append",
         dest="endpoints",
@@ -378,6 +609,11 @@ def main() -> int:
 
     output_dir = PROJECT_ROOT / "tmp" / "orderpro_samples" if args.save_samples else None
     client = OrderProClient()
+
+    if args.discover_product_suppliers:
+        result = discover_product_supplier_relationships(client, product_limit=max(args.product_sample_size, 0))
+        print_product_supplier_relationship_discovery(result)
+        return 0
 
     endpoints = args.endpoints or DEFAULT_ENDPOINTS
     if args.include_warehouse_alternatives:
