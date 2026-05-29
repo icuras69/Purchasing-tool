@@ -3,6 +3,7 @@ from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.usage_history import UsageHistory
 from app.models.inventory_snapshot import InventorySnapshot
 from app.models.inventory_position import InventoryPosition
+from app.models.warehouse import Warehouse
 from app.models.recommendation import Recommendation
 from app.models.sales_history_raw import SalesHistoryRaw
 from app.models.supplier import Supplier
@@ -17,6 +18,7 @@ __all__ = [
     "UsageHistory",
     "InventorySnapshot",
     "InventoryPosition",
+    "Warehouse",
     "Recommendation",
     "SalesHistoryRaw",
     "Supplier",
