@@ -257,3 +257,15 @@ export interface RecommendationConvertResponse {
   recommendation: PurchaseRecommendation;
   purchase_order: PurchaseOrder;
 }
+
+export interface RecommendationLLMExplanation {
+  suggested_action: string;
+  summary: string;
+  explanation: string;
+  risk_flags: string[];
+  missing_data_warnings: string[];
+  confidence: number;
+  structured_data_citations: string[];
+  model_name: string;
+  prompt_version: string;
+}

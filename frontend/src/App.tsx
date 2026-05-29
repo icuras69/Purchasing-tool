@@ -15,6 +15,7 @@ import {
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
+  generateRecommendationLLMExplanation,
   getPurchaseOrder,
   getRecommendation,
   issuePurchaseOrder,
@@ -32,6 +33,7 @@ import { productMatchesQuery, supplierDisplayName } from "./productDisplay";
 import type {
   ForecastResponse,
   ForecastSupplierContext,
+  RecommendationLLMExplanation,
   Product,
   ProductSupplierInput,
   ProductSupplierMapping,
@@ -1385,6 +1387,8 @@ function RecommendationsPanel() {
   const [rejectReason, setRejectReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [loadingAction, setLoadingAction] = useState(false);
+  const [llmExplanation, setLlmExplanation] = useState<RecommendationLLMExplanation | null>(null);
+  const [llmSuccess, setLlmSuccess] = useState<string | null>(null);
 
   const loadRecommendations = useCallback((active = true) => {
     listRecommendations()
@@ -1416,7 +1420,9 @@ function RecommendationsPanel() {
 
   async function handleSelect(recommendationId: number) {
     setActionError(null);
+    setLlmSuccess(null);
     try {
+      setLlmExplanation(null);
       await refreshSelected(recommendationId);
     } catch (loadError) {
       setActionError((loadError as Error).message);
@@ -1436,6 +1442,8 @@ function RecommendationsPanel() {
     try {
       const created = await createReorderRecommendation(parsedProductId);
       setSelectedRecommendation(created);
+      setLlmExplanation(null);
+      setLlmSuccess(null);
       loadRecommendations();
     } catch (loadError) {
       setActionError((loadError as Error).message);
@@ -1450,6 +1458,8 @@ function RecommendationsPanel() {
     try {
       const updated = await action();
       setSelectedRecommendation(updated);
+      setLlmExplanation(null);
+      setLlmSuccess(null);
       loadRecommendations();
     } catch (loadError) {
       setActionError((loadError as Error).message);
@@ -1483,7 +1493,25 @@ function RecommendationsPanel() {
     try {
       const converted = await convertRecommendationToDraftPO(recommendation.id);
       setSelectedRecommendation(converted.recommendation);
+      setLlmExplanation(null);
+      setLlmSuccess(null);
       loadRecommendations();
+    } catch (loadError) {
+      setActionError((loadError as Error).message);
+    } finally {
+      setLoadingAction(false);
+    }
+  }
+
+  async function handleGenerateLLMExplanation(recommendation: PurchaseRecommendation) {
+    setLoadingAction(true);
+    setActionError(null);
+    setLlmSuccess(null);
+    try {
+      const explanation = await generateRecommendationLLMExplanation(recommendation.id);
+      setLlmExplanation(explanation);
+      setLlmSuccess("AI explanation generated.");
+      await refreshSelected(recommendation.id);
     } catch (loadError) {
       setActionError((loadError as Error).message);
     } finally {
@@ -1527,8 +1555,11 @@ function RecommendationsPanel() {
             )
           }
           onConvert={handleConvertRecommendation}
+          onGenerateLLMExplanation={handleGenerateLLMExplanation}
           onReject={handleRejectRecommendation}
           recommendation={selectedRecommendation}
+          llmExplanation={llmExplanation}
+          llmSuccess={llmSuccess}
           rejectReason={rejectReason}
           onRejectReasonChange={setRejectReason}
         />
@@ -1614,16 +1645,22 @@ function RecommendationsTable({
 
 function RecommendationDetail({
   loadingAction,
+  llmExplanation,
+  llmSuccess,
   onAccept,
   onConvert,
+  onGenerateLLMExplanation,
   onReject,
   onRejectReasonChange,
   recommendation,
   rejectReason,
 }: {
   loadingAction: boolean;
+  llmExplanation: RecommendationLLMExplanation | null;
+  llmSuccess: string | null;
   onAccept: (recommendation: PurchaseRecommendation) => void;
   onConvert: (recommendation: PurchaseRecommendation) => void;
+  onGenerateLLMExplanation: (recommendation: PurchaseRecommendation) => void;
   onReject: (recommendation: PurchaseRecommendation) => void;
   onRejectReasonChange: (value: string) => void;
   recommendation: PurchaseRecommendation;
@@ -1640,6 +1677,13 @@ function RecommendationDetail({
       <div className="section-header">
         <h2>Recommendation {recommendation.id}</h2>
         <div className="action-row">
+          <button
+            disabled={loadingAction}
+            onClick={() => onGenerateLLMExplanation(recommendation)}
+            type="button"
+          >
+            {loadingAction ? "Generating AI Explanation..." : "Generate AI Explanation"}
+          </button>
           {canAccept && (
             <button disabled={loadingAction} onClick={() => onAccept(recommendation)} type="button">
               Accept
@@ -1668,6 +1712,63 @@ function RecommendationDetail({
       <div className="state warning">
         Advisory only. Draft purchase orders still require human approval before issuing.
       </div>
+      <section className="nested-panel" aria-label="AI explanation">
+        <h3>AI Explanation</h3>
+        <div className="state warning">
+          AI explanations are advisory only. They do not approve, issue, or place purchase orders.
+        </div>
+        {llmSuccess && <div className="state success">{llmSuccess}</div>}
+        {llmExplanation ? (
+          <dl className="detail-list">
+            <div>
+              <dt>Suggested action</dt>
+              <dd>{formatValue(llmExplanation.suggested_action)}</dd>
+            </div>
+            <div>
+              <dt>Summary</dt>
+              <dd>{formatValue(llmExplanation.summary)}</dd>
+            </div>
+            <div>
+              <dt>Explanation</dt>
+              <dd>{formatValue(llmExplanation.explanation)}</dd>
+            </div>
+            <div>
+              <dt>Risk flags</dt>
+              <dd>{llmExplanation.risk_flags.length ? llmExplanation.risk_flags.join(", ") : "-"}</dd>
+            </div>
+            <div>
+              <dt>Missing data warnings</dt>
+              <dd>
+                {llmExplanation.missing_data_warnings.length
+                  ? llmExplanation.missing_data_warnings.join(", ")
+                  : "-"}
+              </dd>
+            </div>
+            <div>
+              <dt>Confidence</dt>
+              <dd>{formatValue(llmExplanation.confidence)}</dd>
+            </div>
+            <div>
+              <dt>Structured data citations</dt>
+              <dd>
+                {llmExplanation.structured_data_citations.length
+                  ? llmExplanation.structured_data_citations.join(", ")
+                  : "-"}
+              </dd>
+            </div>
+            <div>
+              <dt>Model</dt>
+              <dd>{formatValue(llmExplanation.model_name)}</dd>
+            </div>
+            <div>
+              <dt>Prompt version</dt>
+              <dd>{formatValue(llmExplanation.prompt_version)}</dd>
+            </div>
+          </dl>
+        ) : (
+          <div className="state">No AI explanation generated yet.</div>
+        )}
+      </section>
       <dl className="detail-list">
         <div>
           <dt>Status</dt>

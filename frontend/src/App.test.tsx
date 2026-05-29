@@ -18,6 +18,7 @@ import {
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
+  generateRecommendationLLMExplanation,
   getPurchaseOrder,
   getRecommendation,
   issuePurchaseOrder,
@@ -36,6 +37,7 @@ import type {
   ProductSupplierMapping,
   PurchaseOrder,
   PurchaseRecommendation,
+  RecommendationLLMExplanation,
   WeakMapping,
 } from "./types";
 
@@ -45,6 +47,7 @@ vi.mock("./api", () => ({
   fetchWeakMappings: vi.fn(),
   fetchProductSuppliers: vi.fn(),
   fetchProductForecast: vi.fn(),
+  generateRecommendationLLMExplanation: vi.fn(),
   createProductSupplier: vi.fn(),
   confirmProductSupplier: vi.fn(),
   rejectProductSupplier: vi.fn(),
@@ -260,6 +263,26 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
   };
 }
 
+function mockLLMExplanation(
+  overrides: Partial<RecommendationLLMExplanation> = {},
+): RecommendationLLMExplanation {
+  return {
+    suggested_action: "reorder",
+    summary: "Review reorder recommendation for Mapped Product.",
+    explanation: "The recommendation suggests 6 units from Acme Supplies.",
+    risk_flags: ["Forecast risk level is high."],
+    missing_data_warnings: [],
+    confidence: 0.8,
+    structured_data_citations: [
+      "recommendation.recommended_qty",
+      "recommendation.forecast_snapshot",
+    ],
+    model_name: "mock",
+    prompt_version: "mock-v1",
+    ...overrides,
+  };
+}
+
 function mockDraftFromProductsResponse(overrides: Partial<PurchaseOrder> = {}) {
   return {
     purchase_order: mockPurchaseOrder(overrides),
@@ -277,6 +300,7 @@ beforeEach(() => {
   vi.mocked(fetchWeakMappings).mockResolvedValue([]);
   vi.mocked(fetchProductSuppliers).mockResolvedValue([]);
   vi.mocked(fetchProductForecast).mockResolvedValue(mockForecast());
+  vi.mocked(generateRecommendationLLMExplanation).mockResolvedValue(mockLLMExplanation());
   vi.mocked(createProductSupplier).mockResolvedValue(mockSupplierMapping());
   vi.mocked(confirmProductSupplier).mockResolvedValue(mockSupplierMapping({ match_status: "confirmed" }));
   vi.mocked(rejectProductSupplier).mockResolvedValue(mockSupplierMapping({ match_status: "rejected" }));
@@ -1025,6 +1049,118 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("product_supplier")).toBeInTheDocument();
     expect(screen.getByText("order_now")).toBeInTheDocument();
     expect(screen.getByText("high")).toBeInTheDocument();
+  });
+
+  it("generate AI explanation button renders on recommendation detail", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+    vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("button", { name: "Generate AI Explanation" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "AI explanations are advisory only. They do not approve, issue, or place purchase orders.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking generate AI explanation calls the correct endpoint", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+    vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
+
+    expect(generateRecommendationLLMExplanation).toHaveBeenCalledWith(900);
+  });
+
+  it("shows loading state while generating AI explanation", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+    vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+    let resolveExplanation: (value: RecommendationLLMExplanation) => void = () => {};
+    vi.mocked(generateRecommendationLLMExplanation).mockReturnValue(
+      new Promise((resolve) => {
+        resolveExplanation = resolve;
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
+
+    expect(screen.getByRole("button", { name: "Generating AI Explanation..." })).toBeDisabled();
+    resolveExplanation(mockLLMExplanation());
+  });
+
+  it("displays AI explanation output after generation", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+    vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+    vi.mocked(generateRecommendationLLMExplanation).mockResolvedValue(
+      mockLLMExplanation({
+        summary: "Reorder is recommended.",
+        explanation: "Stock is low and the supplier mapping is confirmed.",
+        confidence: 0.72,
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
+
+    expect(await screen.findByText("AI explanation generated.")).toBeInTheDocument();
+    expect(screen.getByText("Reorder is recommended.")).toBeInTheDocument();
+    expect(screen.getByText("Stock is low and the supplier mapping is confirmed.")).toBeInTheDocument();
+    expect(screen.getByText("0.72")).toBeInTheDocument();
+    expect(screen.getByText("mock")).toBeInTheDocument();
+    expect(screen.getByText("mock-v1")).toBeInTheDocument();
+  });
+
+  it("displays backend AI explanation errors clearly", async () => {
+    vi.mocked(listRecommendations).mockResolvedValue([mockRecommendation()]);
+    vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+    vi.mocked(generateRecommendationLLMExplanation).mockRejectedValue(
+      new Error("OpenAI provider is configured but real LLM calls are disabled."),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
+
+    expect(
+      await screen.findByText(
+        "Recommendation action failed: OpenAI provider is configured but real LLM calls are disabled.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("AI explanation generation does not present recommendation as accepted or approved", async () => {
+    const pending = mockRecommendation({ status: "pending_review" });
+    vi.mocked(listRecommendations).mockResolvedValue([pending]);
+    vi.mocked(getRecommendation).mockResolvedValue(pending);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product (1)");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
+
+    const detail = await screen.findByLabelText("Recommendation details");
+    expect(within(detail).getByText("pending_review")).toBeInTheDocument();
+    expect(within(detail).queryByText("accepted")).not.toBeInTheDocument();
+    expect(within(detail).queryByText("approved")).not.toBeInTheDocument();
   });
 
   it("accept recommendation calls the accept endpoint", async () => {

@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     llm_provider: str = "mock"
     enable_real_llm: bool = False
+    orderpro_api_base_url: str = ""
+    orderpro_api_token: str = ""
+    orderpro_sync_enabled: bool = False
     orderpro_base_url: str = ""
     orderpro_api_key: str = ""
     orderpro_inventory_endpoint: str = ""

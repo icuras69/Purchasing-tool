@@ -10,6 +10,7 @@ import type {
   ProductSupplierMapping,
   PurchaseOrder,
   PurchaseRecommendation,
+  RecommendationLLMExplanation,
   RecommendationAcceptRequest,
   RecommendationConvertResponse,
   RecommendationRejectRequest,
@@ -280,6 +281,16 @@ export function convertRecommendationToDraftPO(
   return sendJson<RecommendationConvertResponse>(
     `/recommendations/${recommendationId}/convert-to-draft-po`,
     "recommendation",
+    { method: "POST" },
+  );
+}
+
+export function generateRecommendationLLMExplanation(
+  recommendationId: number,
+): Promise<RecommendationLLMExplanation> {
+  return sendJson<RecommendationLLMExplanation>(
+    `/recommendations/${recommendationId}/generate-llm-explanation`,
+    "AI explanation",
     { method: "POST" },
   );
 }
