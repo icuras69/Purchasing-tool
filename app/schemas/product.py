@@ -18,6 +18,11 @@ class ProductResponse(BaseModel):
     id: int
     name: str
     supplier: str | None
+    orderpro_sku: str | None = None
+    supplier_id: int | None = None
+    supplier_name: str | None = None
+    supplier_code: str | None = None
+    supplier_sku: str | None = None
     current_stock: float
     safety_stock: float
     lead_time_days: int

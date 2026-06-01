@@ -22,6 +22,11 @@ export interface Product {
   id: number;
   name: string;
   supplier: string | null;
+  orderpro_sku?: string | null;
+  supplier_id?: number | null;
+  supplier_name?: string | null;
+  supplier_code?: string | null;
+  supplier_sku?: string | null;
   current_stock: number | null;
   supplier_count: number;
   preferred_supplier: string | null;
@@ -83,6 +88,7 @@ export interface WeakMapping {
 export interface ForecastSupplierContext {
   supplier_id: number | null;
   supplier_name: string | null;
+  supplier_code?: string | null;
   supplier_sku: string | null;
   supplier_product_name: string | null;
   purchase_price: number | null;
@@ -131,7 +137,7 @@ export interface PurchaseOrderLine {
   purchase_order_id: number;
   product_id: number;
   product_name?: string | null;
-  product_supplier_id: number;
+  product_supplier_id: number | null;
   supplier_sku: string | null;
   supplier_product_name: string | null;
   quantity: number;
@@ -170,7 +176,8 @@ export interface CreatePurchaseOrderRequest {
 }
 
 export interface AddPurchaseOrderLineRequest {
-  product_supplier_id: number;
+  product_supplier_id?: number | null;
+  product_id?: number | null;
   quantity: number;
   notes?: string | null;
 }
@@ -185,10 +192,11 @@ export interface ApprovePurchaseOrderRequest {
 }
 
 export interface DraftFromProductsRequest {
-  supplier_id: number;
+  supplier_id?: number | null;
   product_ids: number[];
   created_by?: string | null;
   notes?: string | null;
+  only_reorder_needed?: boolean;
 }
 
 export interface DraftFromProductsSkippedProduct {
@@ -198,11 +206,25 @@ export interface DraftFromProductsSkippedProduct {
 }
 
 export interface DraftFromProductsResponse {
-  purchase_order: PurchaseOrder;
+  purchase_order: PurchaseOrder | null;
+  created_purchase_orders: PurchaseOrder[];
   summary: {
+    created_po_count: number | null;
     created_line_count: number;
     skipped_products: DraftFromProductsSkippedProduct[];
+    grouped_by_supplier: Record<string, number> | null;
   };
+}
+
+export interface SupplierForecastResponse {
+  supplier_id: number;
+  supplier_name: string | null;
+  product_count: number;
+  forecasts: ForecastResponse[];
+  products_needing_reorder: number[];
+  products_missing_data: number[];
+  total_recommended_quantity: number;
+  total_estimated_cost: number | null;
 }
 
 export type RecommendationStatus =

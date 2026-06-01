@@ -20,24 +20,32 @@ def serialize_product(product: Product) -> dict:
         key=lambda mapping: (not mapping.is_preferred, mapping.id),
     )
     display_mapping = supplier_mappings[0] if supplier_mappings else None
+    supplier_record = product.supplier_record
 
     return {
         "id": product.id,
         "name": product.name,
         "supplier": product.supplier,
+        "orderpro_sku": product.orderpro_sku,
+        "supplier_id": product.supplier_id,
+        "supplier_name": supplier_record.name if supplier_record else None,
+        "supplier_code": supplier_record.orderpro_code if supplier_record else None,
+        "supplier_sku": product.supplier_sku,
         "current_stock": product.current_stock,
         "safety_stock": product.safety_stock,
         "lead_time_days": product.lead_time_days,
         "min_order_qty": product.min_order_qty,
         "supplier_count": len(supplier_mappings),
         "preferred_supplier": (
-            display_mapping.supplier.name
+            supplier_record.name
+            if supplier_record
+            else display_mapping.supplier.name
             if display_mapping and display_mapping.supplier
             else product.supplier
         ),
-        "preferred_supplier_id": display_mapping.supplier_id if display_mapping else None,
-        "preferred_supplier_sku": display_mapping.supplier_sku if display_mapping else None,
-        "mapping_status": "mapped" if supplier_mappings else "unmapped",
+        "preferred_supplier_id": product.supplier_id if product.supplier_id else display_mapping.supplier_id if display_mapping else None,
+        "preferred_supplier_sku": product.supplier_sku if product.supplier_id else display_mapping.supplier_sku if display_mapping else None,
+        "mapping_status": "mapped" if product.supplier_id or supplier_mappings else "unmapped",
         "supplier_mappings": [
             {
                 "id": mapping.id,
@@ -80,6 +88,7 @@ def list_products(db: Session = Depends(get_db)):
         db.query(Product)
         .options(
             selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+            selectinload(Product.supplier_record),
         )
         .order_by(Product.id.asc())
         .all()
@@ -93,8 +102,9 @@ def list_unmapped_products(db: Session = Depends(get_db)):
         db.query(Product)
         .options(
             selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+            selectinload(Product.supplier_record),
         )
-        .filter(~Product.product_suppliers.any())
+        .filter(Product.supplier_id.is_(None))
         .order_by(Product.id.asc())
         .all()
     )
@@ -191,6 +201,7 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
         db.query(Product)
         .options(
             selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+            selectinload(Product.supplier_record),
         )
         .filter(Product.id == product_id)
         .first()

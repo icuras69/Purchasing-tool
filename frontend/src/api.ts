@@ -14,6 +14,7 @@ import type {
   RecommendationAcceptRequest,
   RecommendationConvertResponse,
   RecommendationRejectRequest,
+  SupplierForecastResponse,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
@@ -169,6 +170,10 @@ export function createDraftPurchaseOrderFromProducts(
       body: JSON.stringify(payload),
     },
   );
+}
+
+export function getSupplierForecast(supplierId: number): Promise<SupplierForecastResponse> {
+  return fetchJson<SupplierForecastResponse>(`/suppliers/${supplierId}/forecast`, "supplier forecast");
 }
 
 export function addPurchaseOrderLine(

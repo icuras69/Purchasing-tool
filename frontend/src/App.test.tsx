@@ -19,6 +19,7 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   generateRecommendationLLMExplanation,
+  getSupplierForecast,
   getPurchaseOrder,
   getRecommendation,
   issuePurchaseOrder,
@@ -38,6 +39,7 @@ import type {
   PurchaseOrder,
   PurchaseRecommendation,
   RecommendationLLMExplanation,
+  SupplierForecastResponse,
   WeakMapping,
 } from "./types";
 
@@ -48,6 +50,7 @@ vi.mock("./api", () => ({
   fetchProductSuppliers: vi.fn(),
   fetchProductForecast: vi.fn(),
   generateRecommendationLLMExplanation: vi.fn(),
+  getSupplierForecast: vi.fn(),
   createProductSupplier: vi.fn(),
   confirmProductSupplier: vi.fn(),
   rejectProductSupplier: vi.fn(),
@@ -76,6 +79,11 @@ const productDefaults: Product = {
   id: 1,
   name: "Mapped Product",
   supplier: null,
+  orderpro_sku: "OP-1",
+  supplier_id: 10,
+  supplier_name: "Acme Supplies",
+  supplier_code: "ACME",
+  supplier_sku: "ACME-1",
   current_stock: 12,
   supplier_count: 1,
   preferred_supplier: "Acme Supplies",
@@ -153,6 +161,7 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
     supplier_context: {
       supplier_id: 10,
       supplier_name: "Acme Supplies",
+      supplier_code: "ACME",
       supplier_sku: "ACME-1",
       supplier_product_name: "Acme Product Pack",
       purchase_price: 9.5,
@@ -163,7 +172,7 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
       moq_source: "product_supplier",
       match_status: "matched",
       match_method: "sku",
-      mapping_source: "product_supplier",
+      mapping_source: "orderpro_product_supplier",
       has_supplier_mapping: true,
       needs_supplier_mapping: false,
     },
@@ -199,7 +208,7 @@ function mockPurchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrde
         purchase_order_id: 500,
         product_id: 1,
         product_name: null,
-        product_supplier_id: 100,
+        product_supplier_id: null,
         supplier_sku: "ACME-1",
         supplier_product_name: "Acme Product Pack",
         quantity: 2,
@@ -284,12 +293,30 @@ function mockLLMExplanation(
 }
 
 function mockDraftFromProductsResponse(overrides: Partial<PurchaseOrder> = {}) {
+  const purchaseOrder = mockPurchaseOrder(overrides);
   return {
-    purchase_order: mockPurchaseOrder(overrides),
+    purchase_order: purchaseOrder,
+    created_purchase_orders: [purchaseOrder],
     summary: {
+      created_po_count: 1,
       created_line_count: 1,
       skipped_products: [],
+      grouped_by_supplier: { "10": 1 },
     },
+  };
+}
+
+function mockSupplierForecast(overrides: Partial<SupplierForecastResponse> = {}): SupplierForecastResponse {
+  return {
+    supplier_id: 10,
+    supplier_name: "Acme Supplies",
+    product_count: 1,
+    forecasts: [mockForecast({ recommended_action: "order_now", recommended_qty: 6 })],
+    products_needing_reorder: [1],
+    products_missing_data: [],
+    total_recommended_quantity: 6,
+    total_estimated_cost: 57,
+    ...overrides,
   };
 }
 
@@ -300,6 +327,7 @@ beforeEach(() => {
   vi.mocked(fetchWeakMappings).mockResolvedValue([]);
   vi.mocked(fetchProductSuppliers).mockResolvedValue([]);
   vi.mocked(fetchProductForecast).mockResolvedValue(mockForecast());
+  vi.mocked(getSupplierForecast).mockResolvedValue(mockSupplierForecast());
   vi.mocked(generateRecommendationLLMExplanation).mockResolvedValue(mockLLMExplanation());
   vi.mocked(createProductSupplier).mockResolvedValue(mockSupplierMapping());
   vi.mocked(confirmProductSupplier).mockResolvedValue(mockSupplierMapping({ match_status: "confirmed" }));
@@ -355,6 +383,7 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Weak Mappings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Mappings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Supplier Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
     expect(await screen.findByText("No products found.")).toBeInTheDocument();
@@ -382,13 +411,14 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("unmapped")).toBeInTheDocument();
   });
 
-  it("selects mapped products for draft PO generation", async () => {
+  it("selects OrderPro-supplied products for draft PO generation", async () => {
     vi.mocked(fetchProducts).mockResolvedValue([
       mockProduct({
         id: 7,
         name: "Selectable Product",
-        preferred_supplier: "Draft Supplier",
-        preferred_supplier_id: 6,
+        supplier_id: 6,
+        supplier_name: "Draft Supplier",
+        supplier_code: null,
       }),
     ]);
 
@@ -399,7 +429,7 @@ describe("App mapping review workflow", () => {
 
     expect(screen.getByText("1 selected")).toBeInTheDocument();
     expect(screen.getByText("7 · Selectable Product · Draft Supplier")).toBeInTheDocument();
-    expect(screen.getByText("Preferred supplier IDs in selection: 6")).toBeInTheDocument();
+    expect(screen.getByText("OrderPro supplier IDs in selection: 6")).toBeInTheDocument();
   });
 
   it("keeps generate draft PO disabled when no products are selected", async () => {
@@ -409,21 +439,9 @@ describe("App mapping review workflow", () => {
 
     await screen.findByText("Mapped Product");
     expect(screen.getByRole("button", { name: "Generate Draft PO" })).toBeDisabled();
-    expect(screen.getByText("Select mapped products from the table below.")).toBeInTheDocument();
-  });
-
-  it("requires supplier_id before generating a draft PO", async () => {
-    vi.mocked(fetchProducts).mockResolvedValue([mockProduct({ id: 7, name: "Mapped Product" })]);
-
-    render(<App />);
-
-    await screen.findByText("Mapped Product");
-    await userEvent.click(screen.getByLabelText("Select Mapped Product for draft PO"));
-    await userEvent.clear(screen.getByLabelText("Supplier ID"));
-    await userEvent.click(screen.getByRole("button", { name: "Generate Draft PO" }));
-
-    expect(await screen.findByText("Supplier ID is required.")).toBeInTheDocument();
-    expect(createDraftPurchaseOrderFromProducts).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("Select products with an OrderPro supplier from the table below."),
+    ).toBeInTheDocument();
   });
 
   it("disables unmapped products for draft PO selection", async () => {
@@ -435,6 +453,8 @@ describe("App mapping review workflow", () => {
         supplier_count: 0,
         preferred_supplier: null,
         preferred_supplier_id: null,
+        supplier_id: null,
+        supplier_name: null,
       }),
     ]);
 
@@ -444,12 +464,13 @@ describe("App mapping review workflow", () => {
     expect(screen.getByLabelText("Select Unmapped Product for draft PO")).toBeDisabled();
   });
 
-  it("generates a draft PO and displays the result", async () => {
+  it("generates draft POs from product IDs and displays the result", async () => {
     vi.mocked(fetchProducts).mockResolvedValue([
       mockProduct({
         id: 7,
         name: "Mapped Product",
-        preferred_supplier_id: 6,
+        supplier_id: 6,
+        supplier_name: "Supplier One",
       }),
     ]);
     vi.mocked(createDraftPurchaseOrderFromProducts).mockResolvedValue(
@@ -460,33 +481,36 @@ describe("App mapping review workflow", () => {
 
     await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByLabelText("Select Mapped Product for draft PO"));
-    await userEvent.type(screen.getByLabelText("Supplier ID"), "6");
     await userEvent.click(screen.getByRole("button", { name: "Generate Draft PO" }));
 
     expect(createDraftPurchaseOrderFromProducts).toHaveBeenCalledWith({
-      supplier_id: 6,
       product_ids: [7],
       created_by: "manual",
       notes: "Draft generated from product selection",
+      only_reorder_needed: false,
     });
     const resultPanel = await screen.findByLabelText("Draft PO generation result");
-    expect(within(resultPanel).getByText("Draft PO 501 created")).toBeInTheDocument();
+    expect(within(resultPanel).getByText("1 draft PO created")).toBeInTheDocument();
+    expect(within(resultPanel).getByText(/Draft PO 501:/)).toBeInTheDocument();
     expect(within(resultPanel).getByText("draft")).toBeInTheDocument();
-    expect(within(resultPanel).getByText("1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "View Draft PO" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View Draft PO 501" })).toBeInTheDocument();
   });
 
   it("displays skipped product summary after draft PO generation", async () => {
     vi.mocked(fetchProducts).mockResolvedValue([mockProduct({ id: 7, name: "Mapped Product" })]);
+    const purchaseOrder = mockPurchaseOrder({ id: 502, status: "draft" });
     vi.mocked(createDraftPurchaseOrderFromProducts).mockResolvedValue({
-      purchase_order: mockPurchaseOrder({ id: 502, status: "draft" }),
+      purchase_order: purchaseOrder,
+      created_purchase_orders: [purchaseOrder],
       summary: {
+        created_po_count: 1,
         created_line_count: 1,
+        grouped_by_supplier: { "10": 1 },
         skipped_products: [
           {
             product_id: 9,
             product_name: "Skipped Product",
-            reason: "No ProductSupplier mapping exists for this product.",
+            reason: "Product is missing an OrderPro supplier mapping.",
           },
         ],
       },
@@ -496,12 +520,11 @@ describe("App mapping review workflow", () => {
 
     await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByLabelText("Select Mapped Product for draft PO"));
-    await userEvent.type(screen.getByLabelText("Supplier ID"), "6");
     await userEvent.click(screen.getByRole("button", { name: "Generate Draft PO" }));
 
     expect(await screen.findByText("Skipped Products")).toBeInTheDocument();
     expect(
-      screen.getByText("Skipped Product: No ProductSupplier mapping exists for this product."),
+      screen.getByText("Skipped Product: Product is missing an OrderPro supplier mapping."),
     ).toBeInTheDocument();
   });
 
@@ -515,7 +538,6 @@ describe("App mapping review workflow", () => {
 
     await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByLabelText("Select Mapped Product for draft PO"));
-    await userEvent.type(screen.getByLabelText("Supplier ID"), "6");
     await userEvent.click(screen.getByRole("button", { name: "Generate Draft PO" }));
 
     expect(
@@ -538,6 +560,11 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("matched")).toBeInTheDocument();
     expect(screen.getByText("sku")).toBeInTheDocument();
     expect(screen.getByText("Yes")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Legacy ProductSupplier mappings are transitional. Active purchasing now uses the OrderPro supplier on each product.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("renders empty states safely for review tabs", async () => {
@@ -573,7 +600,7 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("ACME-1")).toBeInTheDocument();
     expect(screen.getByText("Acme Product Pack")).toBeInTheDocument();
     expect(screen.getByText("9.5 USD")).toBeInTheDocument();
-    expect(screen.getByText("ProductSupplier clean mapping")).toBeInTheDocument();
+    expect(screen.getByText("OrderPro product supplier")).toBeInTheDocument();
     expect(screen.getByText("6 (product_supplier)")).toBeInTheDocument();
   });
 
@@ -758,7 +785,7 @@ describe("App mapping review workflow", () => {
     expect(createPurchaseOrder).not.toHaveBeenCalled();
   });
 
-  it("add line form validates product supplier and quantity", async () => {
+  it("add line form validates product ID and quantity", async () => {
     vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
     vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
 
@@ -769,10 +796,10 @@ describe("App mapping review workflow", () => {
     await screen.findByText("Purchase Order 500");
     await userEvent.click(screen.getByRole("button", { name: "Add Line" }));
 
-    expect(await screen.findByText("ProductSupplier ID is required.")).toBeInTheDocument();
+    expect(await screen.findByText("Product ID is required.")).toBeInTheDocument();
     expect(addPurchaseOrderLine).not.toHaveBeenCalled();
 
-    await userEvent.type(screen.getByLabelText("ProductSupplier ID"), "100");
+    await userEvent.type(screen.getByLabelText("Product ID"), "100");
     await userEvent.click(screen.getByRole("button", { name: "Add Line" }));
 
     expect(await screen.findByText("Quantity must be greater than zero.")).toBeInTheDocument();
@@ -783,21 +810,81 @@ describe("App mapping review workflow", () => {
     vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
     vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
     vi.mocked(addPurchaseOrderLine).mockRejectedValue(
-      new Error("ProductSupplier belongs to a different supplier."),
+      new Error("Product belongs to a different OrderPro supplier."),
     );
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
     await screen.findByText("Acme Supplies");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
-    await userEvent.type(screen.getByLabelText("ProductSupplier ID"), "101");
+    await userEvent.type(screen.getByLabelText("Product ID"), "101");
     await userEvent.type(screen.getByLabelText("Quantity"), "3");
     await userEvent.click(screen.getByRole("button", { name: "Add Line" }));
 
+    expect(addPurchaseOrderLine).toHaveBeenCalledWith(500, {
+      product_id: 101,
+      quantity: 3,
+      notes: null,
+    });
     expect(
       await screen.findByText(
-        "Purchase order action failed: ProductSupplier belongs to a different supplier.",
+        "Purchase order action failed: Product belongs to a different OrderPro supplier.",
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("supplier forecast page calls the supplier forecast endpoint and displays product rows", async () => {
+    vi.mocked(getSupplierForecast).mockResolvedValue(
+      mockSupplierForecast({
+        supplier_name: "Forecast Supplier",
+        product_count: 1,
+        forecasts: [
+          mockForecast({
+            product_id: 77,
+            product_name: "Forecasted Product",
+            current_stock: 5,
+            recommended_action: "order_now",
+            recommended_qty: 8,
+            risk_level: "high",
+          }),
+        ],
+        products_needing_reorder: [77],
+        total_recommended_quantity: 8,
+        total_estimated_cost: 80,
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Forecast" }));
+    await userEvent.type(screen.getByLabelText("Supplier ID"), "53");
+    await userEvent.click(screen.getByRole("button", { name: "Load Supplier Forecast" }));
+
+    expect(getSupplierForecast).toHaveBeenCalledWith(53);
+    expect(await screen.findByText("Forecast Supplier")).toBeInTheDocument();
+    expect(screen.getByText("Forecasted Product")).toBeInTheDocument();
+    expect(screen.getByText("order_now")).toBeInTheDocument();
+    expect(screen.getByText("high")).toBeInTheDocument();
+    expect(screen.getByText("80")).toBeInTheDocument();
+  });
+
+  it("supplier forecast displays empty and monitor states", async () => {
+    vi.mocked(getSupplierForecast).mockResolvedValue(
+      mockSupplierForecast({
+        forecasts: [mockForecast({ recommended_action: "monitor", recommended_qty: 0 })],
+        products_needing_reorder: [],
+        total_recommended_quantity: 0,
+        total_estimated_cost: null,
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Forecast" }));
+    await userEvent.type(screen.getByLabelText("Supplier ID"), "53");
+    await userEvent.click(screen.getByRole("button", { name: "Load Supplier Forecast" }));
+
+    expect(await screen.findByText("No products need reorder for this supplier.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Some products are being monitored because they have no reorder recommendation yet."),
     ).toBeInTheDocument();
   });
 

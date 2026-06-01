@@ -18,6 +18,7 @@ import {
   generateRecommendationLLMExplanation,
   getPurchaseOrder,
   getRecommendation,
+  getSupplierForecast,
   issuePurchaseOrder,
   listRecommendations,
   listPurchaseOrders,
@@ -42,6 +43,7 @@ import type {
   AddPurchaseOrderLineRequest,
   CreatePurchaseOrderRequest,
   DraftFromProductsResponse,
+  SupplierForecastResponse,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
@@ -52,6 +54,7 @@ type TabId =
   | "weak"
   | "mappings"
   | "forecast"
+  | "supplier-forecast"
   | "purchase-orders"
   | "recommendations";
 
@@ -67,6 +70,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "weak", label: "Weak Mappings" },
   { id: "mappings", label: "Supplier Mappings" },
   { id: "forecast", label: "Forecast" },
+  { id: "supplier-forecast", label: "Supplier Forecast" },
   { id: "purchase-orders", label: "Purchase Orders" },
   { id: "recommendations", label: "Recommendations" },
 ];
@@ -95,7 +99,10 @@ function formatPrice(mapping: Pick<ProductSupplierMapping, "purchase_price" | "c
 
 function mappingSourceLabel(mappingSource: string | null | undefined): string {
   if (mappingSource === "product_supplier") {
-    return "ProductSupplier clean mapping";
+    return "Legacy ProductSupplier mapping";
+  }
+  if (mappingSource === "orderpro_product_supplier") {
+    return "OrderPro product supplier";
   }
   if (mappingSource === "product_master_item") {
     return "ProductMasterItem fallback";
@@ -490,6 +497,8 @@ function App() {
 
       {activeTab === "forecast" && <ForecastPanel />}
 
+      {activeTab === "supplier-forecast" && <SupplierForecastPanel />}
+
       {activeTab === "purchase-orders" && <PurchaseOrdersPanel initialPoId={poToViewId} />}
 
       {activeTab === "recommendations" && <RecommendationsPanel />}
@@ -528,20 +537,22 @@ function ProductTable({
           <tr>
             <th>Select</th>
             <th>Product ID</th>
+            <th>OrderPro SKU</th>
             <th>Product name</th>
             <th>Current stock</th>
-            <th>Preferred supplier</th>
+            <th>Active supplier</th>
+            <th>Supplier ID</th>
             <th>Supplier count</th>
             <th>Mapping status</th>
-            <th>Preferred supplier SKU</th>
-            <th>Mappings</th>
+            <th>Supplier SKU</th>
+            <th>Legacy mappings</th>
           </tr>
         </thead>
         <tbody>
           {products.map((product) => {
             const isExpanded = expandedProductId === product.id;
-            const statusClass =
-              product.mapping_status === "mapped" ? "status mapped" : "status unmapped";
+            const statusClass = product.supplier_id ? "status mapped" : "status unmapped";
+            const displayStatus = product.supplier_id ? "mapped" : "missing supplier";
 
             return (
               <Fragment key={product.id}>
@@ -550,20 +561,22 @@ function ProductTable({
                     <input
                       aria-label={`Select ${product.name} for draft PO`}
                       checked={selectedProductIds.includes(product.id)}
-                      disabled={product.mapping_status === "unmapped"}
+                      disabled={!product.supplier_id}
                       onChange={() => onToggleDraftSelection(product.id)}
                       type="checkbox"
                     />
                   </td>
                   <td>{product.id}</td>
+                  <td>{formatValue(product.orderpro_sku)}</td>
                   <td>{product.name}</td>
                   <td>{formatValue(product.current_stock)}</td>
                   <td>{supplierDisplayName(product)}</td>
+                  <td>{formatValue(product.supplier_id)}</td>
                   <td>{product.supplier_count}</td>
                   <td>
-                    <span className={statusClass}>{product.mapping_status}</span>
+                    <span className={statusClass}>{displayStatus}</span>
                   </td>
-                  <td>{formatValue(product.preferred_supplier_sku)}</td>
+                  <td>{formatValue(product.supplier_sku ?? product.preferred_supplier_sku)}</td>
                   <td>
                     <button
                       disabled={product.supplier_mappings.length === 0}
@@ -576,7 +589,7 @@ function ProductTable({
                 </tr>
                 {isExpanded && (
                   <tr>
-                    <td colSpan={9}>
+                    <td colSpan={11}>
                       <div className="mapping-panel">
                         <table>
                           <thead>
@@ -627,9 +640,9 @@ function DraftPoFromProductsPanel({
   products: Product[];
   selectedProductIds: number[];
 }) {
-  const [supplierId, setSupplierId] = useState("");
   const [createdBy, setCreatedBy] = useState("manual");
   const [notes, setNotes] = useState("Draft generated from product selection");
+  const [onlyReorderNeeded, setOnlyReorderNeeded] = useState(false);
   const [creating, setCreating] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -639,20 +652,15 @@ function DraftPoFromProductsPanel({
   const selectedSupplierIds = Array.from(
     new Set(
       selectedProducts
-        .map((product) => product.preferred_supplier_id)
+        .map((product) => product.supplier_id)
         .filter((value): value is number => value !== null && value !== undefined),
     ),
   );
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const parsedSupplierId = Number(supplierId);
     if (selectedProductIds.length === 0) {
-      setValidationError("Select at least one mapped product.");
-      return;
-    }
-    if (!Number.isInteger(parsedSupplierId) || parsedSupplierId <= 0) {
-      setValidationError("Supplier ID is required.");
+      setValidationError("Select at least one product with an OrderPro supplier.");
       return;
     }
 
@@ -662,10 +670,10 @@ function DraftPoFromProductsPanel({
     setResult(null);
     try {
       const created = await createDraftPurchaseOrderFromProducts({
-        supplier_id: parsedSupplierId,
         product_ids: selectedProductIds,
         created_by: createdBy || "manual",
         notes: notes || "Draft generated from product selection",
+        only_reorder_needed: onlyReorderNeeded,
       });
       setResult(created);
     } catch (loadError) {
@@ -695,14 +703,10 @@ function DraftPoFromProductsPanel({
       )}
       {selectedSupplierIds.length > 0 && (
         <div className="action-state">
-          Preferred supplier IDs in selection: {selectedSupplierIds.join(", ")}
+          OrderPro supplier IDs in selection: {selectedSupplierIds.join(", ")}
         </div>
       )}
       <form className="mapping-form" onSubmit={handleSubmit}>
-        <label>
-          <span>Supplier ID</span>
-          <input onChange={(event) => setSupplierId(event.target.value)} value={supplierId} />
-        </label>
         <label>
           <span>Created by</span>
           <input onChange={(event) => setCreatedBy(event.target.value)} value={createdBy} />
@@ -711,32 +715,61 @@ function DraftPoFromProductsPanel({
           <span>Notes</span>
           <input onChange={(event) => setNotes(event.target.value)} value={notes} />
         </label>
+        <label className="checkbox-label">
+          <input
+            checked={onlyReorderNeeded}
+            onChange={(event) => setOnlyReorderNeeded(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Only include products with reorder need</span>
+        </label>
         <button disabled={creating || selectedProductIds.length === 0} type="submit">
           {creating ? "Generating..." : "Generate Draft PO"}
         </button>
       </form>
       {selectedProductIds.length === 0 && (
-        <div className="action-state">Select mapped products from the table below.</div>
+        <div className="action-state">Select products with an OrderPro supplier from the table below.</div>
       )}
       {validationError && <div className="state error">{validationError}</div>}
       {createError && <div className="state error">Draft generation failed: {createError}</div>}
       {result && (
         <div className="result-panel" aria-label="Draft PO generation result">
-          <h3>Draft PO {result.purchase_order.id} created</h3>
+          <h3>
+            {result.summary.created_po_count ?? result.created_purchase_orders.length} draft PO
+            {(result.summary.created_po_count ?? result.created_purchase_orders.length) === 1 ? "" : "s"} created
+          </h3>
           <dl className="detail-list">
             <div>
-              <dt>Status</dt>
-              <dd>
-                <span className={purchaseOrderStatusClassName(result.purchase_order.status)}>
-                  {result.purchase_order.status}
-                </span>
-              </dd>
+              <dt>PO count</dt>
+              <dd>{result.summary.created_po_count ?? result.created_purchase_orders.length}</dd>
             </div>
             <div>
               <dt>Created lines</dt>
               <dd>{result.summary.created_line_count}</dd>
             </div>
           </dl>
+          <div className="nested-panel">
+            <h3>Created Purchase Orders</h3>
+            <ul className="skip-list">
+              {result.created_purchase_orders.map((po) => (
+                <li key={po.id}>
+                  Draft PO {po.id}: {formatValue(po.supplier_name)}{" "}
+                  <span className={purchaseOrderStatusClassName(po.status)}>{po.status}</span>{" "}
+                  <button onClick={() => onViewPurchaseOrder(po.id)} type="button">
+                    View Draft PO {po.id}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+          {result.summary.grouped_by_supplier && (
+            <div className="action-state">
+              Grouped by supplier:{" "}
+              {Object.entries(result.summary.grouped_by_supplier)
+                .map(([supplierId, count]) => `${supplierId}: ${count}`)
+                .join(", ")}
+            </div>
+          )}
           {result.summary.skipped_products.length > 0 && (
             <div className="nested-panel">
               <h3>Skipped Products</h3>
@@ -749,9 +782,6 @@ function DraftPoFromProductsPanel({
               </ul>
             </div>
           )}
-          <button onClick={() => onViewPurchaseOrder(result.purchase_order.id)} type="button">
-            View Draft PO
-          </button>
         </div>
       )}
     </section>
@@ -1095,6 +1125,10 @@ function SupplierMappingsTable({
 
   return (
     <section className="table-wrap" aria-label="Supplier mappings">
+      <div className="state warning">
+        Legacy ProductSupplier mappings are transitional. Active purchasing now uses the OrderPro
+        supplier on each product.
+      </div>
       <table>
         <thead>
           <tr>
@@ -1853,6 +1887,115 @@ function RecommendationDetail({
   );
 }
 
+function SupplierForecastPanel() {
+  const [supplierId, setSupplierId] = useState("");
+  const [forecast, setForecast] = useState<SupplierForecastResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedSupplierId = Number(supplierId);
+    if (!Number.isInteger(parsedSupplierId) || parsedSupplierId <= 0) {
+      setError("Supplier ID is required.");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setForecast(null);
+    try {
+      setForecast(await getSupplierForecast(parsedSupplierId));
+    } catch (loadError) {
+      setError((loadError as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section className="detail-panel" aria-label="Supplier forecast">
+      <h2>Supplier Forecast</h2>
+      <form className="mapping-form" onSubmit={handleSubmit}>
+        <label>
+          <span>Supplier ID</span>
+          <input onChange={(event) => setSupplierId(event.target.value)} value={supplierId} />
+        </label>
+        <button disabled={loading} type="submit">
+          {loading ? "Loading..." : "Load Supplier Forecast"}
+        </button>
+      </form>
+      {error && <div className="state error">Supplier forecast failed: {error}</div>}
+      {!forecast && !loading && !error && (
+        <div className="state">Enter a supplier ID to review OrderPro product forecasts.</div>
+      )}
+      {forecast && (
+        <div className="review-stack">
+          <dl className="detail-list">
+            <div>
+              <dt>Supplier</dt>
+              <dd>{formatValue(forecast.supplier_name)}</dd>
+            </div>
+            <div>
+              <dt>Product count</dt>
+              <dd>{forecast.product_count}</dd>
+            </div>
+            <div>
+              <dt>Products needing reorder</dt>
+              <dd>{forecast.products_needing_reorder.length}</dd>
+            </div>
+            <div>
+              <dt>Total recommended quantity</dt>
+              <dd>{forecast.total_recommended_quantity}</dd>
+            </div>
+            <div>
+              <dt>Total estimated cost</dt>
+              <dd>{formatValue(forecast.total_estimated_cost)}</dd>
+            </div>
+          </dl>
+          {forecast.products_needing_reorder.length === 0 && (
+            <div className="state">No products need reorder for this supplier.</div>
+          )}
+          {forecast.forecasts.some((row) => row.recommended_action === "monitor") && (
+            <div className="state warning">
+              Some products are being monitored because they have no reorder recommendation yet.
+            </div>
+          )}
+          <section className="table-wrap nested-table" aria-label="Supplier forecast rows">
+            <table>
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Current stock</th>
+                  <th>Action</th>
+                  <th>Recommended qty</th>
+                  <th>Risk</th>
+                  <th>Inventory source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {forecast.forecasts.map((row) => (
+                  <tr key={row.product_id}>
+                    <td>{row.product_name}</td>
+                    <td>{formatValue(row.current_stock)}</td>
+                    <td>{row.recommended_action}</td>
+                    <td>{formatValue(row.recommended_qty)}</td>
+                    <td>{row.risk_level}</td>
+                    <td>{row.inventory_source}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {forecast.forecasts.length === 0 && (
+              <div className="state">No active products found for this supplier.</div>
+            )}
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
   const [purchaseOrders, setPurchaseOrders] = useState<ResourceState<PurchaseOrder>>(initialResource);
   const [selectedPo, setSelectedPo] = useState<PurchaseOrder | null>(null);
@@ -2338,18 +2481,18 @@ function AddPurchaseOrderLineForm({
   loading: boolean;
   onAddLine: (payload: AddPurchaseOrderLineRequest) => Promise<void>;
 }) {
-  const [productSupplierId, setProductSupplierId] = useState("");
+  const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const parsedProductSupplierId = Number(productSupplierId);
+    const parsedProductId = Number(productId);
     const parsedQuantity = Number(quantity);
 
-    if (!Number.isInteger(parsedProductSupplierId) || parsedProductSupplierId <= 0) {
-      setValidationError("ProductSupplier ID is required.");
+    if (!Number.isInteger(parsedProductId) || parsedProductId <= 0) {
+      setValidationError("Product ID is required.");
       return;
     }
     if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) {
@@ -2359,7 +2502,7 @@ function AddPurchaseOrderLineForm({
 
     setValidationError(null);
     await onAddLine({
-      product_supplier_id: parsedProductSupplierId,
+      product_id: parsedProductId,
       quantity: parsedQuantity,
       notes: notes || null,
     });
@@ -2370,10 +2513,10 @@ function AddPurchaseOrderLineForm({
       <h3>Add Line</h3>
       <form className="mapping-form" onSubmit={handleSubmit}>
         <label>
-          <span>ProductSupplier ID</span>
+          <span>Product ID</span>
           <input
-            onChange={(event) => setProductSupplierId(event.target.value)}
-            value={productSupplierId}
+            onChange={(event) => setProductId(event.target.value)}
+            value={productId}
           />
         </label>
         <label>
@@ -2410,7 +2553,7 @@ function PurchaseOrderLinesTable({
         <thead>
           <tr>
             <th>Product</th>
-            <th>ProductSupplier ID</th>
+            <th>Legacy ProductSupplier ID</th>
             <th>Supplier SKU</th>
             <th>Supplier product</th>
             <th>Quantity</th>
@@ -2428,7 +2571,7 @@ function PurchaseOrderLinesTable({
           {purchaseOrder.lines.map((line) => (
             <tr key={line.id}>
               <td>{formatValue(line.product_name ?? line.product_id)}</td>
-              <td>{line.product_supplier_id}</td>
+              <td>{formatValue(line.product_supplier_id)}</td>
               <td>{formatValue(line.supplier_sku)}</td>
               <td>{formatValue(line.supplier_product_name)}</td>
               <td>{formatValue(line.quantity)}</td>

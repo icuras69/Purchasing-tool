@@ -71,7 +71,8 @@ def test_supplier_products_endpoint(client, db_session):
 
 
 def test_unmapped_products_endpoint(client, db_session):
-    mapped_product, _supplier, _mapping = _seed_mapping(db_session)
+    mapped_product, supplier, _mapping = _seed_mapping(db_session)
+    mapped_product.supplier_id = supplier.id
     unmapped_product = Product(name="No Mapping", current_stock=0)
     db_session.add(unmapped_product)
     db_session.commit()

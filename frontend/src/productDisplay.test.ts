@@ -19,6 +19,19 @@ function product(overrides: Partial<Product>): Product {
 }
 
 describe("supplierDisplayName", () => {
+  it("uses OrderPro product supplier before legacy mapping fields", () => {
+    expect(
+      supplierDisplayName(
+        product({
+          supplier_name: "OrderPro Supplier",
+          supplier_code: "OPS",
+          mapping_status: "mapped",
+          preferred_supplier: "Legacy Preferred",
+        }),
+      ),
+    ).toBe("OrderPro Supplier (OPS)");
+  });
+
   it("uses preferred_supplier for mapped products", () => {
     expect(
       supplierDisplayName(

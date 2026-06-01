@@ -21,6 +21,37 @@ def test_product_response_reports_unmapped_product(client, db_session):
     assert payload["mapping_status"] == "unmapped"
 
 
+def test_product_response_reports_orderpro_supplier_fields(client, db_session):
+    supplier = Supplier(
+        name="OrderPro Supplier",
+        normalized_name="ORDERPRO SUPPLIER",
+        orderpro_code="OPS",
+    )
+    product = Product(
+        name="OrderPro Product",
+        orderpro_sku="OP-SKU",
+        supplier_record=supplier,
+        supplier_sku="SUP-SKU",
+        current_stock=4,
+    )
+    db_session.add_all([supplier, product])
+    db_session.commit()
+
+    response = client.get(f"/products/{product.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["orderpro_sku"] == "OP-SKU"
+    assert payload["supplier_id"] == supplier.id
+    assert payload["supplier_name"] == "OrderPro Supplier"
+    assert payload["supplier_code"] == "OPS"
+    assert payload["supplier_sku"] == "SUP-SKU"
+    assert payload["preferred_supplier"] == "OrderPro Supplier"
+    assert payload["preferred_supplier_id"] == supplier.id
+    assert payload["preferred_supplier_sku"] == "SUP-SKU"
+    assert payload["mapping_status"] == "mapped"
+
+
 def test_product_response_reports_single_mapping(client, db_session):
     product = Product(name="Mapped Product", current_stock=0)
     supplier = Supplier(name="Supplier A", normalized_name="SUPPLIER A")
