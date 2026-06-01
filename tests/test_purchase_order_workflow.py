@@ -48,6 +48,8 @@ def seed_draft_mapping(
         "current_stock": 1,
         "safety_stock": 0,
         "min_order_qty": 1,
+        "cost_price": 10.0,
+        "lead_time_days": 4,
     }
     product_defaults.update(product_overrides or {})
     product = Product(**product_defaults)
@@ -425,7 +427,6 @@ def test_create_draft_po_from_one_valid_product(client, db_session):
     response = client.post(
         "/purchase-orders/draft-from-products",
         json={
-            "supplier_id": supplier.id,
             "product_ids": [product.id],
             "created_by": "forecast-review",
             "notes": "Draft from forecast review",
@@ -442,49 +443,45 @@ def test_create_draft_po_from_one_valid_product(client, db_session):
     assert po["approved_at"] is None
     assert po["issued_at"] is None
     assert po["received_at"] is None
+    assert len(payload["created_purchase_orders"]) == 1
+    assert payload["summary"]["created_po_count"] == 1
     assert payload["summary"]["created_line_count"] == 1
     assert payload["summary"]["skipped_products"] == []
     line = po["lines"][0]
     assert line["product_id"] == product.id
-    assert line["product_supplier_id"] == mapping.id
-    assert line["supplier_sku"] == mapping.supplier_sku
-    assert line["supplier_product_name"] == mapping.supplier_product_name
-    assert line["unit_cost"] == mapping.purchase_price
-    assert line["currency"] == mapping.currency
-    assert line["lead_time_days"] == mapping.lead_time_days
+    assert line["product_supplier_id"] is None
+    assert line["supplier_sku"] == product.supplier_sku
+    assert line["supplier_product_name"] == product.name
+    assert line["unit_cost"] == product.cost_price
+    assert line["currency"] is None
+    assert line["lead_time_days"] == product.lead_time_days
 
 
-def test_create_draft_po_from_multiple_products_for_same_supplier(client, db_session):
+def test_create_draft_po_from_products_groups_multiple_suppliers(client, db_session):
     product_a, supplier, _mapping_a = seed_draft_mapping(db_session, supplier_name="Multi Supplier")
-    product_b = Product(name="Second Draft Product", current_stock=1)
-    db_session.add(product_b)
-    db_session.flush()
-    mapping_b = ProductSupplier(
-        product_id=product_b.id,
-        supplier_id=supplier.id,
-        supplier_sku="MULTI-B",
-        supplier_product_name="Second Supplier Product",
-        purchase_price=4.0,
-        currency="USD",
-        match_status="matched",
-        match_method="manual",
+    other_supplier = Supplier(name="Second Multi Supplier", normalized_name="SECOND MULTI SUPPLIER")
+    product_b = Product(
+        name="Second Draft Product",
+        current_stock=1,
+        supplier_record=other_supplier,
+        supplier_sku="SECOND-SKU",
+        cost_price=4.0,
     )
-    db_session.add(mapping_b)
+    db_session.add_all([other_supplier, product_b])
+    db_session.flush()
     db_session.commit()
 
     response = client.post(
         "/purchase-orders/draft-from-products",
-        json={"supplier_id": supplier.id, "product_ids": [product_a.id, product_b.id]},
+        json={"product_ids": [product_a.id, product_b.id]},
     )
 
     assert response.status_code == 201
     payload = response.json()
-    assert payload["purchase_order"]["status"] == "draft"
+    assert payload["purchase_order"] is None
+    assert payload["summary"]["created_po_count"] == 2
     assert payload["summary"]["created_line_count"] == 2
-    assert {line["product_id"] for line in payload["purchase_order"]["lines"]} == {
-        product_a.id,
-        product_b.id,
-    }
+    assert {po["supplier_id"] for po in payload["created_purchase_orders"]} == {supplier.id, other_supplier.id}
 
 
 def test_draft_po_from_products_skips_missing_mapping_and_returns_summary(client, db_session):
@@ -495,7 +492,7 @@ def test_draft_po_from_products_skips_missing_mapping_and_returns_summary(client
 
     response = client.post(
         "/purchase-orders/draft-from-products",
-        json={"supplier_id": supplier.id, "product_ids": [valid_product.id, unmapped_product.id]},
+        json={"product_ids": [valid_product.id, unmapped_product.id]},
     )
 
     assert response.status_code == 201
@@ -505,7 +502,7 @@ def test_draft_po_from_products_skips_missing_mapping_and_returns_summary(client
         {
             "product_id": unmapped_product.id,
             "product_name": "Unmapped Draft Product",
-            "reason": "No ProductSupplier mapping exists for this product.",
+            "reason": "Product is missing an OrderPro supplier mapping.",
         }
     ]
 
@@ -518,7 +515,7 @@ def test_draft_po_from_products_rejects_when_all_products_are_skipped(client, db
 
     response = client.post(
         "/purchase-orders/draft-from-products",
-        json={"supplier_id": supplier.id, "product_ids": [product.id]},
+        json={"product_ids": [product.id]},
     )
 
     assert response.status_code == 400
@@ -527,12 +524,12 @@ def test_draft_po_from_products_rejects_when_all_products_are_skipped(client, db
         {
             "product_id": product.id,
             "product_name": "No Mapping Product",
-            "reason": "No ProductSupplier mapping exists for this product.",
+            "reason": "Product is missing an OrderPro supplier mapping.",
         }
     ]
 
 
-def test_draft_po_from_products_skips_mapping_for_different_supplier(client, db_session):
+def test_draft_po_from_products_skips_product_for_requested_different_supplier(client, db_session):
     product, _other_supplier, _mapping = seed_draft_mapping(db_session, supplier_name="Other Supplier")
     requested_supplier = Supplier(name="Requested Supplier", normalized_name="REQUESTED SUPPLIER")
     db_session.add(requested_supplier)
@@ -545,33 +542,34 @@ def test_draft_po_from_products_skips_mapping_for_different_supplier(client, db_
 
     assert response.status_code == 400
     assert response.json()["detail"]["skipped_products"][0]["reason"] == (
-        "ProductSupplier mapping belongs to a different supplier."
+        "Product belongs to a different OrderPro supplier."
     )
 
 
-def test_draft_po_from_products_skips_rejected_mapping(client, db_session):
+def test_draft_po_from_products_does_not_require_product_supplier(client, db_session):
     product, supplier, _mapping = seed_draft_mapping(
         db_session,
-        supplier_name="Rejected Draft Supplier",
-        mapping_overrides={"match_status": "rejected"},
+        supplier_name="No Legacy Mapping Draft Supplier",
     )
+    db_session.query(ProductSupplier).delete()
+    db_session.commit()
 
     response = client.post(
         "/purchase-orders/draft-from-products",
         json={"supplier_id": supplier.id, "product_ids": [product.id]},
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"]["skipped_products"][0]["reason"] == (
-        "ProductSupplier mapping is rejected."
-    )
+    assert response.status_code == 201
+    line = response.json()["purchase_order"]["lines"][0]
+    assert line["product_id"] == product.id
+    assert line["product_supplier_id"] is None
 
 
 def test_draft_po_from_products_respects_minimum_order_quantity(client, db_session):
     product, supplier, _mapping = seed_draft_mapping(
         db_session,
         supplier_name="MOQ Draft Supplier",
-        mapping_overrides={"minimum_order_quantity": 12},
+        product_overrides={"min_order_qty": 12},
     )
 
     response = client.post(
@@ -585,11 +583,11 @@ def test_draft_po_from_products_respects_minimum_order_quantity(client, db_sessi
     assert line["minimum_order_quantity"] == 12
 
 
-def test_draft_po_from_products_respects_pack_size_rounding(client, db_session):
+def test_draft_po_from_products_snapshots_product_fields_without_product_supplier_pack_size(client, db_session):
     product, supplier, _mapping = seed_draft_mapping(
         db_session,
-        supplier_name="Pack Draft Supplier",
-        mapping_overrides={"minimum_order_quantity": 5, "pack_size": 4},
+        supplier_name="No Pack Draft Supplier",
+        product_overrides={"min_order_qty": 5},
     )
 
     response = client.post(
@@ -599,9 +597,9 @@ def test_draft_po_from_products_respects_pack_size_rounding(client, db_session):
 
     assert response.status_code == 201
     line = response.json()["purchase_order"]["lines"][0]
-    assert line["quantity"] == 8
+    assert line["quantity"] == 5
     assert line["minimum_order_quantity"] == 5
-    assert line["pack_size"] == 4
+    assert line["pack_size"] is None
 
 
 def test_draft_po_from_products_uses_forecast_recommended_quantity_when_available(client, db_session):
@@ -626,4 +624,106 @@ def test_draft_po_from_products_uses_forecast_recommended_quantity_when_availabl
     assert response.status_code == 201
     line = response.json()["purchase_order"]["lines"][0]
     assert line["quantity"] == 21
-    assert line["pack_size"] == 3
+    assert line["pack_size"] is None
+
+
+def test_add_purchase_order_line_can_use_orderpro_product(client, db_session):
+    product, supplier, _mapping = seed_draft_mapping(
+        db_session,
+        supplier_name="Product Line Supplier",
+        product_overrides={"cost_price": 8.0, "min_order_qty": 3, "lead_time_days": 6},
+    )
+    po = create_po(client, supplier.id)
+
+    response = client.post(
+        f"/purchase-orders/{po['id']}/lines",
+        json={"product_id": product.id, "quantity": 4, "notes": "OrderPro product line"},
+    )
+
+    assert response.status_code == 201
+    line = response.json()["lines"][0]
+    assert line["product_id"] == product.id
+    assert line["product_supplier_id"] is None
+    assert line["supplier_sku"] == product.supplier_sku
+    assert line["supplier_product_name"] == product.name
+    assert line["unit_cost"] == 8.0
+    assert line["line_total"] == 32.0
+    assert line["minimum_order_quantity"] == 3
+    assert line["lead_time_days"] == 6
+
+
+def test_add_purchase_order_line_rejects_orderpro_product_for_different_supplier(client, db_session):
+    product, _supplier, _mapping = seed_draft_mapping(
+        db_session,
+        supplier_name="Original Product Supplier",
+    )
+    requested_supplier = Supplier(name="Line Requested Supplier", normalized_name="LINE REQUESTED SUPPLIER")
+    db_session.add(requested_supplier)
+    db_session.commit()
+    po = create_po(client, requested_supplier.id)
+
+    response = client.post(
+        f"/purchase-orders/{po['id']}/lines",
+        json={"product_id": product.id, "quantity": 1},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Product belongs to a different OrderPro supplier."
+
+
+def test_supplier_forecast_returns_products_assigned_to_supplier(client, db_session):
+    product, supplier, _mapping = seed_draft_mapping(
+        db_session,
+        supplier_name="Forecast Supplier Route",
+        product_overrides={"current_stock": 1, "safety_stock": 10, "lead_time_days": 4},
+    )
+    other_supplier = Supplier(name="Other Forecast Supplier", normalized_name="OTHER FORECAST SUPPLIER")
+    other_product = Product(name="Other Supplier Product", supplier_record=other_supplier, current_stock=1)
+    db_session.add_all([other_supplier, other_product])
+    db_session.commit()
+    add_usage_history(db_session, product, qty_used=2)
+
+    response = client.get(f"/suppliers/{supplier.id}/forecast")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["supplier_id"] == supplier.id
+    assert payload["product_count"] == 1
+    assert [forecast["product_id"] for forecast in payload["forecasts"]] == [product.id]
+    assert payload["products_needing_reorder"] == [product.id]
+    assert payload["total_recommended_quantity"] == 21
+    assert payload["total_estimated_cost"] == 210.0
+
+
+def test_supplier_forecast_to_draft_creates_draft_for_reorder_products_only(client, db_session):
+    reorder_product, supplier, _mapping = seed_draft_mapping(
+        db_session,
+        supplier_name="Supplier Forecast Draft",
+        product_overrides={"current_stock": 1, "safety_stock": 10, "lead_time_days": 4},
+    )
+    monitor_product = Product(
+        name="Monitor Product",
+        supplier_record=supplier,
+        current_stock=50,
+        min_order_qty=1,
+        cost_price=3.0,
+    )
+    db_session.add(monitor_product)
+    db_session.commit()
+    add_usage_history(db_session, reorder_product, qty_used=2)
+
+    response = client.post(
+        f"/suppliers/{supplier.id}/draft-po-from-forecast",
+        json={"created_by": "supplier-forecast", "notes": "Supplier forecast draft"},
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["summary"]["created_po_count"] == 1
+    assert payload["summary"]["created_line_count"] == 1
+    po = payload["purchase_order"]
+    assert po["status"] == "draft"
+    assert po["supplier_id"] == supplier.id
+    assert [line["product_id"] for line in po["lines"]] == [reorder_product.id]
+    assert po["approved_at"] is None
+    assert po["issued_at"] is None

@@ -17,15 +17,21 @@ def seed_recommendation_product(
 ):
     product_defaults = {
         "name": "Recommendation Product",
+        "orderpro_id": "8182",
+        "orderpro_sku": "REC-ORDERPRO-SKU",
+        "source_system": "orderpro",
         "current_stock": 1,
         "safety_stock": 10,
         "min_order_qty": 1,
+        "cost_price": 5.0,
     }
     product_defaults.update(product_overrides or {})
     product = Product(**product_defaults)
     supplier = Supplier(
         name="Recommendation Supplier",
         normalized_name="RECOMMENDATION SUPPLIER",
+        orderpro_id="supplier-1",
+        orderpro_code="REC-SUP",
         lead_time_days=4,
     )
     db_session.add_all([product, supplier])
@@ -77,36 +83,78 @@ def accept_recommendation(client, recommendation_id: int, reviewed_by: str = "bu
     return response.json()
 
 
-def test_create_reorder_recommendation_for_product_with_valid_product_supplier(client, db_session):
+def test_create_reorder_recommendation_for_product_with_orderpro_supplier(client, db_session):
     product, supplier, mapping = seed_recommendation_product(db_session)
 
     payload = create_recommendation(client, product.id)
 
     assert payload["product_id"] == product.id
     assert payload["supplier_id"] == supplier.id
-    assert payload["product_supplier_id"] == mapping.id
+    assert payload["product_supplier_id"] is None
     assert payload["recommendation_type"] == "reorder"
     assert payload["status"] == "pending_review"
     assert payload["recommended_quantity"] > 0
     assert payload["recommended_supplier_name"] == supplier.name
-    assert payload["recommended_supplier_sku"] == mapping.supplier_sku
-    assert payload["estimated_unit_cost"] == 5.0
-    assert payload["currency"] == "USD"
+    assert payload["recommended_supplier_sku"] == product.supplier_sku
+    assert payload["estimated_unit_cost"] == product.cost_price
+    assert payload["currency"] is None
 
 
 def test_recommendation_stores_input_forecast_and_supplier_snapshots(client, db_session):
-    product, _supplier, mapping = seed_recommendation_product(db_session)
+    product, supplier, _mapping = seed_recommendation_product(db_session)
 
     payload = create_recommendation(client, product.id)
 
     assert payload["input_snapshot"]["product"]["id"] == product.id
-    assert payload["input_snapshot"]["product_supplier"]["id"] == mapping.id
+    assert payload["input_snapshot"]["product"]["current_stock"] == product.current_stock
+    assert payload["input_snapshot"]["orderpro_product_supplier"]["supplier_id"] == supplier.id
+    assert payload["input_snapshot"]["orderpro_product_supplier"]["mapping_source"] == "orderpro_product_supplier"
     assert payload["forecast_snapshot"]["product_id"] == product.id
+    assert payload["forecast_snapshot"]["current_stock"] == product.current_stock
+    assert payload["forecast_snapshot"]["inventory_source"] == "product_record"
     assert payload["forecast_snapshot"]["recommended_qty"] > 0
-    assert payload["supplier_context_snapshot"]["supplier_sku"] == mapping.supplier_sku
+    assert payload["supplier_context_snapshot"]["mapping_source"] == "orderpro_product_supplier"
+    assert payload["supplier_context_snapshot"]["supplier_id"] == supplier.id
+    assert payload["supplier_context_snapshot"]["supplier_name"] == supplier.name
+    assert payload["supplier_context_snapshot"]["supplier_code"] == supplier.orderpro_code
+    assert payload["supplier_context_snapshot"]["supplier_sku"] == product.supplier_sku
     assert payload["model_name"] is None
     assert payload["prompt_version"] is None
     assert payload["generated_by"] == "system"
+
+
+def test_recommendation_uses_product_cost_price_and_supplier_sku(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"cost_price": 7.25},
+        mapping_overrides={"purchase_price": 99.0, "supplier_sku": "LEGACY-PS-SKU"},
+    )
+
+    payload = create_recommendation(client, product.id)
+
+    assert payload["recommended_supplier_sku"] == product.supplier_sku
+    assert payload["estimated_unit_cost"] == 7.25
+
+
+def test_product_supplier_is_not_selected_over_orderpro_product_supplier(client, db_session):
+    product, supplier, mapping = seed_recommendation_product(db_session)
+    other_supplier = Supplier(
+        name="Legacy Mapping Supplier",
+        normalized_name="LEGACY MAPPING SUPPLIER",
+    )
+    db_session.add(other_supplier)
+    db_session.flush()
+    mapping.supplier_id = other_supplier.id
+    mapping.supplier_sku = "LEGACY-MAPPING-SKU"
+    mapping.purchase_price = 123.0
+    db_session.commit()
+
+    payload = create_recommendation(client, product.id)
+
+    assert payload["supplier_id"] == supplier.id
+    assert payload["product_supplier_id"] is None
+    assert payload["recommended_supplier_sku"] == product.supplier_sku
+    assert payload["estimated_unit_cost"] == product.cost_price
 
 
 def test_recommendation_does_not_create_purchase_order_automatically(client, db_session):
@@ -126,8 +174,39 @@ def test_recommendation_without_supplier_mapping_is_blocked_safely(client, db_se
     response = client.post(f"/recommendations/reorder/{product.id}")
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Product does not have a valid ProductSupplier mapping."
+    assert response.json()["detail"] == "Product is missing an OrderPro supplier mapping."
     assert db_session.query(Recommendation).count() == 0
+
+
+def test_legacy_supplier_text_creates_reviewable_recommendation_without_structured_mapping(client, db_session):
+    product = Product(
+        name="Legacy Supplier Recommendation Product",
+        supplier="Legacy Supplier Text",
+        current_stock=1,
+        safety_stock=10,
+        lead_time_days=4,
+        min_order_qty=1,
+    )
+    db_session.add(product)
+    db_session.flush()
+    db_session.add(
+        UsageHistory(
+            product_id=product.id,
+            date=date(2026, 1, 1),
+            qty_used=2,
+            net_qty=2,
+            source_system="test",
+        )
+    )
+    db_session.commit()
+
+    payload = create_recommendation(client, product.id)
+
+    assert payload["supplier_id"] is None
+    assert payload["recommended_supplier_name"] == "Legacy Supplier Text"
+    assert payload["supplier_context_snapshot"]["mapping_source"] == "legacy_product"
+    assert payload["supplier_context_snapshot"]["needs_supplier_mapping"] is True
+    assert "Structured OrderPro supplier mapping is missing" in payload["reason"]
 
 
 def test_rejected_product_supplier_is_not_used_for_recommendation(client, db_session):
@@ -135,9 +214,10 @@ def test_rejected_product_supplier_is_not_used_for_recommendation(client, db_ses
 
     response = client.post(f"/recommendations/reorder/{product.id}")
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Product does not have a valid ProductSupplier mapping."
-    assert db_session.query(Recommendation).count() == 0
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["supplier_context_snapshot"]["mapping_source"] == "orderpro_product_supplier"
+    assert payload["product_supplier_id"] is None
 
 
 def test_accept_recommendation_changes_status(client, db_session):
@@ -167,33 +247,16 @@ def test_reject_recommendation_changes_status_and_stores_reason(client, db_sessi
     assert payload["rejected_reason"] == "Too early to reorder."
 
 
-def test_convert_accepted_recommendation_to_draft_po(client, db_session):
-    product, _supplier, mapping = seed_recommendation_product(db_session)
+def test_orderpro_recommendation_conversion_waits_for_purchase_order_refactor(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
     recommendation = create_recommendation(client, product.id)
     accept_recommendation(client, recommendation["id"])
 
     response = client.post(f"/recommendations/{recommendation['id']}/convert-to-draft-po")
 
-    assert response.status_code == 200
-    payload = response.json()
-    po = payload["purchase_order"]
-    updated_recommendation = payload["recommendation"]
-    assert po["status"] == "draft"
-    assert po["approved_at"] is None
-    assert po["issued_at"] is None
-    assert po["received_at"] is None
-    assert updated_recommendation["status"] == "converted_to_po"
-    assert updated_recommendation["converted_purchase_order_id"] == po["id"]
-    line = po["lines"][0]
-    assert line["product_id"] == product.id
-    assert line["product_supplier_id"] == mapping.id
-    assert line["supplier_sku"] == mapping.supplier_sku
-    assert line["supplier_product_name"] == mapping.supplier_product_name
-    assert line["unit_cost"] == mapping.purchase_price
-    assert line["currency"] == mapping.currency
-    assert line["minimum_order_quantity"] == mapping.minimum_order_quantity
-    assert line["pack_size"] == mapping.pack_size
-    assert line["lead_time_days"] == mapping.lead_time_days
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Recommendation does not have a ProductSupplier mapping."
+    assert db_session.query(PurchaseOrder).count() == 0
 
 
 def test_cannot_convert_rejected_recommendation(client, db_session):

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
+from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
 from app.models.supplier import Supplier
 from app.schemas.purchase_order import (
@@ -20,6 +21,7 @@ from app.schemas.purchase_order import (
 from app.services.purchase_order_drafting import (
     DraftPurchaseOrderError,
     create_draft_purchase_order_from_products,
+    snapshot_purchase_order_line_from_product,
 )
 
 router = APIRouter(prefix="/purchase-orders", tags=["purchase-orders"])
@@ -140,6 +142,10 @@ def snapshot_line(po: PurchaseOrder, product_supplier: ProductSupplier, payload:
     )
 
 
+def snapshot_product_line(po: PurchaseOrder, product: Product, payload: PurchaseOrderLineCreate) -> PurchaseOrderLine:
+    return snapshot_purchase_order_line_from_product(po, product, payload.quantity, notes=payload.notes)
+
+
 @router.post("", response_model=PurchaseOrderResponse, status_code=status.HTTP_201_CREATED)
 def create_purchase_order(payload: PurchaseOrderCreate, db: Session = Depends(get_db)):
     supplier = db.get(Supplier, payload.supplier_id)
@@ -191,6 +197,7 @@ def create_draft_purchase_order_from_product_recommendations(
             product_ids=payload.product_ids,
             created_by=payload.created_by,
             notes=payload.notes,
+            only_reorder_needed=payload.only_reorder_needed,
         )
     except DraftPurchaseOrderError as error:
         status_code = 404 if error.message == "Supplier not found." else 400
@@ -202,11 +209,18 @@ def create_draft_purchase_order_from_product_recommendations(
             },
         ) from error
 
+    purchase_orders = [serialize_purchase_order(load_purchase_order(db, po.id)) for po in result.purchase_orders]
     return {
-        "purchase_order": serialize_purchase_order(load_purchase_order(db, result.purchase_order.id)),
+        "purchase_order": purchase_orders[0] if len(purchase_orders) == 1 else None,
+        "created_purchase_orders": purchase_orders,
         "summary": {
+            "created_po_count": len(purchase_orders),
             "created_line_count": result.created_line_count,
             "skipped_products": serialize_skipped_products(result.skipped_products),
+            "grouped_by_supplier": {
+                str(supplier_id): line_count
+                for supplier_id, line_count in result.grouped_by_supplier.items()
+            },
         },
     }
 
@@ -242,15 +256,27 @@ def add_purchase_order_line(
     if payload.quantity <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be greater than zero.")
 
-    product_supplier = db.get(ProductSupplier, payload.product_supplier_id)
-    if not product_supplier:
-        raise HTTPException(status_code=404, detail="ProductSupplier mapping not found.")
-    if product_supplier.supplier_id != po.supplier_id:
-        raise HTTPException(status_code=400, detail="ProductSupplier belongs to a different supplier.")
-    if product_supplier.match_status == REJECTED_MAPPING:
-        raise HTTPException(status_code=400, detail="Rejected ProductSupplier mappings cannot be used.")
+    if payload.product_id is not None:
+        product = db.get(Product, payload.product_id)
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+        if product.supplier_id is None:
+            raise HTTPException(status_code=400, detail="Product is missing an OrderPro supplier mapping.")
+        if product.supplier_id != po.supplier_id:
+            raise HTTPException(status_code=400, detail="Product belongs to a different OrderPro supplier.")
+        line = snapshot_product_line(po, product, payload)
+    elif payload.product_supplier_id is not None:
+        product_supplier = db.get(ProductSupplier, payload.product_supplier_id)
+        if not product_supplier:
+            raise HTTPException(status_code=404, detail="ProductSupplier mapping not found.")
+        if product_supplier.supplier_id != po.supplier_id:
+            raise HTTPException(status_code=400, detail="ProductSupplier belongs to a different supplier.")
+        if product_supplier.match_status == REJECTED_MAPPING:
+            raise HTTPException(status_code=400, detail="Rejected ProductSupplier mappings cannot be used.")
+        line = snapshot_line(po, product_supplier, payload)
+    else:
+        raise HTTPException(status_code=400, detail="Either product_id or product_supplier_id is required.")
 
-    line = snapshot_line(po, product_supplier, payload)
     po.lines.append(line)
     po.updated_at = datetime.utcnow()
     recalculate_total(po)

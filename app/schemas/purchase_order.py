@@ -11,14 +11,16 @@ class PurchaseOrderCreate(BaseModel):
 
 
 class DraftPurchaseOrderFromProductsCreate(BaseModel):
-    supplier_id: int
+    supplier_id: int | None = None
     product_ids: list[int]
     notes: str | None = None
     created_by: str | None = None
+    only_reorder_needed: bool = False
 
 
 class PurchaseOrderLineCreate(BaseModel):
-    product_supplier_id: int
+    product_supplier_id: int | None = None
+    product_id: int | None = None
     quantity: float
     notes: str | None = None
 
@@ -36,7 +38,7 @@ class PurchaseOrderLineResponse(BaseModel):
     id: int
     purchase_order_id: int
     product_id: int
-    product_supplier_id: int
+    product_supplier_id: int | None
     supplier_sku: str | None
     supplier_product_name: str | None
     quantity: float
@@ -75,10 +77,30 @@ class DraftPurchaseOrderSkippedProductResponse(BaseModel):
 
 
 class DraftPurchaseOrderSummaryResponse(BaseModel):
+    created_po_count: int | None = None
     created_line_count: int
     skipped_products: list[DraftPurchaseOrderSkippedProductResponse]
+    grouped_by_supplier: dict[str, int] | None = None
 
 
 class DraftPurchaseOrderFromProductsResponse(BaseModel):
-    purchase_order: PurchaseOrderResponse
+    purchase_order: PurchaseOrderResponse | None = None
+    created_purchase_orders: list[PurchaseOrderResponse] = []
     summary: DraftPurchaseOrderSummaryResponse
+
+
+class SupplierForecastResponse(BaseModel):
+    supplier_id: int
+    supplier_name: str | None
+    product_count: int
+    forecasts: list[dict]
+    products_needing_reorder: list[int]
+    products_missing_data: list[int]
+    total_recommended_quantity: float
+    total_estimated_cost: float | None
+
+
+class SupplierDraftPurchaseOrderFromForecastCreate(BaseModel):
+    notes: str | None = None
+    created_by: str | None = None
+    only_reorder_needed: bool = True

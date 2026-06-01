@@ -48,7 +48,11 @@ class PurchaseOrderLine(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     purchase_order_id: Mapped[int] = mapped_column(ForeignKey("purchase_orders.id"), nullable=False, index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False, index=True)
-    product_supplier_id: Mapped[int] = mapped_column(ForeignKey("product_suppliers.id"), nullable=False, index=True)
+    product_supplier_id: Mapped[int | None] = mapped_column(
+        ForeignKey("product_suppliers.id"),
+        nullable=True,
+        index=True,
+    )
 
     supplier_sku: Mapped[str | None] = mapped_column(String(255), nullable=True)
     supplier_product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

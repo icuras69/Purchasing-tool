@@ -33,8 +33,8 @@ def load_product_for_recommendation(db: Session, product_id: int) -> Product | N
     return (
         db.query(Product)
         .options(
+            selectinload(Product.supplier_record),
             selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
-            selectinload(Product.master_items),
             selectinload(Product.inventory_positions),
         )
         .filter(Product.id == product_id)
@@ -52,21 +52,22 @@ def create_reorder_recommendation_for_product(
     if not product:
         raise RecommendationError("Product not found.", status_code=404)
 
-    product_supplier = select_safe_product_supplier(product)
-    if not product_supplier:
-        raise RecommendationError("Product does not have a valid ProductSupplier mapping.")
-
     forecast = build_forecast(db, product)
     supplier_context = forecast.get("supplier_context") or {}
-    quantity = recommended_quantity(forecast, product_supplier)
-    unit_cost = product_supplier.purchase_price
+    if supplier_context.get("mapping_source") == "missing":
+        raise RecommendationError("Product is missing an OrderPro supplier mapping.")
+
+    quantity = recommended_quantity(forecast, product)
+    unit_cost = product.cost_price
     estimated_total_cost = round(quantity * unit_cost, 2) if unit_cost is not None else None
     now = datetime.utcnow()
+    supplier = product.supplier_record
+    needs_mapping = bool(supplier_context.get("needs_supplier_mapping"))
 
     recommendation = Recommendation(
         product_id=product.id,
-        supplier_id=product_supplier.supplier_id,
-        product_supplier_id=product_supplier.id,
+        supplier_id=product.supplier_id,
+        product_supplier_id=None,
         generated_at=now,
         created_at=now,
         updated_at=now,
@@ -75,14 +76,14 @@ def create_reorder_recommendation_for_product(
         explanation=forecast.get("explanation"),
         recommendation_type=REORDER,
         status=PENDING_REVIEW,
-        recommended_supplier_name=product_supplier.supplier.name if product_supplier.supplier else None,
-        recommended_supplier_sku=product_supplier.supplier_sku,
+        recommended_supplier_name=supplier.name if supplier else product.supplier,
+        recommended_supplier_sku=product.supplier_sku,
         estimated_unit_cost=unit_cost,
         estimated_total_cost=estimated_total_cost,
-        currency=product_supplier.currency,
-        reason=forecast.get("explanation"),
+        currency=None,
+        reason=recommendation_reason(forecast, needs_mapping),
         confidence=None,
-        input_snapshot=input_snapshot(product, product_supplier),
+        input_snapshot=input_snapshot(product, supplier_context),
         forecast_snapshot=forecast,
         supplier_context_snapshot=supplier_context,
         model_name=None,
@@ -95,70 +96,49 @@ def create_reorder_recommendation_for_product(
     return recommendation
 
 
-def select_safe_product_supplier(product: Product) -> ProductSupplier | None:
-    mappings = [
-        mapping for mapping in product.product_suppliers if mapping.match_status != REJECTED
-    ]
-    if not mappings:
-        return None
-
-    preferred = next(
-        (
-            mapping
-            for mapping in mappings
-            if mapping.is_preferred and mapping.match_status in {"confirmed", "matched"}
-        ),
-        None,
-    )
-    if preferred:
-        return preferred
-
-    confirmed_or_matched = [
-        mapping for mapping in mappings if mapping.match_status in {"confirmed", "matched"}
-    ]
-    if confirmed_or_matched:
-        return sorted(confirmed_or_matched, key=lambda mapping: mapping.id or 0)[0]
-
-    return None
-
-
-def recommended_quantity(forecast: dict[str, Any], product_supplier: ProductSupplier) -> float:
+def recommended_quantity(forecast: dict[str, Any], product: Product) -> float:
     quantity = float(forecast.get("recommended_qty") or 0)
     if quantity <= 0:
-        quantity = float(product_supplier.minimum_order_quantity or 1)
+        quantity = float(product.min_order_qty or 1)
 
-    if product_supplier.minimum_order_quantity and quantity < product_supplier.minimum_order_quantity:
-        quantity = float(product_supplier.minimum_order_quantity)
-
-    if product_supplier.pack_size and product_supplier.pack_size > 0:
-        pack_size = float(product_supplier.pack_size)
-        quantity = ceil(quantity / pack_size) * pack_size
+    if product.min_order_qty and quantity < product.min_order_qty:
+        quantity = float(product.min_order_qty)
 
     return float(ceil(quantity)) if quantity > 0 else 1.0
 
 
-def input_snapshot(product: Product, product_supplier: ProductSupplier) -> dict[str, Any]:
+def recommendation_reason(forecast: dict[str, Any], needs_mapping: bool) -> str | None:
+    explanation = forecast.get("explanation")
+    if needs_mapping:
+        mapping_note = "Structured OrderPro supplier mapping is missing and should be reviewed before purchasing."
+        return f"{explanation} {mapping_note}" if explanation else mapping_note
+    return explanation
+
+
+def input_snapshot(product: Product, supplier_context: dict[str, Any]) -> dict[str, Any]:
     return {
         "product": {
             "id": product.id,
             "name": product.name,
+            "orderpro_id": product.orderpro_id,
+            "orderpro_sku": product.orderpro_sku,
+            "supplier_id": product.supplier_id,
+            "supplier_sku": product.supplier_sku,
             "current_stock": product.current_stock,
             "safety_stock": product.safety_stock,
             "lead_time_days": product.lead_time_days,
             "min_order_qty": product.min_order_qty,
+            "cost_price": product.cost_price,
+            "source_system": product.source_system,
         },
-        "product_supplier": {
-            "id": product_supplier.id,
-            "supplier_id": product_supplier.supplier_id,
-            "supplier_sku": product_supplier.supplier_sku,
-            "supplier_product_name": product_supplier.supplier_product_name,
-            "purchase_price": product_supplier.purchase_price,
-            "currency": product_supplier.currency,
-            "minimum_order_quantity": product_supplier.minimum_order_quantity,
-            "pack_size": product_supplier.pack_size,
-            "lead_time_days": product_supplier.lead_time_days,
-            "match_status": product_supplier.match_status,
-            "match_method": product_supplier.match_method,
+        "orderpro_product_supplier": {
+            "supplier_id": product.supplier_id,
+            "supplier_name": supplier_context.get("supplier_name"),
+            "supplier_code": supplier_context.get("supplier_code"),
+            "supplier_sku": product.supplier_sku,
+            "mapping_source": supplier_context.get("mapping_source"),
+            "has_supplier_mapping": supplier_context.get("has_supplier_mapping"),
+            "needs_supplier_mapping": supplier_context.get("needs_supplier_mapping"),
         },
     }
 
