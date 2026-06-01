@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Float, Boolean
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Float, Boolean, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -18,7 +18,7 @@ class Product(Base):
     supplier_sku: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     barcode: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
     category: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -28,7 +28,7 @@ class Product(Base):
     sell_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     hs_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     country_of_origin: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    image_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     canonical_description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     supplier: Mapped[str | None] = mapped_column(String(255), nullable=True)

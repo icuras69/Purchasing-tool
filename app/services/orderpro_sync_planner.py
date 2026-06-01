@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,28 @@ PRODUCT_FIELDS = (
     "is_active",
 )
 
+PRODUCT_FIELD_LIMITS = {
+    "source_key": 255,
+    "orderpro_id": 100,
+    "orderpro_sku": 255,
+    "supplier_sku": 255,
+    "name": 255,
+    "barcode": 255,
+    "brand": 255,
+    "category": 255,
+    "uom": 50,
+    "hs_code": 100,
+    "country_of_origin": 100,
+    "source_system": 50,
+}
+
+
+@dataclass
+class OrderProFetchResult:
+    records: list[dict[str, Any]]
+    pages_fetched: int
+    truncated_by_limit: bool
+
 
 def fetch_orderpro_records(
     client: OrderProClient,
@@ -37,21 +61,36 @@ def fetch_orderpro_records(
     *,
     limit_pages: int | None = None,
 ) -> list[dict[str, Any]]:
+    return fetch_orderpro_records_with_status(client, path, limit_pages=limit_pages).records
+
+
+def fetch_orderpro_records_with_status(
+    client: OrderProClient,
+    path: str,
+    *,
+    limit_pages: int | None = None,
+) -> OrderProFetchResult:
     page = 1
     records: list[dict[str, Any]] = []
+    pages_fetched = 0
 
     while True:
         payload = client.generic_get(path, params={"page": page})
+        pages_fetched += 1
         records.extend(record for record in extract_records(payload) if isinstance(record, dict))
 
-        if limit_pages is not None and page >= limit_pages:
-            break
         next_page = next_page_number(payload, current_page=page)
+        if limit_pages is not None and page >= limit_pages:
+            return OrderProFetchResult(
+                records=records,
+                pages_fetched=pages_fetched,
+                truncated_by_limit=next_page is not None,
+            )
         if next_page is None:
             break
         page = next_page
 
-    return records
+    return OrderProFetchResult(records=records, pages_fetched=pages_fetched, truncated_by_limit=False)
 
 
 def load_product_csv(path: str | Path) -> dict[str, dict[str, Any]]:
@@ -105,16 +144,55 @@ def plan_orderpro_sync(
     }
 
 
-def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str, Any]:
+def apply_orderpro_supplier_product_sync(
+    db: Session,
+    *,
+    suppliers: list[dict[str, Any]],
+    products: list[dict[str, Any]],
+    product_csv_rows: dict[str, dict[str, Any]],
+    mark_missing_inactive: bool = False,
+    synced_at: datetime | None = None,
+) -> dict[str, Any]:
+    sync_time = synced_at or datetime.now(timezone.utc)
+    supplier_result = apply_supplier_sync(db, suppliers, synced_at=sync_time)
+    db.flush()
+    product_result = apply_product_sync(
+        db,
+        products,
+        product_csv_rows,
+        suppliers,
+        mark_missing_inactive=mark_missing_inactive,
+        synced_at=sync_time,
+    )
+    db.flush()
+
+    return {
+        "mode": "apply",
+        "suppliers": supplier_result,
+        "products": product_result,
+        "warnings": [*supplier_result["warnings"], *product_result["warnings"]],
+    }
+
+
+def apply_supplier_sync(
+    db: Session,
+    suppliers: list[dict[str, Any]],
+    *,
+    synced_at: datetime,
+) -> dict[str, Any]:
     local_suppliers = db.query(Supplier).all()
     by_orderpro_id = {str(row.orderpro_id): row for row in local_suppliers if row.orderpro_id}
     by_code = {row.orderpro_code: row for row in local_suppliers if row.orderpro_code}
-    orderpro_ids = {clean_text(row.get("id")) for row in suppliers if clean_text(row.get("id"))}
-    orderpro_codes = {clean_text(row.get("code")) for row in suppliers if clean_text(row.get("code"))}
+    by_normalized_name = {
+        normalize_name(row.normalized_name or row.name): row
+        for row in local_suppliers
+        if row.normalized_name or row.name
+    }
 
-    to_create = []
-    to_update = []
-    matching = []
+    created = []
+    updated = []
+    unchanged = []
+    linked_existing_by_name = []
     missing_identity = []
 
     for row in suppliers:
@@ -124,15 +202,227 @@ def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str
             missing_identity.append({"name": clean_text(row.get("name"))})
             continue
 
-        local = (by_orderpro_id.get(orderpro_id) if orderpro_id else None) or (by_code.get(code) if code else None)
         desired = desired_supplier_fields(row)
+        desired["last_synced_at"] = sync_time_without_timezone(synced_at)
+        local = (by_orderpro_id.get(orderpro_id) if orderpro_id else None) or (by_code.get(code) if code else None)
+        matched_by_name = False
+        if local is None:
+            local = by_normalized_name.get(normalize_name(desired["name"]))
+            matched_by_name = local is not None
+        if local is None:
+            local = Supplier(
+                **desired,
+                normalized_name=normalize_name(desired["name"]),
+            )
+            db.add(local)
+            db.flush()
+            created.append({"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_code": code})
+            if orderpro_id:
+                by_orderpro_id[orderpro_id] = local
+            if code:
+                by_code[code] = local
+            by_normalized_name[normalize_name(local.normalized_name or local.name)] = local
+            continue
+
+        desired = safe_supplier_update_fields(db, local, desired)
+        changes = changed_fields(local, desired)
+        if changes:
+            for field, value in desired.items():
+                setattr(local, field, value)
+            local.normalized_name = normalize_name(local.name)
+            update_row = {"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_code": code, "changed_fields": sorted(changes)}
+            if matched_by_name:
+                update_row["match_type"] = "name"
+                linked_existing_by_name.append(update_row)
+            updated.append(update_row)
+            if orderpro_id:
+                by_orderpro_id[orderpro_id] = local
+            if code:
+                by_code[code] = local
+        else:
+            unchanged.append({"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_code": code})
+
+    warnings = [f"{len(missing_identity)} supplier rows were skipped because both id and code were missing."] if missing_identity else []
+    return {
+        "summary": {
+            "orderpro_suppliers": len(suppliers),
+            "created": len(created),
+            "updated": len(updated),
+            "unchanged": len(unchanged),
+            "linked_existing_by_name": len(linked_existing_by_name),
+            "missing_code_or_id": len(missing_identity),
+        },
+        "created": created,
+        "updated": updated,
+        "unchanged": unchanged,
+        "linked_existing_by_name": linked_existing_by_name,
+        "missing_code_or_id": missing_identity,
+        "warnings": warnings,
+    }
+
+
+def apply_product_sync(
+    db: Session,
+    products: list[dict[str, Any]],
+    product_csv_rows: dict[str, dict[str, Any]],
+    suppliers: list[dict[str, Any]],
+    *,
+    mark_missing_inactive: bool,
+    synced_at: datetime,
+) -> dict[str, Any]:
+    local_products = db.query(Product).all()
+    local_suppliers = db.query(Supplier).all()
+    local_by_orderpro_id = {str(row.orderpro_id): row for row in local_products if row.orderpro_id}
+    local_by_sku = {row.orderpro_sku: row for row in local_products if row.orderpro_sku}
+    supplier_by_code = {row.orderpro_code: row for row in local_suppliers if row.orderpro_code}
+    orderpro_supplier_codes = {clean_text(row.get("code")) for row in suppliers if clean_text(row.get("code"))}
+    orderpro_product_ids = {clean_text(row.get("id")) for row in products if clean_text(row.get("id"))}
+    orderpro_skus = {clean_text(row.get("sku")) for row in products if clean_text(row.get("sku"))}
+
+    created = []
+    updated = []
+    unchanged = []
+    missing_from_csv = []
+    csv_missing_supplier_code = []
+    unknown_supplier_codes = []
+    field_limit_violations = []
+    deactivated = []
+
+    for row in products:
+        orderpro_id = clean_text(row.get("id"))
+        sku = clean_text(row.get("sku"))
+        csv_row = product_csv_rows.get(sku or "")
+        supplier_code = clean_text(csv_row.get("supplier_code")) if csv_row else None
+        supplier_sku = clean_text(csv_row.get("supplier_sku")) if csv_row else None
+
+        if not csv_row:
+            missing_from_csv.append(product_identity(row))
+        elif not supplier_code:
+            csv_missing_supplier_code.append(product_identity(row))
+        elif supplier_code not in orderpro_supplier_codes:
+            unknown_supplier_codes.append({"sku": sku, "supplier_code": supplier_code})
+
+        local_supplier = supplier_by_code.get(supplier_code) if supplier_code in orderpro_supplier_codes else None
+        desired = desired_product_fields(
+            row,
+            supplier_sku=supplier_sku,
+            local_supplier_id=local_supplier.id if local_supplier else None,
+        )
+        desired["last_synced_at"] = sync_time_without_timezone(synced_at)
+        violations = product_field_limit_violations(row, desired)
+        if violations:
+            field_limit_violations.extend(violations)
+            continue
+        local = (local_by_orderpro_id.get(orderpro_id) if orderpro_id else None) or (local_by_sku.get(sku) if sku else None)
+
+        if local is None:
+            local = Product(**desired)
+            db.add(local)
+            db.flush()
+            created.append({"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_sku": sku})
+            if orderpro_id:
+                local_by_orderpro_id[orderpro_id] = local
+            if sku:
+                local_by_sku[sku] = local
+            continue
+
+        changes = changed_fields(local, desired)
+        if changes:
+            for field, value in desired.items():
+                setattr(local, field, value)
+            updated.append({"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_sku": sku, "changed_fields": sorted(changes)})
+        else:
+            unchanged.append({"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_sku": sku})
+
+    if mark_missing_inactive:
+        for product in db.query(Product).filter(Product.source_system == "orderpro").all():
+            if product.orderpro_id and str(product.orderpro_id) in orderpro_product_ids:
+                continue
+            if product.orderpro_sku and product.orderpro_sku in orderpro_skus:
+                continue
+            if product.is_active:
+                product.is_active = False
+                product.last_synced_at = sync_time_without_timezone(synced_at)
+                deactivated.append({"local_id": product.id, "orderpro_id": product.orderpro_id, "orderpro_sku": product.orderpro_sku})
+
+    warnings = []
+    if missing_from_csv:
+        warnings.append(f"{len(missing_from_csv)} products were missing from the CSV export.")
+    if csv_missing_supplier_code:
+        warnings.append(f"{len(csv_missing_supplier_code)} CSV product rows were missing supplier_code.")
+    if unknown_supplier_codes:
+        warnings.append(f"{len(unknown_supplier_codes)} CSV supplier_code values were not found in OrderPro suppliers.")
+    if field_limit_violations:
+        warnings.append(f"{len(field_limit_violations)} product fields exceeded local column limits and were skipped.")
+
+    return {
+        "summary": {
+            "orderpro_products": len(products),
+            "created": len(created),
+            "updated": len(updated),
+            "unchanged": len(unchanged),
+            "missing_from_csv": len(missing_from_csv),
+            "csv_rows_missing_supplier_code": len(csv_missing_supplier_code),
+            "unknown_supplier_codes": len(unknown_supplier_codes),
+            "field_limit_violations": len(field_limit_violations),
+            "deactivated_missing_orderpro_products": len(deactivated),
+            "mark_missing_inactive": mark_missing_inactive,
+        },
+        "created": created,
+        "updated": updated,
+        "unchanged": unchanged,
+        "missing_from_csv": missing_from_csv,
+        "csv_rows_missing_supplier_code": csv_missing_supplier_code,
+        "csv_rows_missing_supplier_code_sample": csv_missing_supplier_code[:10],
+        "unknown_supplier_codes": unknown_supplier_codes,
+        "field_limit_violations": field_limit_violations,
+        "deactivated_missing_orderpro_products": deactivated,
+        "warnings": warnings,
+    }
+
+
+def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str, Any]:
+    local_suppliers = db.query(Supplier).all()
+    by_orderpro_id = {str(row.orderpro_id): row for row in local_suppliers if row.orderpro_id}
+    by_code = {row.orderpro_code: row for row in local_suppliers if row.orderpro_code}
+    by_normalized_name = {
+        normalize_name(row.normalized_name or row.name): row
+        for row in local_suppliers
+        if row.normalized_name or row.name
+    }
+    orderpro_ids = {clean_text(row.get("id")) for row in suppliers if clean_text(row.get("id"))}
+    orderpro_codes = {clean_text(row.get("code")) for row in suppliers if clean_text(row.get("code"))}
+
+    to_create = []
+    to_update = []
+    matching = []
+    matched_by_name = []
+    missing_identity = []
+
+    for row in suppliers:
+        orderpro_id = clean_text(row.get("id"))
+        code = clean_text(row.get("code"))
+        if not orderpro_id and not code:
+            missing_identity.append({"name": clean_text(row.get("name"))})
+            continue
+
+        desired = desired_supplier_fields(row)
+        local = (by_orderpro_id.get(orderpro_id) if orderpro_id else None) or (by_code.get(code) if code else None)
+        matched_by = "identity" if local is not None else None
+        if local is None:
+            local = by_normalized_name.get(normalize_name(desired["name"]))
+            matched_by = "name" if local is not None else None
         if local is None:
             to_create.append(desired)
             continue
 
         changes = changed_fields(local, desired)
         if changes:
-            to_update.append({"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_code": code, "changes": changes})
+            update_row = {"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_code": code, "changes": changes}
+            if matched_by == "name":
+                update_row["match_type"] = "name"
+                matched_by_name.append(update_row)
+            to_update.append(update_row)
         else:
             matching.append({"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_code": code})
 
@@ -151,12 +441,15 @@ def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str
             "to_create": len(to_create),
             "to_update": len(to_update),
             "already_matching": len(matching),
+            "matched_by_name": len(matched_by_name),
+            "linked_existing_by_name": len(matched_by_name),
             "missing_code_or_id": len(missing_identity),
             "local_not_found_in_orderpro": len(local_not_in_orderpro),
         },
         "to_create": to_create,
         "to_update": to_update,
         "already_matching": matching,
+        "matched_by_name": matched_by_name,
         "missing_code_or_id": missing_identity,
         "local_not_found_in_orderpro": local_not_in_orderpro,
         "warnings": [f"{len(missing_identity)} supplier rows are missing both id and code."] if missing_identity else [],
@@ -187,6 +480,7 @@ def plan_product_sync(
     csv_missing_supplier_code = []
     unknown_supplier_codes = []
     unknown_supplier_code_samples: dict[str, list[str | None]] = defaultdict(list)
+    field_limit_violations = []
     would_assign_supplier = []
     without_supplier = []
 
@@ -218,6 +512,7 @@ def plan_product_sync(
             local = local_by_sku.get(sku)
             matched_by = "orderpro_sku" if local is not None else None
         desired = desired_product_fields(row, supplier_sku=supplier_sku, local_supplier_id=local_supplier.id if local_supplier else None)
+        field_limit_violations.extend(product_field_limit_violations(row, desired))
         if local is None:
             to_create.append(desired)
             continue
@@ -242,6 +537,8 @@ def plan_product_sync(
         warnings.append(f"{len(unknown_supplier_codes)} CSV supplier_code values were not found in OrderPro suppliers.")
     if supplier_pages_limited and unknown_supplier_codes:
         warnings.append("Unknown supplier_code results may be unreliable because supplier API pages were limited.")
+    if field_limit_violations:
+        warnings.append(f"{len(field_limit_violations)} product fields exceeded local column limits and need review.")
 
     return {
         "summary": {
@@ -254,6 +551,7 @@ def plan_product_sync(
             "missing_from_csv": len(missing_from_csv),
             "csv_rows_missing_supplier_code": len(csv_missing_supplier_code),
             "unknown_supplier_codes": len(unknown_supplier_codes),
+            "field_limit_violations": len(field_limit_violations),
             "would_assign_supplier": len(would_assign_supplier),
             "would_remain_without_supplier": len(without_supplier),
             "unknown_supplier_code_check_used_full_supplier_list": not supplier_pages_limited,
@@ -271,6 +569,7 @@ def plan_product_sync(
             {"supplier_code": code, "sample_skus": skus}
             for code, skus in sorted(unknown_supplier_code_samples.items())
         ],
+        "field_limit_violations": field_limit_violations,
         "would_assign_supplier": would_assign_supplier,
         "would_remain_without_supplier": without_supplier,
         "would_remain_without_supplier_sample": without_supplier[:10],
@@ -460,10 +759,31 @@ def desired_product_fields(row: dict[str, Any], *, supplier_sku: str | None, loc
             desired[field] = to_float(value) if value not in (None, "") else None
         elif field == "is_active":
             desired[field] = to_bool(value, default=True)
+        elif field in {"description", "image_url"}:
+            desired[field] = clean_preserved_text(value)
         else:
             desired[field] = clean_text(value)
     desired["name"] = desired["name"] or clean_text(row.get("sku")) or "Unnamed Product"
     return desired
+
+
+def product_field_limit_violations(row: dict[str, Any], desired: dict[str, Any]) -> list[dict[str, Any]]:
+    sku = clean_text(row.get("sku")) or clean_text(desired.get("orderpro_sku"))
+    violations = []
+    for field, limit in PRODUCT_FIELD_LIMITS.items():
+        value = desired.get(field)
+        if isinstance(value, str) and len(value) > limit:
+            violations.append(
+                {
+                    "orderpro_id": clean_text(row.get("id")),
+                    "orderpro_sku": sku,
+                    "field": field,
+                    "limit": limit,
+                    "actual_length": len(value),
+                    "sample": value[:120],
+                }
+            )
+    return violations
 
 
 def desired_warehouse_fields(row: dict[str, Any]) -> dict[str, Any]:
@@ -493,11 +813,28 @@ def changed_fields(model: Any, desired: dict[str, Any]) -> dict[str, dict[str, A
     return changes
 
 
+def safe_supplier_update_fields(db: Session, supplier: Supplier, desired: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(desired)
+    desired_name = clean_text(safe.get("name"))
+    if desired_name and desired_name != supplier.name:
+        existing = db.query(Supplier).filter(Supplier.name == desired_name, Supplier.id != supplier.id).first()
+        if existing is not None:
+            safe.pop("name", None)
+    return safe
+
+
 def clean_text(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def clean_preserved_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
 
 
 def to_bool(value: Any, *, default: bool) -> bool:
@@ -562,3 +899,13 @@ def location_name(row: dict[str, Any]) -> str | None:
     if isinstance(location, dict):
         return clean_text(location.get("name")) or clean_text(location.get("title"))
     return clean_text(location)
+
+
+def normalize_name(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def sync_time_without_timezone(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)

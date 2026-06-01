@@ -61,6 +61,24 @@ def test_product_can_reference_one_supplier_and_keep_legacy_supplier_text(db_ses
     assert supplier.products == [product]
 
 
+def test_product_can_store_long_orderpro_description(db_session):
+    long_description = "OrderPro description " + ("x" * 1500)
+    product = Product(
+        name="Long Description Product",
+        orderpro_id="long-1",
+        orderpro_sku="LONG-1",
+        description=long_description,
+        image_url="https://example.test/images/" + ("a" * 1200),
+    )
+    db_session.add(product)
+    db_session.commit()
+    db_session.refresh(product)
+
+    assert product.description == long_description
+    assert len(product.description) > 1000
+    assert len(product.image_url) > 1000
+
+
 def test_warehouse_model_exists_with_orderpro_identity_fields(db_session):
     warehouse = Warehouse(
         orderpro_id="7",

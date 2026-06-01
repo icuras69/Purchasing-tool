@@ -6,7 +6,9 @@ from app.models.supplier import Supplier
 from app.models.warehouse import Warehouse
 from app.services.orderpro_client import OrderProClient
 from app.services.orderpro_sync_planner import (
+    apply_orderpro_supplier_product_sync,
     fetch_orderpro_records,
+    fetch_orderpro_records_with_status,
     load_product_csv,
     plan_inventory_sync,
     plan_orderpro_sync,
@@ -60,6 +62,29 @@ def test_supplier_planning_reports_create_update_and_match(db_session):
     assert report["summary"]["missing_code_or_id"] == 1
     assert report["summary"]["local_not_found_in_orderpro"] == 1
     assert report["to_update"][0]["changes"]["name"]["desired"] == "New Name"
+
+
+def test_supplier_planning_matches_existing_supplier_by_normalized_name(db_session):
+    local = Supplier(
+        name="Acravet Ltd",
+        normalized_name="acravet ltd",
+        notes="Keep these notes",
+        lead_time_days=14,
+    )
+    db_session.add(local)
+    db_session.flush()
+
+    report = plan_supplier_sync(
+        db_session,
+        [{"id": 55, "code": "ACR", "name": "Acravet Ltd", "email": "sales@example.test", "phone": "555"}],
+    )
+
+    assert report["summary"]["to_create"] == 0
+    assert report["summary"]["to_update"] == 1
+    assert report["summary"]["matched_by_name"] == 1
+    assert report["summary"]["linked_existing_by_name"] == 1
+    assert report["matched_by_name"][0]["local_id"] == local.id
+    assert report["matched_by_name"][0]["changes"]["orderpro_id"]["desired"] == "55"
 
 
 def test_product_planning_maps_csv_supplier_code_and_reports_missing_or_unknown_codes(db_session):
@@ -330,6 +355,29 @@ def test_fetch_orderpro_records_fetches_all_pages_when_no_limit():
     assert seen_pages == [1, 2]
 
 
+def test_fetch_orderpro_records_status_reports_limit_only_when_truncated():
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
+        return httpx.Response(
+            200,
+            json={"data": [{"id": page}], "meta": {"current_page": page, "last_page": 2}},
+        )
+
+    client = OrderProClient(
+        base_url="https://wms.orderpro.cloud/api/v2",
+        token="secret-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    complete = fetch_orderpro_records_with_status(client, "/suppliers", limit_pages=2)
+    truncated = fetch_orderpro_records_with_status(client, "/suppliers", limit_pages=1)
+
+    assert complete.pages_fetched == 2
+    assert complete.truncated_by_limit is False
+    assert truncated.pages_fetched == 1
+    assert truncated.truncated_by_limit is True
+
+
 def test_dry_run_report_does_not_print_tokens(capsys, db_session):
     report = plan_orderpro_sync(
         db_session,
@@ -361,3 +409,310 @@ def test_current_utc_timestamp_for_filename_is_timezone_aware(monkeypatch):
     monkeypatch.setattr("scripts.plan_orderpro_sync.datetime", FakeDateTime)
 
     assert current_utc_timestamp_for_filename() == "20260529_120000"
+
+
+def test_apply_creates_suppliers_and_products_with_csv_supplier_assignment(db_session):
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 10, "code": "SUP1", "name": "Supplier One", "email": "one@example.test", "phone": "111", "is_active": True}],
+        products=[
+            {
+                "id": 100,
+                "sku": "SKU-100",
+                "name": "Product One",
+                "description": "A product",
+                "cost_price": "4.5",
+                "sell_price": "6.5",
+                "is_active": True,
+            }
+        ],
+        product_csv_rows={"SKU-100": {"sku": "SKU-100", "supplier_code": "SUP1", "supplier_sku": "SUP-SKU-100"}},
+    )
+
+    supplier = db_session.query(Supplier).filter_by(orderpro_code="SUP1").one()
+    product = db_session.query(Product).filter_by(orderpro_sku="SKU-100").one()
+
+    assert report["mode"] == "apply"
+    assert report["suppliers"]["summary"]["created"] == 1
+    assert report["products"]["summary"]["created"] == 1
+    assert supplier.orderpro_id == "10"
+    assert supplier.source_system == "orderpro"
+    assert supplier.last_synced_at is not None
+    assert product.orderpro_id == "100"
+    assert product.source_system == "orderpro"
+    assert product.supplier_id == supplier.id
+    assert product.supplier_sku == "SUP-SKU-100"
+    assert product.cost_price == 4.5
+    assert product.last_synced_at is not None
+
+
+def test_apply_creates_product_with_long_description_preserved(db_session):
+    long_description = "Smooth Operator Fluffer Comb " + ("very long description " * 80)
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[
+            {
+                "id": 600,
+                "sku": "6FLUFFERCOMB",
+                "name": "6' Smooth Operator Fluffer Comb",
+                "description": long_description,
+                "is_active": True,
+            }
+        ],
+        product_csv_rows={"6FLUFFERCOMB": {"sku": "6FLUFFERCOMB", "supplier_code": "", "supplier_sku": ""}},
+    )
+
+    product = db_session.query(Product).filter_by(orderpro_sku="6FLUFFERCOMB").one()
+
+    assert report["products"]["summary"]["created"] == 1
+    assert report["products"]["summary"]["field_limit_violations"] == 0
+    assert product.description == long_description
+    assert len(product.description) > 1000
+
+
+def test_apply_skips_product_with_remaining_column_limit_violation(db_session):
+    too_long_name = "N" * 300
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[{"id": 700, "sku": "LONG-NAME", "name": too_long_name, "is_active": True}],
+        product_csv_rows={"LONG-NAME": {"sku": "LONG-NAME", "supplier_code": "", "supplier_sku": ""}},
+    )
+
+    assert report["products"]["summary"]["created"] == 0
+    assert report["products"]["summary"]["field_limit_violations"] == 1
+    assert report["products"]["field_limit_violations"][0]["field"] == "name"
+    assert db_session.query(Product).filter_by(orderpro_sku="LONG-NAME").count() == 0
+
+
+def test_apply_links_existing_supplier_by_name_without_duplicate_or_overwriting_local_fields(db_session):
+    local = Supplier(
+        name="Acravet Ltd",
+        normalized_name="acravet ltd",
+        notes="Important local note",
+        lead_time_days=21,
+        payment_terms="Net 30",
+    )
+    db_session.add(local)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 55, "code": "ACR", "name": "Acravet Ltd", "email": "sales@example.test", "phone": "555", "is_active": True}],
+        products=[{"id": 100, "sku": "SKU-100", "name": "Product One", "is_active": True}],
+        product_csv_rows={"SKU-100": {"sku": "SKU-100", "supplier_code": "ACR", "supplier_sku": "SUP-SKU-100"}},
+    )
+
+    db_session.refresh(local)
+    product = db_session.query(Product).filter_by(orderpro_sku="SKU-100").one()
+
+    assert report["suppliers"]["summary"]["created"] == 0
+    assert report["suppliers"]["summary"]["updated"] == 1
+    assert report["suppliers"]["summary"]["linked_existing_by_name"] == 1
+    assert db_session.query(Supplier).count() == 1
+    assert local.orderpro_id == "55"
+    assert local.orderpro_code == "ACR"
+    assert local.source_system == "orderpro"
+    assert local.email == "sales@example.test"
+    assert local.notes == "Important local note"
+    assert local.lead_time_days == 21
+    assert local.payment_terms == "Net 30"
+    assert product.supplier_id == local.id
+
+
+def test_apply_supplier_matching_still_uses_orderpro_id_before_name(db_session):
+    supplier_by_id = Supplier(
+        name="Different Local Name",
+        normalized_name="different local name",
+        orderpro_id="55",
+    )
+    same_name_other_supplier = Supplier(
+        name="OrderPro Name",
+        normalized_name="orderpro name",
+    )
+    db_session.add_all([supplier_by_id, same_name_other_supplier])
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 55, "code": "ACR", "name": "OrderPro Name", "email": "sales@example.test"}],
+        products=[],
+        product_csv_rows={},
+    )
+
+    db_session.refresh(supplier_by_id)
+    db_session.refresh(same_name_other_supplier)
+
+    assert report["suppliers"]["summary"]["created"] == 0
+    assert report["suppliers"]["summary"]["updated"] == 1
+    assert supplier_by_id.orderpro_code == "ACR"
+    assert supplier_by_id.name == "Different Local Name"
+    assert same_name_other_supplier.orderpro_code is None
+
+
+def test_apply_supplier_matching_still_uses_orderpro_code(db_session):
+    supplier = Supplier(
+        name="Existing Code Supplier",
+        normalized_name="existing code supplier",
+        orderpro_code="SUP1",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 10, "code": "SUP1", "name": "Existing Code Supplier", "phone": "111"}],
+        products=[],
+        product_csv_rows={},
+    )
+
+    db_session.refresh(supplier)
+
+    assert report["suppliers"]["summary"]["created"] == 0
+    assert supplier.orderpro_id == "10"
+    assert supplier.phone == "111"
+
+
+def test_apply_creates_supplier_only_when_id_code_and_name_do_not_match(db_session):
+    existing = Supplier(name="Existing Supplier", normalized_name="existing supplier")
+    db_session.add(existing)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 10, "code": "SUP1", "name": "New Supplier"}],
+        products=[],
+        product_csv_rows={},
+    )
+
+    assert report["suppliers"]["summary"]["created"] == 1
+    assert db_session.query(Supplier).count() == 2
+
+
+def test_apply_updates_existing_suppliers_and_products(db_session):
+    supplier = Supplier(
+        name="Old Supplier",
+        normalized_name="old supplier",
+        orderpro_id="10",
+        orderpro_code="SUP1",
+        email="old@example.test",
+    )
+    product = Product(
+        name="Old Product",
+        source_key="SKU-100",
+        orderpro_id="100",
+        orderpro_sku="SKU-100",
+        source_system="local",
+        supplier_sku="OLD-SKU",
+    )
+    db_session.add_all([supplier, product])
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 10, "code": "SUP1", "name": "New Supplier", "email": "new@example.test", "phone": "222", "is_active": False}],
+        products=[{"id": 100, "sku": "SKU-100", "name": "New Product", "brand": "Brand", "is_active": True}],
+        product_csv_rows={"SKU-100": {"sku": "SKU-100", "supplier_code": "SUP1", "supplier_sku": "NEW-SKU"}},
+    )
+
+    db_session.refresh(supplier)
+    db_session.refresh(product)
+
+    assert report["suppliers"]["summary"]["updated"] == 1
+    assert report["products"]["summary"]["updated"] == 1
+    assert supplier.name == "New Supplier"
+    assert supplier.normalized_name == "new supplier"
+    assert supplier.email == "new@example.test"
+    assert supplier.is_active is False
+    assert product.name == "New Product"
+    assert product.brand == "Brand"
+    assert product.source_system == "orderpro"
+    assert product.supplier_id == supplier.id
+    assert product.supplier_sku == "NEW-SKU"
+
+
+def test_apply_missing_supplier_code_leaves_product_supplier_id_null_and_reports_warning(db_session):
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 10, "code": "SUP1", "name": "Supplier One"}],
+        products=[{"id": 100, "sku": "SKU-100", "name": "Product One", "is_active": True}],
+        product_csv_rows={"SKU-100": {"sku": "SKU-100", "supplier_code": "", "supplier_sku": ""}},
+    )
+
+    product = db_session.query(Product).filter_by(orderpro_sku="SKU-100").one()
+
+    assert product.supplier_id is None
+    assert report["products"]["summary"]["csv_rows_missing_supplier_code"] == 1
+    assert "missing supplier_code" in " ".join(report["products"]["warnings"])
+
+
+def test_apply_unknown_supplier_code_reports_without_creating_fake_supplier(db_session):
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 10, "code": "SUP1", "name": "Supplier One"}],
+        products=[{"id": 100, "sku": "SKU-100", "name": "Product One", "is_active": True}],
+        product_csv_rows={"SKU-100": {"sku": "SKU-100", "supplier_code": "UNKNOWN", "supplier_sku": "SUP-SKU"}},
+    )
+
+    product = db_session.query(Product).filter_by(orderpro_sku="SKU-100").one()
+
+    assert product.supplier_id is None
+    assert db_session.query(Supplier).count() == 1
+    assert report["products"]["summary"]["unknown_supplier_codes"] == 1
+    assert report["products"]["unknown_supplier_codes"] == [{"sku": "SKU-100", "supplier_code": "UNKNOWN"}]
+
+
+def test_apply_does_not_deactivate_missing_local_products_by_default(db_session):
+    existing = Product(
+        name="Existing",
+        source_key="OLD-SKU",
+        orderpro_id="999",
+        orderpro_sku="OLD-SKU",
+        source_system="orderpro",
+        is_active=True,
+    )
+    db_session.add(existing)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+    )
+
+    db_session.refresh(existing)
+
+    assert existing.is_active is True
+    assert report["products"]["summary"]["deactivated_missing_orderpro_products"] == 0
+    assert report["products"]["summary"]["mark_missing_inactive"] is False
+
+
+def test_apply_mark_missing_inactive_is_required_before_deactivation(db_session):
+    existing = Product(
+        name="Existing",
+        source_key="OLD-SKU",
+        orderpro_id="999",
+        orderpro_sku="OLD-SKU",
+        source_system="orderpro",
+        is_active=True,
+    )
+    db_session.add(existing)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        mark_missing_inactive=True,
+    )
+
+    db_session.refresh(existing)
+
+    assert existing.is_active is False
+    assert report["products"]["summary"]["deactivated_missing_orderpro_products"] == 1
+    assert report["products"]["summary"]["mark_missing_inactive"] is True

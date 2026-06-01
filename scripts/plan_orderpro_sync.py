@@ -15,7 +15,9 @@ from app.core.config import settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.services.orderpro_client import OrderProClient  # noqa: E402
 from app.services.orderpro_sync_planner import (  # noqa: E402
+    apply_orderpro_supplier_product_sync,
     fetch_orderpro_records,
+    fetch_orderpro_records_with_status,
     load_product_csv,
     plan_orderpro_sync,
 )
@@ -65,6 +67,16 @@ def main() -> int:
         action="store_true",
         help="Save the JSON dry-run report under tmp/orderpro_sync_reports/.",
     )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply supplier and product sync. Omit for dry-run planning.",
+    )
+    parser.add_argument(
+        "--mark-missing-inactive",
+        action="store_true",
+        help="When applying, mark local OrderPro products absent from the fetched product set inactive.",
+    )
     args = parser.parse_args()
 
     if not args.run:
@@ -85,7 +97,8 @@ def main() -> int:
     supplier_limit_pages = args.supplier_limit_pages
     product_limit_pages = args.product_limit_pages if args.product_limit_pages is not None else args.limit_pages
     inventory_limit_pages = args.inventory_limit_pages if args.inventory_limit_pages is not None else args.limit_pages
-    suppliers = fetch_orderpro_records(client, "/suppliers", limit_pages=supplier_limit_pages)
+    supplier_fetch = fetch_orderpro_records_with_status(client, "/suppliers", limit_pages=supplier_limit_pages)
+    suppliers = supplier_fetch.records
     products = fetch_orderpro_records(client, "/products", limit_pages=product_limit_pages)
     inventory = (
         fetch_orderpro_records(client, "/inventory", limit_pages=inventory_limit_pages)
@@ -95,14 +108,24 @@ def main() -> int:
 
     db = SessionLocal()
     try:
-        report = plan_orderpro_sync(
-            db,
-            suppliers=suppliers,
-            products=products,
-            product_csv_rows=product_csv_rows,
-            inventory=inventory,
-            supplier_pages_limited=supplier_limit_pages is not None,
-        )
+        if args.apply:
+            report = apply_orderpro_supplier_product_sync(
+                db,
+                suppliers=suppliers,
+                products=products,
+                product_csv_rows=product_csv_rows,
+                mark_missing_inactive=args.mark_missing_inactive,
+            )
+            db.commit()
+        else:
+            report = plan_orderpro_sync(
+                db,
+                suppliers=suppliers,
+                products=products,
+                product_csv_rows=product_csv_rows,
+                inventory=inventory,
+                supplier_pages_limited=supplier_fetch.truncated_by_limit,
+            )
     finally:
         db.close()
 
@@ -116,19 +139,20 @@ def main() -> int:
 
 def print_report(report: dict[str, Any]) -> None:
     print("\nOrderPro Sync Dry-Run Plan")
-    print("Mode: dry_run")
+    print(f"Mode: {report.get('mode', 'dry_run')}")
     print_section("Supplier summary", report["suppliers"]["summary"])
     print_section("Product summary", report["products"]["summary"])
-    print_section(
-        "Supplier assignment summary",
-        {
-            "would_assign_supplier": report["products"]["summary"]["would_assign_supplier"],
-            "would_remain_without_supplier": report["products"]["summary"]["would_remain_without_supplier"],
-            "missing_from_csv": report["products"]["summary"]["missing_from_csv"],
-            "csv_rows_missing_supplier_code": report["products"]["summary"]["csv_rows_missing_supplier_code"],
-            "unknown_supplier_codes": report["products"]["summary"]["unknown_supplier_codes"],
-        },
-    )
+    if report.get("mode") != "apply":
+        print_section(
+            "Supplier assignment summary",
+            {
+                "would_assign_supplier": report["products"]["summary"]["would_assign_supplier"],
+                "would_remain_without_supplier": report["products"]["summary"]["would_remain_without_supplier"],
+                "missing_from_csv": report["products"]["summary"]["missing_from_csv"],
+                "csv_rows_missing_supplier_code": report["products"]["summary"]["csv_rows_missing_supplier_code"],
+                "unknown_supplier_codes": report["products"]["summary"]["unknown_supplier_codes"],
+            },
+        )
     print_samples("Unknown supplier code samples", report["products"].get("unknown_supplier_code_samples", []))
     print_samples(
         "CSV rows missing supplier_code sample",
@@ -138,12 +162,14 @@ def print_report(report: dict[str, Any]) -> None:
         "Products remaining without supplier_id sample",
         report["products"].get("would_remain_without_supplier_sample", []),
     )
-    print_section("Inventory summary", report["inventory"]["summary"])
+    if "inventory" in report:
+        print_section("Inventory summary", report["inventory"]["summary"])
     if report["warnings"]:
         print("\nWarnings")
         for warning in report["warnings"]:
             print(f"- {warning}")
-    print(f"\nNext recommended step: {report['next_recommended_step']}")
+    if report.get("next_recommended_step"):
+        print(f"\nNext recommended step: {report['next_recommended_step']}")
 
 
 def print_section(title: str, values: dict[str, Any]) -> None:
