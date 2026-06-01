@@ -1,15 +1,16 @@
 from app.models.product import Product
-from app.models.product_master_item import ProductMasterItem
 from app.models.product_supplier import ProductSupplier
 from app.models.supplier import Supplier
 
 
-def supplier(name: str, lead_time_days: int | None = None) -> Supplier:
-    return Supplier(
-        name=name,
-        normalized_name=name.lower().replace(" ", "_"),
-        lead_time_days=lead_time_days,
-    )
+def supplier(name: str, lead_time_days: int | None = None, **overrides) -> Supplier:
+    defaults = {
+        "name": name,
+        "normalized_name": name.lower().replace(" ", "_"),
+        "lead_time_days": lead_time_days,
+    }
+    defaults.update(overrides)
+    return Supplier(**defaults)
 
 
 def product(name: str = "Forecast Product", **overrides) -> Product:
@@ -30,30 +31,10 @@ def get_forecast(client, product_id: int) -> dict:
     return response.json()
 
 
-def test_forecast_response_includes_supplier_context_for_preferred_product_supplier(
-    client,
-    db_session,
-):
-    supplier_obj = supplier("Preferred Supplier", lead_time_days=6)
-    item = product()
-    db_session.add_all(
-        [
-            item,
-            ProductSupplier(
-                product=item,
-                supplier=supplier_obj,
-                supplier_sku="PREF-SKU",
-                supplier_product_name="Preferred Supplier Product",
-                purchase_price=12.75,
-                currency="USD",
-                minimum_order_quantity=4,
-                lead_time_days=3,
-                is_preferred=True,
-                match_status="matched",
-                match_method="sku",
-            ),
-        ]
-    )
+def test_forecast_response_includes_orderpro_product_supplier_context(client, db_session):
+    supplier_obj = supplier("OrderPro Supplier", lead_time_days=6, orderpro_code="OP-SUP")
+    item = product(supplier_record=supplier_obj, supplier_sku="SUP-SKU", cost_price=12.75, min_order_qty=4)
+    db_session.add(item)
     db_session.commit()
 
     forecast = get_forecast(client, item.id)
@@ -66,64 +47,50 @@ def test_forecast_response_includes_supplier_context_for_preferred_product_suppl
     assert "recommended_qty" in forecast
     assert context == {
         "supplier_id": supplier_obj.id,
-        "supplier_name": "Preferred Supplier",
-        "supplier_sku": "PREF-SKU",
-        "supplier_product_name": "Preferred Supplier Product",
+        "supplier_name": "OrderPro Supplier",
+        "supplier_code": "OP-SUP",
+        "supplier_sku": "SUP-SKU",
+        "supplier_product_name": None,
         "purchase_price": 12.75,
-        "currency": "USD",
-        "lead_time_days": 3,
-        "lead_time_source": "product_supplier",
+        "currency": None,
+        "lead_time_days": 6,
+        "lead_time_source": "supplier_record",
         "minimum_order_quantity": 4.0,
-        "moq_source": "product_supplier",
-        "match_status": "matched",
-        "match_method": "sku",
-        "mapping_source": "product_supplier",
+        "moq_source": "product_record",
+        "match_status": None,
+        "match_method": None,
+        "mapping_source": "orderpro_product_supplier",
         "has_supplier_mapping": True,
         "needs_supplier_mapping": False,
     }
 
 
-def test_forecast_response_uses_product_master_item_context_when_falling_back(
-    client,
-    db_session,
-):
-    supplier_obj = supplier("Master Supplier", lead_time_days=7)
-    item = product(min_order_qty=2)
-    db_session.add_all([supplier_obj, item])
-    db_session.flush()
-    db_session.add(
-        ProductMasterItem(
-            sku="MASTER-SKU",
-            name="Master Item Name",
-            supplier=supplier_obj,
-            product=item,
-            supplier_name_raw="Master Supplier",
-            cost_price=9.25,
-            match_status="matched",
-            match_method="import_match",
-        )
+def test_forecast_response_does_not_use_legacy_product_supplier_mapping(client, db_session):
+    orderpro_supplier = supplier("OrderPro Supplier", lead_time_days=6, orderpro_code="OP")
+    legacy_mapping_supplier = supplier("Legacy Mapping Supplier", lead_time_days=1)
+    item = product(supplier_record=orderpro_supplier, supplier_sku="ORDERPRO-SKU")
+    db_session.add_all(
+        [
+            item,
+            ProductSupplier(
+                product=item,
+                supplier=legacy_mapping_supplier,
+                supplier_sku="PREF-SKU",
+                is_preferred=True,
+                match_status="matched",
+            ),
+        ]
     )
     db_session.commit()
 
     context = get_forecast(client, item.id)["supplier_context"]
 
-    assert context["mapping_source"] == "product_master_item"
-    assert context["supplier_id"] == supplier_obj.id
-    assert context["supplier_name"] == "Master Supplier"
-    assert context["supplier_sku"] == "MASTER-SKU"
-    assert context["supplier_product_name"] == "Master Item Name"
-    assert context["purchase_price"] == 9.25
-    assert context["lead_time_days"] == 7
-    assert context["minimum_order_quantity"] == 2.0
-    assert context["moq_source"] == "product_record"
-    assert context["has_supplier_mapping"] is True
-    assert context["needs_supplier_mapping"] is False
+    assert context["mapping_source"] == "orderpro_product_supplier"
+    assert context["supplier_name"] == "OrderPro Supplier"
+    assert context["supplier_sku"] == "ORDERPRO-SKU"
 
 
-def test_forecast_response_uses_legacy_product_context_when_no_mapping_exists(
-    client,
-    db_session,
-):
+def test_forecast_response_uses_legacy_product_context_when_supplier_id_missing(client, db_session):
     item = product(
         name="Legacy Forecast Product",
         supplier="Legacy Supplier",
@@ -137,19 +104,17 @@ def test_forecast_response_uses_legacy_product_context_when_no_mapping_exists(
 
     assert context["mapping_source"] == "legacy_product"
     assert context["supplier_name"] == "Legacy Supplier"
+    assert context["supplier_code"] is None
     assert context["supplier_sku"] is None
     assert context["lead_time_days"] == 5
     assert context["lead_time_source"] == "product_record"
     assert context["minimum_order_quantity"] == 3.0
     assert context["moq_source"] == "product_record"
-    assert context["has_supplier_mapping"] is True
-    assert context["needs_supplier_mapping"] is False
+    assert context["has_supplier_mapping"] is False
+    assert context["needs_supplier_mapping"] is True
 
 
-def test_forecast_response_returns_missing_supplier_context_when_no_supplier_data(
-    client,
-    db_session,
-):
+def test_forecast_response_returns_missing_supplier_context_when_no_supplier_data(client, db_session):
     item = product(name="Missing Supplier Forecast Product")
     db_session.add(item)
     db_session.commit()
@@ -159,6 +124,7 @@ def test_forecast_response_returns_missing_supplier_context_when_no_supplier_dat
     assert context["mapping_source"] == "missing"
     assert context["supplier_id"] is None
     assert context["supplier_name"] is None
+    assert context["supplier_code"] is None
     assert context["supplier_sku"] is None
     assert context["supplier_product_name"] is None
     assert context["purchase_price"] is None

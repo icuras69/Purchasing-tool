@@ -266,10 +266,19 @@ def test_reject_mapping_sets_status_rejected_and_unsets_preferred(client, db_ses
     assert payload["is_preferred"] is False
 
 
-def test_forecast_respects_preferred_mapping_after_preference_change(client, db_session):
-    product = Product(name="Forecast Preference Product", current_stock=10)
-    supplier_a = Supplier(name="Forecast Supplier A", normalized_name="FORECAST SUPPLIER A")
+def test_forecast_uses_orderpro_product_supplier_after_preference_change(client, db_session):
+    supplier_a = Supplier(
+        name="Forecast Supplier A",
+        normalized_name="FORECAST SUPPLIER A",
+        orderpro_code="FSA",
+    )
     supplier_b = Supplier(name="Forecast Supplier B", normalized_name="FORECAST SUPPLIER B")
+    product = Product(
+        name="Forecast Preference Product",
+        current_stock=10,
+        supplier_record=supplier_a,
+        supplier_sku="ORDERPRO-A",
+    )
     db_session.add_all([product, supplier_a, supplier_b])
     db_session.flush()
     mapping_a = ProductSupplier(
@@ -297,6 +306,8 @@ def test_forecast_respects_preferred_mapping_after_preference_change(client, db_
     assert set_response.status_code == 200
     assert forecast_response.status_code == 200
     context = forecast_response.json()["supplier_context"]
-    assert context["supplier_id"] == supplier_b.id
-    assert context["supplier_name"] == "Forecast Supplier B"
-    assert context["supplier_sku"] == "FORECAST-B"
+    assert context["supplier_id"] == supplier_a.id
+    assert context["supplier_name"] == "Forecast Supplier A"
+    assert context["supplier_code"] == "FSA"
+    assert context["supplier_sku"] == "ORDERPRO-A"
+    assert context["mapping_source"] == "orderpro_product_supplier"

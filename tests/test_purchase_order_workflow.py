@@ -69,6 +69,8 @@ def seed_draft_mapping(
         "match_method": "manual",
     }
     mapping_defaults.update(mapping_overrides or {})
+    product.supplier_id = supplier.id
+    product.supplier_sku = mapping_defaults["supplier_sku"]
     mapping = ProductSupplier(**mapping_defaults)
     db_session.add(mapping)
     db_session.commit()
@@ -606,7 +608,7 @@ def test_draft_po_from_products_uses_forecast_recommended_quantity_when_availabl
     product, supplier, _mapping = seed_draft_mapping(
         db_session,
         supplier_name="Forecast Draft Supplier",
-        product_overrides={"current_stock": 1, "safety_stock": 10},
+        product_overrides={"current_stock": 1, "safety_stock": 10, "lead_time_days": 4},
         mapping_overrides={
             "minimum_order_quantity": 1,
             "pack_size": 3,

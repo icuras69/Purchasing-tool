@@ -4,6 +4,7 @@ from pydantic import BaseModel
 class ForecastSupplierContext(BaseModel):
     supplier_id: int | None
     supplier_name: str | None
+    supplier_code: str | None = None
     supplier_sku: str | None
     supplier_product_name: str | None
     purchase_price: float | None

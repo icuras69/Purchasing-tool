@@ -23,7 +23,11 @@ def seed_recommendation_product(
     }
     product_defaults.update(product_overrides or {})
     product = Product(**product_defaults)
-    supplier = Supplier(name="Recommendation Supplier", normalized_name="RECOMMENDATION SUPPLIER")
+    supplier = Supplier(
+        name="Recommendation Supplier",
+        normalized_name="RECOMMENDATION SUPPLIER",
+        lead_time_days=4,
+    )
     db_session.add_all([product, supplier])
     db_session.flush()
 
@@ -41,6 +45,8 @@ def seed_recommendation_product(
         "match_method": "test",
     }
     mapping_defaults.update(mapping_overrides or {})
+    product.supplier_id = supplier.id
+    product.supplier_sku = mapping_defaults["supplier_sku"]
     mapping = ProductSupplier(**mapping_defaults)
     db_session.add(mapping)
     db_session.add(
