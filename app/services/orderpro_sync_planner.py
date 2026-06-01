@@ -150,6 +150,7 @@ def apply_orderpro_supplier_product_sync(
     suppliers: list[dict[str, Any]],
     products: list[dict[str, Any]],
     product_csv_rows: dict[str, dict[str, Any]],
+    inventory: list[dict[str, Any]] | None = None,
     mark_missing_inactive: bool = False,
     synced_at: datetime | None = None,
 ) -> dict[str, Any]:
@@ -165,12 +166,161 @@ def apply_orderpro_supplier_product_sync(
         synced_at=sync_time,
     )
     db.flush()
+    inventory_result = apply_inventory_sync(db, inventory, synced_at=sync_time) if inventory is not None else inventory_not_requested()
+    db.flush()
 
-    return {
+    warnings = [*supplier_result["warnings"], *product_result["warnings"]]
+    if inventory is not None:
+        warnings.extend(inventory_result["warnings"])
+
+    report = {
         "mode": "apply",
         "suppliers": supplier_result,
         "products": product_result,
-        "warnings": [*supplier_result["warnings"], *product_result["warnings"]],
+        "warnings": warnings,
+    }
+    if inventory is not None:
+        report["inventory"] = inventory_result
+    return report
+
+
+def apply_inventory_sync(
+    db: Session,
+    inventory: list[dict[str, Any]],
+    *,
+    synced_at: datetime,
+) -> dict[str, Any]:
+    sync_time = sync_time_without_timezone(synced_at)
+    product_by_orderpro_id = {
+        str(row.orderpro_id): row
+        for row in db.query(Product).all()
+        if row.orderpro_id
+    }
+    product_by_sku = {
+        row.orderpro_sku: row
+        for row in db.query(Product).all()
+        if row.orderpro_sku
+    }
+    warehouse_by_orderpro_id = {
+        str(row.orderpro_id): row
+        for row in db.query(Warehouse).all()
+        if row.orderpro_id
+    }
+    position_keys = {
+        (row.product_id, row.warehouse_id, row.location_id, row.lot_id): row
+        for row in db.query(InventoryPosition).all()
+    }
+
+    warehouses_created = []
+    warehouses_updated = []
+    positions_created = []
+    positions_updated = []
+    rows_missing_product = []
+    rows_missing_warehouse = []
+    current_stock_by_product_id: dict[int, float] = defaultdict(float)
+
+    for row in inventory:
+        orderpro_product_id = clean_text(row.get("product_id"))
+        product_payload = row.get("product") if isinstance(row.get("product"), dict) else {}
+        nested_sku = clean_text(product_payload.get("sku"))
+        product = (product_by_orderpro_id.get(orderpro_product_id) if orderpro_product_id else None) or (
+            product_by_sku.get(nested_sku) if nested_sku else None
+        )
+        if product is None:
+            rows_missing_product.append(inventory_identity(row))
+            continue
+
+        warehouse_orderpro_id = clean_text(row.get("warehouse_id"))
+        if not warehouse_orderpro_id:
+            rows_missing_warehouse.append(inventory_identity(row))
+            continue
+
+        desired_warehouse = desired_warehouse_fields(row)
+        desired_warehouse["last_synced_at"] = sync_time
+        warehouse = warehouse_by_orderpro_id.get(warehouse_orderpro_id)
+        if warehouse is None:
+            warehouse = Warehouse(**desired_warehouse)
+            db.add(warehouse)
+            db.flush()
+            warehouse_by_orderpro_id[warehouse_orderpro_id] = warehouse
+            warehouses_created.append({"local_id": warehouse.id, "orderpro_id": warehouse_orderpro_id})
+        else:
+            changes = changed_fields(warehouse, desired_warehouse)
+            if changes:
+                for field, value in desired_warehouse.items():
+                    setattr(warehouse, field, value)
+                warehouses_updated.append({"local_id": warehouse.id, "orderpro_id": warehouse_orderpro_id, "changed_fields": sorted(changes)})
+
+        quantity = to_float(row.get("qty"))
+        current_stock_by_product_id[product.id] += quantity
+        location_id_value = clean_text(row.get("location_id"))
+        lot_id_value = clean_text(row.get("lot_id"))
+        position_key = (product.id, warehouse.id, location_id_value, lot_id_value)
+        desired_position = {
+            "product_id": product.id,
+            "warehouse_id": warehouse.id,
+            "orderpro_inventory_id": clean_text(row.get("id")),
+            "orderpro_product_id": orderpro_product_id,
+            "orderpro_warehouse_id": warehouse_orderpro_id,
+            "source_system": "orderpro",
+            "location_id": location_id_value,
+            "location_name": location_name(row),
+            "lot_id": lot_id_value,
+            "lot": clean_text(row.get("lot")),
+            "quantity_on_hand": quantity,
+            "quantity_available": quantity,
+            "on_hand": quantity,
+            "available": quantity,
+            "last_synced_at": sync_time,
+        }
+        position = position_keys.get(position_key)
+        if position is None:
+            position = InventoryPosition(**desired_position)
+            db.add(position)
+            db.flush()
+            position_keys[position_key] = position
+            positions_created.append({"local_id": position.id, "product_id": product.id, "warehouse_id": warehouse.id})
+        else:
+            changes = changed_fields(position, desired_position)
+            if changes:
+                for field, value in desired_position.items():
+                    setattr(position, field, value)
+                positions_updated.append({"local_id": position.id, "changed_fields": sorted(changes)})
+
+    products_current_stock_updated = []
+    for product_id, total_stock in current_stock_by_product_id.items():
+        product = db.get(Product, product_id)
+        if product is not None and normalize_compare_value(product.current_stock) != normalize_compare_value(total_stock):
+            product.current_stock = total_stock
+            products_current_stock_updated.append({"product_id": product_id, "current_stock": total_stock})
+
+    warnings = []
+    if rows_missing_product:
+        warnings.append(f"{len(rows_missing_product)} inventory rows could not be matched to local products.")
+    if rows_missing_warehouse:
+        warnings.append(f"{len(rows_missing_warehouse)} inventory rows were missing warehouse_id.")
+
+    return {
+        "summary": {
+            "orderpro_inventory_rows": len(inventory),
+            "warehouses_created": len(warehouses_created),
+            "warehouses_updated": len(warehouses_updated),
+            "inventory_positions_created": len(positions_created),
+            "inventory_positions_updated": len(positions_updated),
+            "rows_missing_product_match": len(rows_missing_product),
+            "rows_missing_warehouse_id": len(rows_missing_warehouse),
+            "products_current_stock_updated": len(products_current_stock_updated),
+        },
+        "warehouses_created": warehouses_created,
+        "warehouses_updated": warehouses_updated,
+        "inventory_positions_created": positions_created,
+        "inventory_positions_updated": positions_updated,
+        "rows_missing_product_match": rows_missing_product,
+        "rows_missing_product_match_sample": rows_missing_product[:10],
+        "rows_missing_warehouse_id": rows_missing_warehouse,
+        "rows_missing_warehouse_id_sample": rows_missing_warehouse[:10],
+        "products_current_stock_updated": products_current_stock_updated,
+        "warnings": warnings,
     }
 
 

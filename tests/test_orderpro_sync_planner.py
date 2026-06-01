@@ -291,6 +291,34 @@ def test_orderpro_sync_plan_is_dry_run_and_does_not_commit_database_changes(db_s
     assert db_session.query(Supplier).count() == 1
 
 
+def test_dry_run_inventory_performs_no_writes(db_session):
+    product = Product(name="Product", orderpro_id="1", orderpro_sku="SKU-1")
+    db_session.add(product)
+    db_session.flush()
+
+    report = plan_orderpro_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        inventory=[
+            {
+                "id": "inv-1",
+                "product_id": 1,
+                "product": {"sku": "SKU-1"},
+                "warehouse_id": "W1",
+                "warehouse": {"name": "Main"},
+                "qty": 5,
+            }
+        ],
+    )
+
+    assert report["inventory"]["summary"]["warehouses_to_create"] == 1
+    assert db_session.query(Warehouse).count() == 0
+    assert db_session.query(InventoryPosition).count() == 0
+    assert product.current_stock == 0
+
+
 def test_load_product_csv_indexes_rows_by_sku(tmp_path):
     csv_path = tmp_path / "products.csv"
     csv_path.write_text(
@@ -716,3 +744,174 @@ def test_apply_mark_missing_inactive_is_required_before_deactivation(db_session)
     assert existing.is_active is False
     assert report["products"]["summary"]["deactivated_missing_orderpro_products"] == 1
     assert report["products"]["summary"]["mark_missing_inactive"] is True
+
+
+def test_apply_inventory_creates_derived_warehouse_position_and_updates_stock_by_orderpro_id(db_session):
+    product = Product(name="Product", orderpro_id="1", orderpro_sku="SKU-1", current_stock=0)
+    db_session.add(product)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        inventory=[
+            {
+                "id": "inv-1",
+                "product_id": 1,
+                "product": {"sku": "SKU-1"},
+                "warehouse_id": "W1",
+                "warehouse": {"name": "Main Warehouse", "code": "MAIN"},
+                "location_id": "L1",
+                "location": {"name": "Aisle 1"},
+                "lot_id": "LOT1",
+                "lot": "Lot 1",
+                "qty": 7,
+            }
+        ],
+    )
+
+    warehouse = db_session.query(Warehouse).filter_by(orderpro_id="W1").one()
+    position = db_session.query(InventoryPosition).one()
+    db_session.refresh(product)
+
+    assert report["inventory"]["summary"]["warehouses_created"] == 1
+    assert report["inventory"]["summary"]["inventory_positions_created"] == 1
+    assert report["inventory"]["summary"]["products_current_stock_updated"] == 1
+    assert warehouse.name == "Main Warehouse"
+    assert warehouse.code == "MAIN"
+    assert warehouse.last_synced_at is not None
+    assert position.product_id == product.id
+    assert position.warehouse_id == warehouse.id
+    assert position.orderpro_inventory_id == "inv-1"
+    assert position.orderpro_product_id == "1"
+    assert position.orderpro_warehouse_id == "W1"
+    assert position.location_id == "L1"
+    assert position.location_name == "Aisle 1"
+    assert position.lot_id == "LOT1"
+    assert position.lot == "Lot 1"
+    assert position.quantity_on_hand == 7
+    assert product.current_stock == 7
+
+
+def test_apply_inventory_updates_existing_warehouse_and_position(db_session):
+    product = Product(name="Product", orderpro_id="1", orderpro_sku="SKU-1", current_stock=2)
+    warehouse = Warehouse(orderpro_id="W1", name="Old Warehouse", code="OLD")
+    db_session.add_all([product, warehouse])
+    db_session.flush()
+    position = InventoryPosition(
+        product_id=product.id,
+        warehouse_id=warehouse.id,
+        orderpro_inventory_id="old-inv",
+        orderpro_product_id="1",
+        orderpro_warehouse_id="W1",
+        location_id="L1",
+        quantity_on_hand=2,
+        on_hand=2,
+        available=2,
+    )
+    db_session.add(position)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        inventory=[
+            {
+                "id": "inv-1",
+                "product_id": 1,
+                "product": {"sku": "SKU-1"},
+                "warehouse_id": "W1",
+                "warehouse": {"name": "New Warehouse", "code": "NEW"},
+                "location_id": "L1",
+                "qty": 9,
+            }
+        ],
+    )
+
+    db_session.refresh(warehouse)
+    db_session.refresh(position)
+    db_session.refresh(product)
+
+    assert report["inventory"]["summary"]["warehouses_updated"] == 1
+    assert report["inventory"]["summary"]["inventory_positions_updated"] == 1
+    assert warehouse.name == "New Warehouse"
+    assert warehouse.code == "NEW"
+    assert position.orderpro_inventory_id == "inv-1"
+    assert position.quantity_on_hand == 9
+    assert product.current_stock == 9
+
+
+def test_apply_inventory_matches_product_by_nested_sku_fallback(db_session):
+    product = Product(name="Product", orderpro_id="1", orderpro_sku="SKU-1")
+    db_session.add(product)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        inventory=[
+            {
+                "id": "inv-1",
+                "product": {"sku": "SKU-1"},
+                "warehouse_id": "W1",
+                "warehouse": "Main Warehouse",
+                "qty": 4,
+            }
+        ],
+    )
+
+    position = db_session.query(InventoryPosition).one()
+    db_session.refresh(product)
+
+    assert report["inventory"]["summary"]["inventory_positions_created"] == 1
+    assert position.product_id == product.id
+    assert product.current_stock == 4
+
+
+def test_apply_inventory_reports_and_skips_missing_product_or_warehouse(db_session):
+    product = Product(name="Product", orderpro_id="1", orderpro_sku="SKU-1")
+    db_session.add(product)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        inventory=[
+            {"id": "inv-1", "product_id": 999, "product": {"sku": "NOPE"}, "warehouse_id": "W1", "qty": 5},
+            {"id": "inv-2", "product_id": 1, "product": {"sku": "SKU-1"}, "qty": 3},
+        ],
+    )
+
+    assert report["inventory"]["summary"]["rows_missing_product_match"] == 1
+    assert report["inventory"]["summary"]["rows_missing_warehouse_id"] == 1
+    assert report["inventory"]["summary"]["inventory_positions_created"] == 0
+    assert db_session.query(InventoryPosition).count() == 0
+
+
+def test_apply_inventory_updates_current_stock_as_total_across_warehouses(db_session):
+    product = Product(name="Product", orderpro_id="1", orderpro_sku="SKU-1", current_stock=0)
+    db_session.add(product)
+    db_session.flush()
+
+    apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        inventory=[
+            {"id": "inv-1", "product_id": 1, "product": {"sku": "SKU-1"}, "warehouse_id": "W1", "warehouse": "Main", "qty": 4},
+            {"id": "inv-2", "product_id": 1, "product": {"sku": "SKU-1"}, "warehouse_id": "W2", "warehouse": "Remote", "qty": 6},
+        ],
+    )
+
+    db_session.refresh(product)
+
+    assert product.current_stock == 10

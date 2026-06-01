@@ -114,6 +114,7 @@ def main() -> int:
                 suppliers=suppliers,
                 products=products,
                 product_csv_rows=product_csv_rows,
+                inventory=inventory if args.include_inventory else None,
                 mark_missing_inactive=args.mark_missing_inactive,
             )
             db.commit()
@@ -132,13 +133,13 @@ def main() -> int:
     print_report(report)
     if args.save_report:
         path = save_report(report)
-        print(f"\nSaved dry-run report to: {path}")
+        print(f"\nSaved {report.get('mode', 'dry_run')} report to: {path}")
 
     return 0
 
 
 def print_report(report: dict[str, Any]) -> None:
-    print("\nOrderPro Sync Dry-Run Plan")
+    print("\nOrderPro Sync Plan")
     print(f"Mode: {report.get('mode', 'dry_run')}")
     print_section("Supplier summary", report["suppliers"]["summary"])
     print_section("Product summary", report["products"]["summary"])
@@ -164,6 +165,8 @@ def print_report(report: dict[str, Any]) -> None:
     )
     if "inventory" in report:
         print_section("Inventory summary", report["inventory"]["summary"])
+        print_samples("Inventory rows missing product sample", report["inventory"].get("rows_missing_product_match_sample", []))
+        print_samples("Inventory rows missing warehouse sample", report["inventory"].get("rows_missing_warehouse_id_sample", []))
     if report["warnings"]:
         print("\nWarnings")
         for warning in report["warnings"]:
@@ -190,7 +193,8 @@ def save_report(report: dict[str, Any]) -> Path:
     output_dir = PROJECT_ROOT / "tmp" / "orderpro_sync_reports"
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = current_utc_timestamp_for_filename()
-    path = output_dir / f"orderpro_sync_dry_run_{timestamp}.json"
+    mode = report.get("mode", "dry_run")
+    path = output_dir / f"orderpro_sync_{mode}_{timestamp}.json"
     path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     return path
 
