@@ -1,12 +1,25 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+LOCAL_FRONTEND_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip().rstrip("/") for item in value.split(",") if item.strip()]
+
+
 class Settings(BaseSettings):
     app_name: str = "Purchasing AI"
     debug: bool = True
-    database_url: str= "postgresql://postgres:12345678@localhost:5432/purchasing_ai"
+    database_url: str = "postgresql://postgres@localhost:5432/purchasing_ai"
     database_auto_create_tables: bool = False
+    frontend_origin: str = ""
+    cors_origins: str = ""
     openai_api_key: str = ""
+    openai_model: str = ""
     llm_provider: str = "mock"
     enable_real_llm: bool = False
     orderpro_api_base_url: str = ""
@@ -23,6 +36,17 @@ class Settings(BaseSettings):
     orderpro_excluded_demand_statuses: str = "cancelled"
     orderpro_demand_included_statuses: str = "shipped"
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    def allowed_cors_origins(self) -> list[str]:
+        origins = list(LOCAL_FRONTEND_ORIGINS)
+        origins.extend(_split_csv(self.frontend_origin))
+        origins.extend(_split_csv(self.cors_origins))
+
+        unique_origins: list[str] = []
+        for origin in origins:
+            if origin and origin not in unique_origins:
+                unique_origins.append(origin)
+        return unique_origins
 
 
 settings = Settings()

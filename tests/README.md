@@ -28,7 +28,7 @@ By default, tests use an isolated in-memory SQLite database. They do not use the
 To use PostgreSQL for tests, set `TEST_DATABASE_URL` to a disposable database whose database name contains `test`:
 
 ```powershell
-$env:TEST_DATABASE_URL='postgresql://postgres:password@localhost:5432/purchasing_ai_test'
+$env:TEST_DATABASE_URL='postgresql://postgres@localhost:5432/purchasing_ai_test'
 $env:DEBUG='false'
 .\.venv\Scripts\python.exe -m pytest
 ```
@@ -40,7 +40,7 @@ The test harness refuses to run against a non-SQLite database unless the databas
 The test suite includes a lightweight Alembic config/head check. To verify migrations against a disposable test database manually:
 
 ```powershell
-$env:TEST_DATABASE_URL='postgresql://postgres:password@localhost:5432/purchasing_ai_test'
+$env:TEST_DATABASE_URL='postgresql://postgres@localhost:5432/purchasing_ai_test'
 $env:DATABASE_URL=$env:TEST_DATABASE_URL
 $env:DEBUG='false'
 .\.venv\Scripts\python.exe -c "from alembic.config import main; main(['upgrade', 'head'])"

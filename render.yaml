@@ -1,0 +1,61 @@
+services:
+  - type: web
+    name: purchasing-ai-api
+    runtime: python
+    plan: free
+    autoDeployTrigger: 'off'
+    buildCommand: pip install -r requirements-deploy.txt
+    preDeployCommand: python -m alembic upgrade head
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: purchasing-ai-staging-db
+          property: connectionString
+      - key: DEBUG
+        value: false
+      - key: DATABASE_AUTO_CREATE_TABLES
+        value: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: ORDERPRO_API_BASE_URL
+        value: https://wms.orderpro.cloud/api/v2
+      - key: ORDERPRO_API_TOKEN
+        sync: false
+      - key: ORDERPRO_SYNC_ENABLED
+        value: false
+      - key: ORDERPRO_TIMEOUT_SECONDS
+        value: 30
+      - key: LLM_PROVIDER
+        value: mock
+      - key: ENABLE_REAL_LLM
+        value: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        sync: false
+
+  - type: web
+    name: purchasing-ai-frontend
+    runtime: static
+    autoDeployTrigger: 'off'
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+databases:
+  - name: purchasing-ai-staging-db
+    plan: basic-256mb
+    databaseName: purchasing_ai_staging
+    user: purchasing_ai
+    postgresMajorVersion: "17"

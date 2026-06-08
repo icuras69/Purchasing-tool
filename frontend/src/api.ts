@@ -20,10 +20,12 @@ import type {
   WeakMapping,
 } from "./types";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+export function getApiBaseUrl(): string {
+  return import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+}
 
-function apiUrl(path: string): string {
-  return `${API_BASE_URL.replace(/\/$/, "")}${path}`;
+export function apiUrl(path: string, baseUrl = getApiBaseUrl()): string {
+  return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }
 
 async function fetchJson<T>(path: string, label: string): Promise<T> {
