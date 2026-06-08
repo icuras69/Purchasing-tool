@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
+from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
 from app.models.purchase_order import PurchaseOrder
@@ -134,6 +135,42 @@ def test_recommendation_uses_product_cost_price_and_supplier_sku(client, db_sess
 
     assert payload["recommended_supplier_sku"] == product.supplier_sku
     assert payload["estimated_unit_cost"] == 7.25
+
+
+def test_recommendation_uses_open_demand_shortage_quantity(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    order = OrderProOrder(
+        orderpro_id="rec-open-demand",
+        order_number="SO-REC-OPEN",
+        status="confirmed",
+        order_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(
+        OrderProOrderItem(
+            order=order,
+            product=product,
+            orderpro_line_key="rec-open-demand:1",
+            orderpro_product_id=product.orderpro_id,
+            sku=product.orderpro_sku,
+            quantity=0,
+            quantity_ordered=64,
+            quantity_shipped=0,
+        )
+    )
+    db_session.commit()
+
+    payload = create_recommendation(client, product.id)
+
+    assert payload["recommended_quantity"] == 64
+    assert payload["forecast_snapshot"]["recommended_qty"] == 64
+    assert payload["forecast_snapshot"]["recommended_action"] == "reorder"
+    assert payload["forecast_snapshot"]["risk_level"] == "high"
+    assert payload["forecast_snapshot"]["net_available_stock"] == -64
 
 
 def test_product_supplier_is_not_selected_over_orderpro_product_supplier(client, db_session):

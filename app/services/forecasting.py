@@ -61,7 +61,7 @@ def resolve_demand_context(db: Session, product: Product) -> DemandResult:
 
     if has_orderpro_identity or has_orderpro_rows:
         orderpro_result = calculate_orderpro_demand(db, product)
-        if orderpro_result.eligible_order_count > 0:
+        if orderpro_result.eligible_order_count > 0 or orderpro_result.total_open_demand > 0:
             return orderpro_result
 
         legacy_result = calculate_usage_history_demand(db, product.id)
@@ -218,6 +218,9 @@ def build_forecast(db: Session, product: Product) -> dict:
             "open_backorder_units": 0.0,
             "total_open_demand": 0.0,
             "effective_available_stock": 0.0,
+            "net_available_stock": 0.0,
+            "projected_lead_time_demand": 0.0,
+            "total_required_stock": 0.0,
             "units_sold_in_window": 0.0,
             "eligible_order_count": 0,
             "excluded_order_count": 0,
@@ -258,25 +261,52 @@ def build_forecast(db: Session, product: Product) -> dict:
 
     current_stock = inventory_ctx["current_stock"]
     effective_available_stock = round(max(current_stock - demand_ctx.total_open_demand, 0), 2)
+    net_available_stock = round(current_stock - demand_ctx.total_open_demand, 2)
     lead_time_days_used = supplier_ctx["lead_time_days_used"]
     minimum_order_quantity_used = supplier_ctx["minimum_order_quantity_used"]
 
-    projected_lead_time_demand = avg_daily_usage * lead_time_days_used
+    projected_lead_time_demand = round(avg_daily_usage * lead_time_days_used, 2)
     reorder_point = round(
         projected_lead_time_demand + float(product.safety_stock or 0),
         2,
     )
+    total_required_stock = round(projected_lead_time_demand + demand_ctx.total_open_demand + float(product.safety_stock or 0), 2)
+    raw_recommended_qty = max(total_required_stock - current_stock, 0)
+    has_open_demand_shortage = demand_ctx.total_open_demand > current_stock
 
     if avg_daily_usage > 0:
         days_until_stockout = round(effective_available_stock / avg_daily_usage, 2)
     else:
         days_until_stockout = None
 
-    if avg_daily_usage == 0:
+    if raw_recommended_qty > 0:
+        recommended_action = "reorder"
+        recommended_qty = max(raw_recommended_qty, minimum_order_quantity_used, 0)
+        risk_level = "high" if has_open_demand_shortage or effective_available_stock <= reorder_point else "medium"
+        explanation_parts = []
+        if has_open_demand_shortage:
+            explanation_parts.append(
+                f"Open committed demand is {demand_ctx.total_open_demand} units, which exceeds current stock of {current_stock}."
+            )
+        if avg_daily_usage > 0:
+            explanation_parts.append(
+                f"Projected lead-time demand is {projected_lead_time_demand} units and reorder point is {reorder_point}."
+            )
+        if not explanation_parts:
+            explanation_parts.append("Current stock is below required stock for open demand and safety stock.")
+        explanation = " ".join(explanation_parts)
+
+    elif avg_daily_usage == 0:
         recommended_action = "monitor"
         recommended_qty = 0.0
-        risk_level = "low"
-        explanation = "No usage history is available yet, so the product will be monitored until demand data is collected."
+        risk_level = "medium" if demand_ctx.total_open_demand > 0 else "low"
+        if demand_ctx.total_open_demand > 0:
+            explanation = (
+                f"Open committed demand is {demand_ctx.total_open_demand} units and is covered by current stock, "
+                "but no shipped usage history is available yet."
+            )
+        else:
+            explanation = "No usage history is available yet, so the product will be monitored until demand data is collected."
 
     elif lead_time_days_used <= 0:
         recommended_action = "needs_supplier_mapping"
@@ -285,26 +315,6 @@ def build_forecast(db: Session, product: Product) -> dict:
         explanation = (
             "Demand exists for this product, but there is no usable supplier lead time yet. "
             "Map the product to a supplier with a valid lead time before generating a purchase recommendation."
-        )
-
-    elif effective_available_stock <= reorder_point:
-        recommended_action = "order_now"
-        raw_qty = reorder_point - effective_available_stock
-        recommended_qty = max(raw_qty, minimum_order_quantity_used, 0)
-        risk_level = "high"
-        explanation = (
-            f"Current stock is at or below the reorder point. "
-            f"Stock covers about {days_until_stockout} days while lead time is {lead_time_days_used} days."
-        )
-
-    elif days_until_stockout is not None and days_until_stockout <= lead_time_days_used + 2:
-        recommended_action = "order_soon"
-        raw_qty = reorder_point - effective_available_stock
-        recommended_qty = max(raw_qty, minimum_order_quantity_used, 0)
-        risk_level = "medium"
-        explanation = (
-            f"Stock is above the reorder point but may run out soon. "
-            f"Estimated stock coverage is {days_until_stockout} days."
         )
 
     else:
@@ -333,6 +343,9 @@ def build_forecast(db: Session, product: Product) -> dict:
         "open_backorder_units": demand_ctx.open_backorder_units,
         "total_open_demand": demand_ctx.total_open_demand,
         "effective_available_stock": effective_available_stock,
+        "net_available_stock": net_available_stock,
+        "projected_lead_time_demand": projected_lead_time_demand,
+        "total_required_stock": total_required_stock,
         "units_sold_in_window": demand_ctx.units_sold_in_window,
         "eligible_order_count": demand_ctx.eligible_order_count,
         "excluded_order_count": demand_ctx.excluded_order_count,

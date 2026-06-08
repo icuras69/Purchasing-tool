@@ -138,14 +138,14 @@ def test_product_supplier_id_uses_product_lead_time_when_supplier_lead_time_miss
 
 def test_minimum_order_quantity_uses_product_min_order_qty(db_session):
     supplier_obj = supplier("MOQ Supplier", lead_time_days=1)
-    item = product(current_stock=1, min_order_qty=25, supplier_record=supplier_obj)
+    item = product(current_stock=0, min_order_qty=25, supplier_record=supplier_obj)
     db_session.add(item)
     add_usage(db_session, item, quantity=1)
     db_session.flush()
 
     forecast = build_forecast(db_session, item)
 
-    assert forecast["recommended_action"] == "order_now"
+    assert forecast["recommended_action"] == "reorder"
     assert forecast["recommended_qty"] == 25.0
 
 
@@ -274,6 +274,209 @@ def test_partially_shipped_open_order_counts_only_remaining_open_demand(db_sessi
     assert forecast["effective_available_stock"] == 14
 
 
+def test_zero_stock_open_demand_shortage_recommends_open_quantity(db_session):
+    supplier_obj = supplier("Confirmed Demand Supplier", lead_time_days=3)
+    item = product(
+        current_stock=0,
+        safety_stock=0,
+        min_order_qty=1,
+        orderpro_id="6775",
+        orderpro_sku="SKU-6775",
+        source_system="orderpro",
+        supplier_record=supplier_obj,
+    )
+    db_session.add(item)
+    db_session.flush()
+    add_orderpro_order_item(
+        db_session,
+        item,
+        orderpro_order_id="515",
+        quantity=0,
+        quantity_ordered=64,
+        quantity_shipped=0,
+        status="confirmed",
+    )
+    db_session.commit()
+
+    forecast = build_forecast(db_session, item)
+
+    assert forecast["demand_source"] == "orderpro_orders"
+    assert forecast["avg_daily_usage"] == 0.0
+    assert forecast["open_confirmed_units"] == 64
+    assert forecast["total_open_demand"] == 64
+    assert forecast["effective_available_stock"] == 0
+    assert forecast["net_available_stock"] == -64
+    assert forecast["projected_lead_time_demand"] == 0
+    assert forecast["total_required_stock"] == 64
+    assert forecast["recommended_qty"] == 64.0
+    assert forecast["recommended_action"] == "reorder"
+    assert forecast["risk_level"] == "high"
+    assert "Open committed demand" in forecast["explanation"]
+    assert "exceeds current stock" in forecast["explanation"]
+
+
+def test_open_demand_equal_to_stock_does_not_create_artificial_shortage(db_session):
+    supplier_obj = supplier("Covered Demand Supplier", lead_time_days=3)
+    item = product(
+        current_stock=64,
+        safety_stock=0,
+        min_order_qty=1,
+        orderpro_id="109",
+        orderpro_sku="SKU-109",
+        source_system="orderpro",
+        supplier_record=supplier_obj,
+    )
+    db_session.add(item)
+    db_session.flush()
+    add_orderpro_order_item(
+        db_session,
+        item,
+        orderpro_order_id="516",
+        quantity=0,
+        quantity_ordered=64,
+        quantity_shipped=0,
+        status="confirmed",
+    )
+    db_session.commit()
+
+    forecast = build_forecast(db_session, item)
+
+    assert forecast["total_open_demand"] == 64
+    assert forecast["effective_available_stock"] == 0
+    assert forecast["net_available_stock"] == 0
+    assert forecast["recommended_qty"] == 0.0
+    assert forecast["recommended_action"] == "monitor"
+
+
+def test_partially_covered_open_demand_recommends_remaining_shortage(db_session):
+    supplier_obj = supplier("Partly Covered Supplier", lead_time_days=3)
+    item = product(
+        current_stock=20,
+        safety_stock=0,
+        min_order_qty=1,
+        orderpro_id="110",
+        orderpro_sku="SKU-110",
+        source_system="orderpro",
+        supplier_record=supplier_obj,
+    )
+    db_session.add(item)
+    db_session.flush()
+    add_orderpro_order_item(
+        db_session,
+        item,
+        orderpro_order_id="517",
+        quantity=0,
+        quantity_ordered=64,
+        quantity_shipped=0,
+        status="confirmed",
+    )
+    db_session.commit()
+
+    forecast = build_forecast(db_session, item)
+
+    assert forecast["total_open_demand"] == 64
+    assert forecast["net_available_stock"] == -44
+    assert forecast["recommended_qty"] == 44.0
+    assert forecast["recommended_action"] == "reorder"
+    assert forecast["risk_level"] == "high"
+
+
+def test_shipped_historical_and_open_demand_combine_for_reorder_quantity(db_session):
+    supplier_obj = supplier("Combined Demand Supplier", lead_time_days=2)
+    item = product(
+        current_stock=10,
+        safety_stock=1,
+        min_order_qty=1,
+        orderpro_id="111",
+        orderpro_sku="SKU-111",
+        source_system="orderpro",
+        supplier_record=supplier_obj,
+    )
+    db_session.add(item)
+    db_session.flush()
+    add_orderpro_order_item(
+        db_session,
+        item,
+        orderpro_order_id="518",
+        quantity=5,
+        quantity_shipped=5,
+        status="shipped",
+        order_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    add_orderpro_order_item(
+        db_session,
+        item,
+        orderpro_order_id="519",
+        quantity=5,
+        quantity_shipped=5,
+        status="shipped",
+        order_date=datetime(2026, 6, 5, tzinfo=timezone.utc),
+    )
+    add_orderpro_order_item(
+        db_session,
+        item,
+        orderpro_order_id="520",
+        quantity=0,
+        quantity_ordered=12,
+        quantity_shipped=0,
+        status="confirmed",
+    )
+    db_session.commit()
+
+    forecast = build_forecast(db_session, item)
+
+    assert forecast["avg_daily_usage"] == 2.0
+    assert forecast["projected_lead_time_demand"] == 4.0
+    assert forecast["total_open_demand"] == 12
+    assert forecast["total_required_stock"] == 17
+    assert forecast["recommended_qty"] == 7.0
+    assert forecast["recommended_action"] == "reorder"
+
+
+def test_open_demand_shortage_applies_moq_after_shortage_calculation(db_session):
+    supplier_obj = supplier("Open MOQ Supplier", lead_time_days=3)
+    item = product(
+        current_stock=60,
+        safety_stock=0,
+        min_order_qty=10,
+        orderpro_id="112",
+        orderpro_sku="SKU-112",
+        source_system="orderpro",
+        supplier_record=supplier_obj,
+    )
+    db_session.add(item)
+    db_session.flush()
+    add_orderpro_order_item(db_session, item, orderpro_order_id="521", quantity=0, quantity_ordered=64, quantity_shipped=0, status="confirmed")
+    db_session.commit()
+
+    forecast = build_forecast(db_session, item)
+
+    assert forecast["net_available_stock"] == -4
+    assert forecast["recommended_qty"] == 10.0
+
+
+def test_open_demand_shortage_applies_pack_size_after_shortage_calculation(db_session):
+    supplier_obj = supplier("Open Pack Supplier", lead_time_days=3)
+    item = product(
+        current_stock=0,
+        safety_stock=0,
+        min_order_qty=1,
+        orderpro_id="113",
+        orderpro_sku="SKU-113",
+        source_system="orderpro",
+        supplier_record=supplier_obj,
+    )
+    item.pack_size = 10
+    db_session.add(item)
+    db_session.flush()
+    add_orderpro_order_item(db_session, item, orderpro_order_id="522", quantity=0, quantity_ordered=64, quantity_shipped=0, status="confirmed")
+    db_session.commit()
+
+    forecast = build_forecast(db_session, item)
+
+    assert forecast["recommended_qty"] == 70.0
+
+
 def test_product_with_no_orderpro_usable_history_falls_back_to_legacy_usage(db_session):
     supplier_obj = supplier("Fallback Supplier", lead_time_days=3)
     item = product(
@@ -349,7 +552,7 @@ def test_orderpro_demand_calculates_stockout_reorder_point_and_moq(db_session):
     assert forecast["effective_available_stock"] == 2
     assert forecast["days_until_stockout"] == 0.2
     assert forecast["reorder_point"] == 42.0
-    assert forecast["recommended_action"] == "order_now"
+    assert forecast["recommended_action"] == "reorder"
     assert forecast["recommended_qty"] == 40.0
 
 

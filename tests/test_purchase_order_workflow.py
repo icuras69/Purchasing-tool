@@ -719,6 +719,46 @@ def test_supplier_forecast_returns_products_assigned_to_supplier(client, db_sess
     assert payload["total_estimated_cost"] == 170.0
 
 
+def test_supplier_forecast_uses_open_demand_shortage(client, db_session):
+    product, supplier, _mapping = seed_draft_mapping(
+        db_session,
+        supplier_name="Open Demand Forecast Supplier",
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    order = OrderProOrder(
+        orderpro_id="open-supplier-forecast",
+        order_number="SO-OPEN-SUPPLIER",
+        status="confirmed",
+        order_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(
+        OrderProOrderItem(
+            order=order,
+            product=product,
+            orderpro_line_key="open-supplier-forecast:1",
+            orderpro_product_id=product.orderpro_id,
+            sku=product.orderpro_sku,
+            quantity=0,
+            quantity_ordered=64,
+            quantity_shipped=0,
+        )
+    )
+    db_session.commit()
+
+    response = client.get(f"/suppliers/{supplier.id}/forecast")
+
+    assert response.status_code == 200
+    payload = response.json()
+    forecast = payload["forecasts"][0]
+    assert forecast["recommended_qty"] == 64
+    assert forecast["recommended_action"] == "reorder"
+    assert forecast["risk_level"] == "high"
+    assert payload["products_needing_reorder"] == [product.id]
+    assert payload["total_recommended_quantity"] == 64
+
+
 def test_supplier_forecast_to_draft_creates_draft_for_reorder_products_only(client, db_session):
     reorder_product, supplier, _mapping = seed_draft_mapping(
         db_session,
@@ -751,3 +791,48 @@ def test_supplier_forecast_to_draft_creates_draft_for_reorder_products_only(clie
     assert [line["product_id"] for line in po["lines"]] == [reorder_product.id]
     assert po["approved_at"] is None
     assert po["issued_at"] is None
+
+
+def test_supplier_forecast_to_draft_includes_open_demand_shortage_when_only_reorder_needed(client, db_session):
+    product, supplier, _mapping = seed_draft_mapping(
+        db_session,
+        supplier_name="Open Demand Draft Supplier",
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    order = OrderProOrder(
+        orderpro_id="open-draft-forecast",
+        order_number="SO-OPEN-DRAFT",
+        status="confirmed",
+        order_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(
+        OrderProOrderItem(
+            order=order,
+            product=product,
+            orderpro_line_key="open-draft-forecast:1",
+            orderpro_product_id=product.orderpro_id,
+            sku=product.orderpro_sku,
+            quantity=0,
+            quantity_ordered=64,
+            quantity_shipped=0,
+        )
+    )
+    db_session.commit()
+
+    response = client.post(
+        f"/suppliers/{supplier.id}/draft-po-from-forecast",
+        json={
+            "created_by": "supplier-forecast",
+            "notes": "Supplier forecast draft",
+            "only_reorder_needed": True,
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["summary"]["created_po_count"] == 1
+    assert payload["summary"]["created_line_count"] == 1
+    assert payload["purchase_order"]["lines"][0]["product_id"] == product.id
+    assert payload["purchase_order"]["lines"][0]["quantity"] == 64

@@ -42,6 +42,9 @@ class ForecastResponse(BaseModel):
     open_backorder_units: float | None = None
     total_open_demand: float | None = None
     effective_available_stock: float | None = None
+    net_available_stock: float | None = None
+    projected_lead_time_demand: float | None = None
+    total_required_stock: float | None = None
     units_sold_in_window: float | None = None
     eligible_order_count: int | None = None
     excluded_order_count: int | None = None
