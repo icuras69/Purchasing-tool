@@ -25,6 +25,7 @@ class ForecastSupplierContext(BaseModel):
 class ForecastResponse(BaseModel):
     product_id: int
     product_name: str
+    orderpro_sku: str | None = None
 
     current_stock: float
     inventory_source: str

@@ -318,6 +318,12 @@ button:disabled {
   padding: 4px 8px;
 }
 
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .skip-list {
   margin: 0;
   padding-left: 18px;

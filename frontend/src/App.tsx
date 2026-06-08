@@ -6,6 +6,7 @@ import {
   cancelPurchaseOrder,
   acceptRecommendation,
   convertRecommendationToDraftPO,
+  createDraftPOFromSupplierForecast,
   createDraftPurchaseOrderFromProducts,
   createPurchaseOrder,
   createProductSupplier,
@@ -57,6 +58,14 @@ type TabId =
   | "supplier-forecast"
   | "purchase-orders"
   | "recommendations";
+
+type SupplierForecastFilter =
+  | "all"
+  | "needs_reorder"
+  | "high_risk"
+  | "open_demand"
+  | "no_history"
+  | "missing_lead_time";
 
 interface ResourceState<T> {
   data: T[];
@@ -164,6 +173,87 @@ function recommendationStatusClassName(status: string): string {
     return "status pending-approval";
   }
   return "status needs-review";
+}
+
+function forecastRiskClassName(riskLevel: string | null | undefined): string {
+  if (riskLevel === "high" || riskLevel === "critical") {
+    return "status rejected";
+  }
+  if (riskLevel === "medium") {
+    return "status needs-review";
+  }
+  return "status mapped";
+}
+
+function demandSourceLabel(source: string | null | undefined): string {
+  if (source === "orderpro_orders") {
+    return "OrderPro orders";
+  }
+  if (source === "usage_history") {
+    return "Legacy usage history";
+  }
+  if (source === "none") {
+    return "No demand history";
+  }
+  if (source === "not_applicable") {
+    return "Not applicable";
+  }
+  return formatValue(source);
+}
+
+function forecastNeedsReorder(row: ForecastResponse): boolean {
+  return Number(row.recommended_qty || 0) > 0;
+}
+
+function forecastHasOpenDemand(row: ForecastResponse): boolean {
+  return Number(row.total_open_demand || 0) > 0;
+}
+
+function forecastHasNoDemandHistory(row: ForecastResponse): boolean {
+  return row.demand_source === "none" || Number(row.shipped_order_count || 0) === 0;
+}
+
+function forecastMissingLeadTime(row: ForecastResponse): boolean {
+  return Number(row.lead_time_days_used || 0) <= 0 || row.lead_time_source === "missing";
+}
+
+function forecastMatchesFilter(row: ForecastResponse, filter: SupplierForecastFilter): boolean {
+  if (filter === "needs_reorder") {
+    return forecastNeedsReorder(row);
+  }
+  if (filter === "high_risk") {
+    return row.risk_level === "high" || row.risk_level === "critical";
+  }
+  if (filter === "open_demand") {
+    return forecastHasOpenDemand(row);
+  }
+  if (filter === "no_history") {
+    return forecastHasNoDemandHistory(row);
+  }
+  if (filter === "missing_lead_time") {
+    return forecastMissingLeadTime(row);
+  }
+  return true;
+}
+
+function sortSupplierForecastRows(rows: ForecastResponse[]): ForecastResponse[] {
+  return [...rows].sort((left, right) => {
+    const leftPriority = forecastNeedsReorder(left) ? 1 : 0;
+    const rightPriority = forecastNeedsReorder(right) ? 1 : 0;
+    if (leftPriority !== rightPriority) {
+      return rightPriority - leftPriority;
+    }
+    const leftRisk = left.risk_level === "high" || left.risk_level === "critical" ? 1 : 0;
+    const rightRisk = right.risk_level === "high" || right.risk_level === "critical" ? 1 : 0;
+    if (leftRisk !== rightRisk) {
+      return rightRisk - leftRisk;
+    }
+    const quantityDiff = Number(right.recommended_qty || 0) - Number(left.recommended_qty || 0);
+    if (quantityDiff !== 0) {
+      return quantityDiff;
+    }
+    return left.product_name.localeCompare(right.product_name);
+  });
 }
 
 function snapshotValue(snapshot: Record<string, unknown> | null | undefined, key: string): string {
@@ -497,7 +587,9 @@ function App() {
 
       {activeTab === "forecast" && <ForecastPanel />}
 
-      {activeTab === "supplier-forecast" && <SupplierForecastPanel />}
+      {activeTab === "supplier-forecast" && (
+        <SupplierForecastPanel onViewPurchaseOrder={handleViewGeneratedPo} />
+      )}
 
       {activeTab === "purchase-orders" && <PurchaseOrdersPanel initialPoId={poToViewId} />}
 
@@ -733,58 +825,84 @@ function DraftPoFromProductsPanel({
       {validationError && <div className="state error">{validationError}</div>}
       {createError && <div className="state error">Draft generation failed: {createError}</div>}
       {result && (
-        <div className="result-panel" aria-label="Draft PO generation result">
-          <h3>
-            {result.summary.created_po_count ?? result.created_purchase_orders.length} draft PO
-            {(result.summary.created_po_count ?? result.created_purchase_orders.length) === 1 ? "" : "s"} created
-          </h3>
-          <dl className="detail-list">
-            <div>
-              <dt>PO count</dt>
-              <dd>{result.summary.created_po_count ?? result.created_purchase_orders.length}</dd>
-            </div>
-            <div>
-              <dt>Created lines</dt>
-              <dd>{result.summary.created_line_count}</dd>
-            </div>
-          </dl>
-          <div className="nested-panel">
-            <h3>Created Purchase Orders</h3>
-            <ul className="skip-list">
-              {result.created_purchase_orders.map((po) => (
-                <li key={po.id}>
-                  Draft PO {po.id}: {formatValue(po.supplier_name)}{" "}
-                  <span className={purchaseOrderStatusClassName(po.status)}>{po.status}</span>{" "}
-                  <button onClick={() => onViewPurchaseOrder(po.id)} type="button">
-                    View Draft PO {po.id}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-          {result.summary.grouped_by_supplier && (
-            <div className="action-state">
-              Grouped by supplier:{" "}
-              {Object.entries(result.summary.grouped_by_supplier)
-                .map(([supplierId, count]) => `${supplierId}: ${count}`)
-                .join(", ")}
-            </div>
-          )}
-          {result.summary.skipped_products.length > 0 && (
-            <div className="nested-panel">
-              <h3>Skipped Products</h3>
-              <ul className="skip-list">
-                {result.summary.skipped_products.map((product) => (
-                  <li key={product.product_id}>
-                    {product.product_name ?? product.product_id}: {product.reason}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
+        <DraftPoGenerationResult onViewPurchaseOrder={onViewPurchaseOrder} result={result} />
       )}
     </section>
+  );
+}
+
+function DraftPoGenerationResult({
+  onViewPurchaseOrder,
+  result,
+}: {
+  onViewPurchaseOrder: (poId: number) => void;
+  result: DraftFromProductsResponse;
+}) {
+  const createdPoCount = result.summary.created_po_count ?? result.created_purchase_orders.length;
+  const totalQuantity = result.created_purchase_orders.reduce(
+    (sum, po) => sum + po.lines.reduce((lineSum, line) => lineSum + Number(line.quantity || 0), 0),
+    0,
+  );
+
+  return (
+    <div className="result-panel" aria-label="Draft PO generation result">
+      <h3>
+        {createdPoCount} draft PO{createdPoCount === 1 ? "" : "s"} created
+      </h3>
+      <dl className="detail-list">
+        <div>
+          <dt>PO count</dt>
+          <dd>{createdPoCount}</dd>
+        </div>
+        <div>
+          <dt>Created lines</dt>
+          <dd>{result.summary.created_line_count}</dd>
+        </div>
+        <div>
+          <dt>Total recommended quantity</dt>
+          <dd>{totalQuantity}</dd>
+        </div>
+      </dl>
+      {result.created_purchase_orders.length > 0 && (
+        <div className="nested-panel">
+          <h3>Created Purchase Orders</h3>
+          <ul className="skip-list">
+            {result.created_purchase_orders.map((po) => (
+              <li key={po.id}>
+                Draft PO {po.id}: {formatValue(po.supplier_name)}{" "}
+                <span className={purchaseOrderStatusClassName(po.status)}>{po.status}</span>{" "}
+                <button onClick={() => onViewPurchaseOrder(po.id)} type="button">
+                  View Draft PO {po.id}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {createdPoCount === 0 && (
+        <div className="state">No draft purchase order was created.</div>
+      )}
+      {result.summary.grouped_by_supplier && (
+        <div className="action-state">
+          Grouped by supplier:{" "}
+          {Object.entries(result.summary.grouped_by_supplier)
+            .map(([supplierId, count]) => `${supplierId}: ${count}`)
+            .join(", ")}
+        </div>
+      )}
+      {result.summary.skipped_products.length > 0 && (
+        <div className="nested-panel">
+          <h3>Skipped Products</h3>
+          <ul className="skip-list">
+            {result.summary.skipped_products.map((product) => (
+              <li key={product.product_id}>
+                {product.product_name ?? product.product_id}: {product.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1887,9 +2005,14 @@ function RecommendationDetail({
   );
 }
 
-function SupplierForecastPanel() {
+function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (poId: number) => void }) {
   const [supplierId, setSupplierId] = useState("");
   const [forecast, setForecast] = useState<SupplierForecastResponse | null>(null);
+  const [filter, setFilter] = useState<SupplierForecastFilter>("all");
+  const [draftNotes, setDraftNotes] = useState("Draft generated from supplier forecast");
+  const [draftResult, setDraftResult] = useState<DraftFromProductsResponse | null>(null);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [generatingDraft, setGeneratingDraft] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1904,6 +2027,8 @@ function SupplierForecastPanel() {
     setLoading(true);
     setError(null);
     setForecast(null);
+    setDraftResult(null);
+    setDraftError(null);
     try {
       setForecast(await getSupplierForecast(parsedSupplierId));
     } catch (loadError) {
@@ -1912,6 +2037,51 @@ function SupplierForecastPanel() {
       setLoading(false);
     }
   }
+
+  async function handleGenerateDraftFromForecast() {
+    if (!forecast) {
+      return;
+    }
+    if (
+      !window.confirm(
+        "Generate a draft PO from this supplier forecast? Only products with recommended quantity greater than zero will be included. This creates a draft only; it will not be approved, issued, or sent to OrderPro.",
+      )
+    ) {
+      return;
+    }
+
+    setGeneratingDraft(true);
+    setDraftError(null);
+    setDraftResult(null);
+    try {
+      const created = await createDraftPOFromSupplierForecast(forecast.supplier_id, {
+        created_by: "manual",
+        notes: draftNotes || "Draft generated from supplier forecast",
+        only_reorder_needed: true,
+      });
+      setDraftResult(created);
+    } catch (loadError) {
+      setDraftError((loadError as Error).message);
+    } finally {
+      setGeneratingDraft(false);
+    }
+  }
+
+  const sortedRows = useMemo(
+    () => sortSupplierForecastRows(forecast?.forecasts ?? []),
+    [forecast],
+  );
+  const visibleRows = useMemo(
+    () => sortedRows.filter((row) => forecastMatchesFilter(row, filter)),
+    [filter, sortedRows],
+  );
+
+  const highRiskCount = (forecast?.forecasts ?? []).filter(
+    (row) => row.risk_level === "high" || row.risk_level === "critical",
+  ).length;
+  const openDemandCount = (forecast?.forecasts ?? []).filter(forecastHasOpenDemand).length;
+  const missingLeadTimeCount = (forecast?.forecasts ?? []).filter(forecastMissingLeadTime).length;
+  const noHistoryCount = (forecast?.forecasts ?? []).filter(forecastHasNoDemandHistory).length;
 
   return (
     <section className="detail-panel" aria-label="Supplier forecast">
@@ -1931,6 +2101,10 @@ function SupplierForecastPanel() {
       )}
       {forecast && (
         <div className="review-stack">
+          <div className="state">
+            Forecasts use synced OrderPro inventory and order history. Draft generation does not
+            approve, issue, or send purchase orders.
+          </div>
           <dl className="detail-list">
             <div>
               <dt>Supplier</dt>
@@ -1945,6 +2119,22 @@ function SupplierForecastPanel() {
               <dd>{forecast.products_needing_reorder.length}</dd>
             </div>
             <div>
+              <dt>High-risk products</dt>
+              <dd>{highRiskCount}</dd>
+            </div>
+            <div>
+              <dt>Products with open demand</dt>
+              <dd>{openDemandCount}</dd>
+            </div>
+            <div>
+              <dt>Missing lead time</dt>
+              <dd>{missingLeadTimeCount}</dd>
+            </div>
+            <div>
+              <dt>No usable demand history</dt>
+              <dd>{noHistoryCount}</dd>
+            </div>
+            <div>
               <dt>Total recommended quantity</dt>
               <dd>{forecast.total_recommended_quantity}</dd>
             </div>
@@ -1953,41 +2143,141 @@ function SupplierForecastPanel() {
               <dd>{formatValue(forecast.total_estimated_cost)}</dd>
             </div>
           </dl>
+          <section className="nested-panel" aria-label="Generate supplier forecast draft PO">
+            <div className="section-header">
+              <h3>Generate PO from supplier forecast</h3>
+              <span className="status needs-review">draft only</span>
+            </div>
+            <div className="state">
+              Only products with recommended quantity greater than zero will be included. The result
+              is a draft PO only; it will not be approved, issued, or sent to OrderPro.
+            </div>
+            <form
+              className="mapping-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleGenerateDraftFromForecast();
+              }}
+            >
+              <label>
+                <span>Notes</span>
+                <input
+                  onChange={(event) => setDraftNotes(event.target.value)}
+                  value={draftNotes}
+                />
+              </label>
+              <button
+                disabled={generatingDraft || forecast.products_needing_reorder.length === 0}
+                type="submit"
+              >
+                {generatingDraft ? "Generating..." : "Generate Draft PO from Supplier Forecast"}
+              </button>
+            </form>
+            {forecast.products_needing_reorder.length === 0 && (
+              <div className="action-state">No products currently require reorder.</div>
+            )}
+            {draftError && (
+              <div className="state error">Supplier forecast draft generation failed: {draftError}</div>
+            )}
+            {draftResult && (
+              <DraftPoGenerationResult
+                onViewPurchaseOrder={onViewPurchaseOrder}
+                result={draftResult}
+              />
+            )}
+          </section>
           {forecast.products_needing_reorder.length === 0 && (
             <div className="state">No products need reorder for this supplier.</div>
           )}
-          {forecast.forecasts.some((row) => row.recommended_action === "monitor") && (
+          {noHistoryCount > 0 && (
             <div className="state warning">
-              Some products are being monitored because they have no reorder recommendation yet.
+              Some products have no usable demand history and are being monitored.
             </div>
           )}
+          {missingLeadTimeCount > 0 && (
+            <div className="state warning">
+              Some products are missing lead time, so their recommendations need review.
+            </div>
+          )}
+          <div className="filter-bar" role="group" aria-label="Supplier forecast filters">
+            {[
+              ["all", "All products"],
+              ["needs_reorder", "Needs reorder"],
+              ["high_risk", "High risk"],
+              ["open_demand", "Open demand"],
+              ["no_history", "No demand history"],
+              ["missing_lead_time", "Missing lead time"],
+            ].map(([value, label]) => (
+              <button
+                className={filter === value ? "tab active" : "tab"}
+                key={value}
+                onClick={() => setFilter(value as SupplierForecastFilter)}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <section className="table-wrap nested-table" aria-label="Supplier forecast rows">
             <table>
               <thead>
                 <tr>
-                  <th>Product</th>
+                  <th>Product ID</th>
+                  <th>OrderPro SKU</th>
+                  <th>Product name</th>
                   <th>Current stock</th>
-                  <th>Action</th>
+                  <th>Effective stock</th>
+                  <th>Shipped units</th>
+                  <th>Avg daily usage</th>
+                  <th>Open confirmed</th>
+                  <th>Open packed</th>
+                  <th>Open backorder</th>
+                  <th>Total open</th>
+                  <th>Lead time</th>
+                  <th>Reorder point</th>
                   <th>Recommended qty</th>
-                  <th>Risk</th>
-                  <th>Inventory source</th>
+                  <th>Action</th>
+                  <th>Risk level</th>
+                  <th>Demand source</th>
+                  <th>Explanation</th>
                 </tr>
               </thead>
               <tbody>
-                {forecast.forecasts.map((row) => (
+                {visibleRows.map((row) => (
                   <tr key={row.product_id}>
+                    <td>{row.product_id}</td>
+                    <td>{formatValue(row.orderpro_sku)}</td>
                     <td>{row.product_name}</td>
                     <td>{formatValue(row.current_stock)}</td>
-                    <td>{row.recommended_action}</td>
+                    <td>{formatValue(row.effective_available_stock)}</td>
+                    <td>{formatValue(row.shipped_units_in_window)}</td>
+                    <td>{formatValue(row.avg_daily_usage)}</td>
+                    <td>{formatValue(row.open_confirmed_units)}</td>
+                    <td>{formatValue(row.open_packed_units)}</td>
+                    <td>{formatValue(row.open_backorder_units)}</td>
+                    <td>{formatValue(row.total_open_demand)}</td>
+                    <td>
+                      {formatValue(row.lead_time_days_used)} ({formatValue(row.lead_time_source)})
+                    </td>
+                    <td>{formatValue(row.reorder_point)}</td>
                     <td>{formatValue(row.recommended_qty)}</td>
-                    <td>{row.risk_level}</td>
-                    <td>{row.inventory_source}</td>
+                    <td>{row.recommended_action}</td>
+                    <td>
+                      <span className={forecastRiskClassName(row.risk_level)}>
+                        {row.risk_level}
+                      </span>
+                    </td>
+                    <td>{demandSourceLabel(row.demand_source)}</td>
+                    <td>{formatValue(row.explanation)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
             {forecast.forecasts.length === 0 && (
               <div className="state">No active products found for this supplier.</div>
+            )}
+            {forecast.forecasts.length > 0 && visibleRows.length === 0 && (
+              <div className="state">No products match this forecast filter.</div>
             )}
           </section>
         </div>

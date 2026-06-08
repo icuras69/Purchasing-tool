@@ -107,9 +107,28 @@ export interface ForecastSupplierContext {
 export interface ForecastResponse {
   product_id: number;
   product_name: string;
+  orderpro_sku?: string | null;
   current_stock: number;
   inventory_source: string;
   avg_daily_usage: number;
+  demand_source?: string | null;
+  demand_lookback_days?: number | null;
+  demand_history_start?: string | null;
+  demand_history_end?: string | null;
+  observation_days?: number | null;
+  shipped_units_in_window?: number | null;
+  shipped_order_count?: number | null;
+  open_confirmed_units?: number | null;
+  open_packed_units?: number | null;
+  open_backorder_units?: number | null;
+  total_open_demand?: number | null;
+  effective_available_stock?: number | null;
+  net_available_stock?: number | null;
+  projected_lead_time_demand?: number | null;
+  total_required_stock?: number | null;
+  units_sold_in_window?: number | null;
+  eligible_order_count?: number | null;
+  excluded_order_count?: number | null;
   days_until_stockout: number | null;
   supplier_name: string | null;
   matched_sku: string | null;
@@ -225,6 +244,12 @@ export interface SupplierForecastResponse {
   products_missing_data: number[];
   total_recommended_quantity: number;
   total_estimated_cost: number | null;
+}
+
+export interface SupplierForecastDraftRequest {
+  created_by?: string | null;
+  notes?: string | null;
+  only_reorder_needed?: boolean;
 }
 
 export type RecommendationStatus =

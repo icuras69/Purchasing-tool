@@ -206,6 +206,7 @@ def test_cancelled_orderpro_orders_are_excluded_from_demand(db_session):
     forecast = build_forecast(db_session, item)
 
     assert forecast["demand_source"] == "orderpro_orders"
+    assert forecast["orderpro_sku"] == "SKU-101"
     assert forecast["avg_daily_usage"] == 0.0
     assert forecast["eligible_order_count"] == 0
     assert forecast["excluded_order_count"] == 1
@@ -301,6 +302,7 @@ def test_zero_stock_open_demand_shortage_recommends_open_quantity(db_session):
     forecast = build_forecast(db_session, item)
 
     assert forecast["demand_source"] == "orderpro_orders"
+    assert forecast["orderpro_sku"] == "SKU-6775"
     assert forecast["avg_daily_usage"] == 0.0
     assert forecast["open_confirmed_units"] == 64
     assert forecast["total_open_demand"] == 64

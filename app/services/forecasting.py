@@ -203,6 +203,7 @@ def build_forecast(db: Session, product: Product) -> dict:
         return {
             "product_id": product.id,
             "product_name": product.name,
+            "orderpro_sku": product.orderpro_sku,
             "current_stock": product.current_stock,
             "inventory_source": "ignored",
             "avg_daily_usage": 0.0,
@@ -328,6 +329,7 @@ def build_forecast(db: Session, product: Product) -> dict:
     return {
         "product_id": product.id,
         "product_name": product.name,
+        "orderpro_sku": product.orderpro_sku,
         "current_stock": current_stock,
         "inventory_source": inventory_ctx["inventory_source"],
         "avg_daily_usage": avg_daily_usage,

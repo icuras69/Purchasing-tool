@@ -14,6 +14,7 @@ import type {
   RecommendationAcceptRequest,
   RecommendationConvertResponse,
   RecommendationRejectRequest,
+  SupplierForecastDraftRequest,
   SupplierForecastResponse,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
@@ -174,6 +175,20 @@ export function createDraftPurchaseOrderFromProducts(
 
 export function getSupplierForecast(supplierId: number): Promise<SupplierForecastResponse> {
   return fetchJson<SupplierForecastResponse>(`/suppliers/${supplierId}/forecast`, "supplier forecast");
+}
+
+export function createDraftPOFromSupplierForecast(
+  supplierId: number,
+  payload: SupplierForecastDraftRequest,
+): Promise<DraftFromProductsResponse> {
+  return sendJson<DraftFromProductsResponse>(
+    `/suppliers/${supplierId}/draft-po-from-forecast`,
+    "supplier forecast draft purchase order",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function addPurchaseOrderLine(
