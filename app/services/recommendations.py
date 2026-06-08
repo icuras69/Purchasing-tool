@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from math import ceil
 from typing import Any
 
@@ -84,8 +84,8 @@ def create_reorder_recommendation_for_product(
         reason=recommendation_reason(forecast, needs_mapping),
         confidence=None,
         input_snapshot=input_snapshot(product, supplier_context),
-        forecast_snapshot=forecast,
-        supplier_context_snapshot=supplier_context,
+        forecast_snapshot=json_safe_snapshot(forecast),
+        supplier_context_snapshot=json_safe_snapshot(supplier_context),
         model_name=None,
         prompt_version=None,
         generated_by=generated_by,
@@ -141,6 +141,16 @@ def input_snapshot(product: Product, supplier_context: dict[str, Any]) -> dict[s
             "needs_supplier_mapping": supplier_context.get("needs_supplier_mapping"),
         },
     }
+
+
+def json_safe_snapshot(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): json_safe_snapshot(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [json_safe_snapshot(child) for child in value]
+    return value
 
 
 def accept_recommendation(

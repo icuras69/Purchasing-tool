@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.inventory_position import InventoryPosition
+from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.warehouse import Warehouse
@@ -112,6 +113,7 @@ def plan_orderpro_sync(
     products: list[dict[str, Any]],
     product_csv_rows: dict[str, dict[str, Any]],
     inventory: list[dict[str, Any]] | None = None,
+    orders: list[dict[str, Any]] | None = None,
     supplier_pages_limited: bool = False,
 ) -> dict[str, Any]:
     supplier_plan = plan_supplier_sync(db, suppliers)
@@ -127,16 +129,19 @@ def plan_orderpro_sync(
         if inventory is not None
         else inventory_not_requested()
     )
+    order_plan = plan_order_sync(db, orders or []) if orders is not None else orders_not_requested()
 
     return {
         "mode": "dry_run",
         "suppliers": supplier_plan,
         "products": product_plan,
         "inventory": inventory_plan,
+        "orders": order_plan,
         "warnings": [
             *supplier_plan["warnings"],
             *product_plan["warnings"],
             *inventory_plan["warnings"],
+            *order_plan["warnings"],
         ],
         "next_recommended_step": (
             "Review unknown CSV supplier_code values and missing product CSV rows before enabling any write sync."
@@ -151,6 +156,7 @@ def apply_orderpro_supplier_product_sync(
     products: list[dict[str, Any]],
     product_csv_rows: dict[str, dict[str, Any]],
     inventory: list[dict[str, Any]] | None = None,
+    orders: list[dict[str, Any]] | None = None,
     mark_missing_inactive: bool = False,
     synced_at: datetime | None = None,
 ) -> dict[str, Any]:
@@ -168,10 +174,14 @@ def apply_orderpro_supplier_product_sync(
     db.flush()
     inventory_result = apply_inventory_sync(db, inventory, synced_at=sync_time) if inventory is not None else inventory_not_requested()
     db.flush()
+    order_result = apply_order_sync(db, orders, synced_at=sync_time) if orders is not None else orders_not_requested()
+    db.flush()
 
     warnings = [*supplier_result["warnings"], *product_result["warnings"]]
     if inventory is not None:
         warnings.extend(inventory_result["warnings"])
+    if orders is not None:
+        warnings.extend(order_result["warnings"])
 
     report = {
         "mode": "apply",
@@ -181,6 +191,8 @@ def apply_orderpro_supplier_product_sync(
     }
     if inventory is not None:
         report["inventory"] = inventory_result
+    if orders is not None:
+        report["orders"] = order_result
     return report
 
 
@@ -320,6 +332,119 @@ def apply_inventory_sync(
         "rows_missing_warehouse_id": rows_missing_warehouse,
         "rows_missing_warehouse_id_sample": rows_missing_warehouse[:10],
         "products_current_stock_updated": products_current_stock_updated,
+        "warnings": warnings,
+    }
+
+
+def apply_order_sync(
+    db: Session,
+    orders: list[dict[str, Any]],
+    *,
+    synced_at: datetime,
+) -> dict[str, Any]:
+    sync_time = sync_time_without_timezone(synced_at)
+    product_by_orderpro_id = {
+        str(row.orderpro_id): row
+        for row in db.query(Product).all()
+        if row.orderpro_id
+    }
+    product_by_sku = {
+        row.orderpro_sku: row
+        for row in db.query(Product).all()
+        if row.orderpro_sku
+    }
+    orders_by_orderpro_id = {
+        str(row.orderpro_id): row
+        for row in db.query(OrderProOrder).all()
+        if row.orderpro_id
+    }
+
+    orders_created = []
+    orders_updated = []
+    orders_unchanged = []
+    items_created = []
+    items_updated = []
+    items_unchanged = []
+    items_missing_product = []
+    quantity_diagnostics = order_quantity_diagnostics(orders)
+
+    for row in orders:
+        orderpro_id = clean_text(row.get("id"))
+        if not orderpro_id:
+            continue
+
+        desired_order = desired_order_fields(row)
+        desired_order["last_synced_at"] = sync_time
+        order = orders_by_orderpro_id.get(orderpro_id)
+        if order is None:
+            order = OrderProOrder(**desired_order)
+            db.add(order)
+            db.flush()
+            orders_by_orderpro_id[orderpro_id] = order
+            orders_created.append({"local_id": order.id, "orderpro_id": orderpro_id})
+        else:
+            changes = changed_fields(order, desired_order)
+            if changes:
+                for field, value in desired_order.items():
+                    setattr(order, field, value)
+                orders_updated.append({"local_id": order.id, "orderpro_id": orderpro_id, "changed_fields": sorted(changes)})
+            else:
+                orders_unchanged.append({"local_id": order.id, "orderpro_id": orderpro_id})
+
+        item_by_line_key = {item.orderpro_line_key: item for item in order.items}
+        for index, item_row in enumerate(extract_order_items(row), start=1):
+            product = resolve_order_item_product(item_row, product_by_orderpro_id, product_by_sku)
+            if product is None:
+                items_missing_product.append(order_item_identity(row, item_row))
+
+            desired_item = desired_order_item_fields(row, item_row, index=index, product_id=product.id if product else None)
+            item = item_by_line_key.get(desired_item["orderpro_line_key"])
+            if item is None:
+                item = OrderProOrderItem(order_id=order.id, **desired_item)
+                db.add(item)
+                db.flush()
+                item_by_line_key[item.orderpro_line_key] = item
+                items_created.append({"local_id": item.id, "orderpro_id": item.orderpro_id, "sku": item.sku})
+            else:
+                changes = changed_fields(item, desired_item)
+                if changes:
+                    for field, value in desired_item.items():
+                        setattr(item, field, value)
+                    items_updated.append({"local_id": item.id, "changed_fields": sorted(changes)})
+                else:
+                    items_unchanged.append({"local_id": item.id})
+
+    warnings = []
+    if items_missing_product:
+        warnings.append(f"{len(items_missing_product)} OrderPro order items could not be matched to local products.")
+    if quantity_diagnostics["summary"]["missing_or_invalid_quantity_count"]:
+        warnings.append(
+            f"{quantity_diagnostics['summary']['missing_or_invalid_quantity_count']} OrderPro order items had missing or invalid quantity fields."
+        )
+
+    return {
+        "summary": {
+            "orderpro_orders": len(orders),
+            "orderpro_order_items": sum(len(extract_order_items(row)) for row in orders),
+            "orders_created": len(orders_created),
+            "orders_updated": len(orders_updated),
+            "orders_unchanged": len(orders_unchanged),
+            "order_items_created": len(items_created),
+            "order_items_updated": len(items_updated),
+            "order_items_unchanged": len(items_unchanged),
+            "items_missing_product_match": len(items_missing_product),
+            **quantity_diagnostics["summary"],
+        },
+        "orders_created": orders_created,
+        "orders_updated": orders_updated,
+        "orders_unchanged": orders_unchanged,
+        "order_items_created": items_created,
+        "order_items_updated": items_updated,
+        "order_items_unchanged": items_unchanged,
+        "items_missing_product_match": items_missing_product,
+        "items_missing_product_match_sample": items_missing_product[:10],
+        "quantity_source_field_counts": quantity_diagnostics["quantity_source_field_counts"],
+        "invalid_quantity_samples": quantity_diagnostics["invalid_quantity_samples"],
         "warnings": warnings,
     }
 
@@ -866,6 +991,110 @@ def plan_inventory_sync(
     }
 
 
+def plan_order_sync(db: Session, orders: list[dict[str, Any]]) -> dict[str, Any]:
+    local_products = db.query(Product).all()
+    local_orders = db.query(OrderProOrder).all()
+    product_by_orderpro_id = {str(row.orderpro_id): row for row in local_products if row.orderpro_id}
+    product_by_sku = {row.orderpro_sku: row for row in local_products if row.orderpro_sku}
+    order_by_orderpro_id = {str(row.orderpro_id): row for row in local_orders if row.orderpro_id}
+
+    orders_to_create = []
+    orders_to_update = []
+    orders_matching = []
+    items_to_create = []
+    items_to_update = []
+    items_matching = []
+    items_missing_product = []
+    statuses: set[str] = set()
+    order_dates: list[datetime] = []
+    sample_item_keys: list[str] = []
+    quantity_diagnostics = order_quantity_diagnostics(orders)
+
+    for row in orders:
+        orderpro_id = clean_text(row.get("id"))
+        desired_order = desired_order_fields(row)
+        if desired_order.get("status"):
+            statuses.add(desired_order["status"])
+        if desired_order.get("order_date"):
+            order_dates.append(desired_order["order_date"])
+
+        local_order = order_by_orderpro_id.get(orderpro_id) if orderpro_id else None
+        if local_order is None:
+            orders_to_create.append(order_identity(row))
+            local_item_by_key = {}
+        else:
+            changes = changed_fields(local_order, desired_order)
+            if changes:
+                orders_to_update.append({"local_id": local_order.id, "orderpro_id": orderpro_id, "changes": changes})
+            else:
+                orders_matching.append({"local_id": local_order.id, "orderpro_id": orderpro_id})
+            local_item_by_key = {item.orderpro_line_key: item for item in local_order.items}
+
+        for index, item_row in enumerate(extract_order_items(row), start=1):
+            if not sample_item_keys:
+                sample_item_keys = sorted(str(key) for key in item_row.keys())
+            product = resolve_order_item_product(item_row, product_by_orderpro_id, product_by_sku)
+            if product is None:
+                items_missing_product.append(order_item_identity(row, item_row))
+            desired_item = desired_order_item_fields(row, item_row, index=index, product_id=product.id if product else None)
+            local_item = local_item_by_key.get(desired_item["orderpro_line_key"])
+            if local_item is None:
+                items_to_create.append(
+                    {
+                        "orderpro_order_id": orderpro_id,
+                        "orderpro_id": desired_item["orderpro_id"],
+                        "sku": desired_item["sku"],
+                        "product_id": desired_item["product_id"],
+                    }
+                )
+            else:
+                changes = changed_fields(local_item, desired_item)
+                if changes:
+                    items_to_update.append({"local_id": local_item.id, "changes": changes})
+                else:
+                    items_matching.append({"local_id": local_item.id})
+
+    warnings = []
+    if items_missing_product:
+        warnings.append(f"{len(items_missing_product)} OrderPro order items could not be matched to local products.")
+    if quantity_diagnostics["summary"]["missing_or_invalid_quantity_count"]:
+        warnings.append(
+            f"{quantity_diagnostics['summary']['missing_or_invalid_quantity_count']} OrderPro order items had missing or invalid quantity fields."
+        )
+
+    return {
+        "summary": {
+            "orderpro_orders": len(orders),
+            "orderpro_order_items": sum(len(extract_order_items(row)) for row in orders),
+            "orders_to_create": len(orders_to_create),
+            "orders_to_update": len(orders_to_update),
+            "orders_already_matching": len(orders_matching),
+            "order_items_to_create": len(items_to_create),
+            "order_items_to_update": len(items_to_update),
+            "order_items_already_matching": len(items_matching),
+            "items_missing_product_match": len(items_missing_product),
+            "statuses_found": sorted(statuses),
+            "date_range": {
+                "first_order_date": min(order_dates).isoformat() if order_dates else None,
+                "last_order_date": max(order_dates).isoformat() if order_dates else None,
+            },
+            "sample_item_keys": sample_item_keys,
+            **quantity_diagnostics["summary"],
+        },
+        "orders_to_create": orders_to_create,
+        "orders_to_update": orders_to_update,
+        "orders_already_matching": orders_matching,
+        "order_items_to_create": items_to_create,
+        "order_items_to_update": items_to_update,
+        "order_items_already_matching": items_matching,
+        "items_missing_product_match": items_missing_product,
+        "items_missing_product_match_sample": items_missing_product[:10],
+        "quantity_source_field_counts": quantity_diagnostics["quantity_source_field_counts"],
+        "invalid_quantity_samples": quantity_diagnostics["invalid_quantity_samples"],
+        "warnings": warnings,
+    }
+
+
 def inventory_not_requested() -> dict[str, Any]:
     return {
         "summary": {"included": False},
@@ -878,6 +1107,20 @@ def inventory_not_requested() -> dict[str, Any]:
         "rows_with_derivable_warehouse_missing_name": [],
         "total_stock_by_local_product_id": {},
         "total_stock_by_orderpro_product_id": {},
+        "warnings": [],
+    }
+
+
+def orders_not_requested() -> dict[str, Any]:
+    return {
+        "summary": {"included": False},
+        "orders_to_create": [],
+        "orders_to_update": [],
+        "orders_already_matching": [],
+        "order_items_to_create": [],
+        "order_items_to_update": [],
+        "order_items_already_matching": [],
+        "items_missing_product_match": [],
         "warnings": [],
     }
 
@@ -954,6 +1197,215 @@ def desired_warehouse_fields(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def desired_order_fields(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "orderpro_id": clean_text(row.get("id")) or "",
+        "order_number": clean_text(row.get("order_number")) or clean_text(row.get("number")),
+        "status": clean_text(row.get("status")),
+        "source": clean_text(row.get("source")),
+        "order_date": parse_datetime(row.get("order_date") or row.get("date")),
+        "required_date": parse_datetime(row.get("required_date")),
+        "shipped_date": parse_datetime(row.get("shipped_date")),
+        "orderpro_warehouse_id": clean_text(row.get("warehouse_id")),
+        "customer_name": clean_text(row.get("customer_name")),
+        "subtotal": to_optional_float(row.get("subtotal")),
+        "tax_amount": to_optional_float(row.get("tax_amount")),
+        "shipping_cost": to_optional_float(row.get("shipping_cost")),
+        "total_amount": to_optional_float(row.get("total_amount")),
+        "currency": clean_text(row.get("currency")),
+        "raw_snapshot": sanitize_snapshot(row),
+    }
+
+
+def desired_order_item_fields(
+    order_row: dict[str, Any],
+    item_row: dict[str, Any],
+    *,
+    index: int,
+    product_id: int | None,
+) -> dict[str, Any]:
+    orderpro_id = clean_text(item_row.get("id"))
+    orderpro_product_id = order_item_product_id(item_row)
+    sku = order_item_sku(item_row)
+    ordered = parse_order_quantity(item_row.get("qty_ordered"))
+    picked = parse_order_quantity(item_row.get("qty_picked"))
+    shipped = parse_order_quantity(item_row.get("qty_shipped"))
+    compatibility_quantity = compatibility_order_item_quantity(order_row, ordered["value"], shipped["value"])
+    return {
+        "orderpro_id": orderpro_id,
+        "orderpro_line_key": orderpro_id or order_item_line_key(order_row, item_row, index=index),
+        "product_id": product_id,
+        "orderpro_product_id": orderpro_product_id,
+        "sku": sku,
+        "name": order_item_name(item_row),
+        "quantity": compatibility_quantity,
+        "quantity_ordered": ordered["value"],
+        "quantity_picked": picked["value"],
+        "quantity_shipped": shipped["value"],
+        "unit_price": to_optional_float(item_row.get("unit_price") if item_row.get("unit_price") is not None else item_row.get("price")),
+        "total": to_optional_float(item_row.get("total") if item_row.get("total") is not None else item_row.get("line_total")),
+        "raw_snapshot": sanitize_snapshot(item_row),
+    }
+
+
+def extract_order_items(order_row: dict[str, Any]) -> list[dict[str, Any]]:
+    items = order_row.get("items")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    if isinstance(items, dict):
+        records = extract_records(items)
+        return [item for item in records if isinstance(item, dict)]
+    return []
+
+
+def order_quantity_diagnostics(orders: list[dict[str, Any]]) -> dict[str, Any]:
+    total_items = 0
+    positive_ordered = 0
+    positive_shipped = 0
+    zero_ordered = 0
+    zero_shipped = 0
+    missing_or_invalid = 0
+    total_ordered = 0.0
+    total_shipped = 0.0
+    total_open = 0.0
+    source_counts = {"qty_ordered": 0, "qty_picked": 0, "qty_shipped": 0, "legacy_quantity": 0, "legacy_qty": 0}
+    invalid_samples = []
+
+    for order in orders:
+        for item in extract_order_items(order):
+            total_items += 1
+            ordered = parse_order_quantity(item.get("qty_ordered"))
+            picked = parse_order_quantity(item.get("qty_picked"))
+            shipped = parse_order_quantity(item.get("qty_shipped"))
+            legacy_quantity = parse_order_quantity(item.get("quantity"))
+            legacy_qty = parse_order_quantity(item.get("qty"))
+
+            for field_name, parsed in (
+                ("qty_ordered", ordered),
+                ("qty_picked", picked),
+                ("qty_shipped", shipped),
+                ("legacy_quantity", legacy_quantity),
+                ("legacy_qty", legacy_qty),
+            ):
+                if parsed["present"]:
+                    source_counts[field_name] += 1
+
+            if ordered["invalid"] or shipped["invalid"] or (not ordered["present"] and not shipped["present"]):
+                missing_or_invalid += 1
+                if len(invalid_samples) < 10:
+                    invalid_samples.append(
+                        {
+                            **order_item_identity(order, item),
+                            "qty_ordered": item.get("qty_ordered"),
+                            "qty_shipped": item.get("qty_shipped"),
+                            "reason": quantity_issue_reason(ordered, shipped),
+                        }
+                    )
+
+            if ordered["value"] is not None:
+                total_ordered += ordered["value"]
+                if ordered["value"] > 0:
+                    positive_ordered += 1
+                elif ordered["value"] == 0:
+                    zero_ordered += 1
+
+            if shipped["value"] is not None:
+                total_shipped += shipped["value"]
+                if shipped["value"] > 0:
+                    positive_shipped += 1
+                elif shipped["value"] == 0:
+                    zero_shipped += 1
+
+            if ordered["value"] is not None:
+                shipped_value = shipped["value"] if shipped["value"] is not None else 0.0
+                total_open += max(ordered["value"] - shipped_value, 0.0)
+
+    return {
+        "summary": {
+            "order_item_total_count": total_items,
+            "positive_qty_ordered_count": positive_ordered,
+            "positive_qty_shipped_count": positive_shipped,
+            "zero_qty_ordered_count": zero_ordered,
+            "zero_qty_shipped_count": zero_shipped,
+            "missing_or_invalid_quantity_count": missing_or_invalid,
+            "total_qty_ordered": round(total_ordered, 3),
+            "total_qty_shipped": round(total_shipped, 3),
+            "total_calculated_open_quantity": round(total_open, 3),
+        },
+        "quantity_source_field_counts": source_counts,
+        "invalid_quantity_samples": invalid_samples,
+    }
+
+
+def parse_order_quantity(value: Any) -> dict[str, Any]:
+    if value is None or value == "":
+        return {"present": False, "invalid": False, "value": None}
+    try:
+        return {"present": True, "invalid": False, "value": float(str(value).strip())}
+    except (TypeError, ValueError):
+        return {"present": True, "invalid": True, "value": None}
+
+
+def compatibility_order_item_quantity(
+    order_row: dict[str, Any],
+    ordered: float | None,
+    shipped: float | None,
+) -> float:
+    status = clean_text(order_row.get("status")) or ""
+    if status.lower() in {"shipped", "complete", "completed", "fulfilled", "closed", "paid"} and shipped is not None:
+        return shipped
+    if shipped is not None:
+        return shipped
+    if ordered is not None:
+        return ordered
+    return 0.0
+
+
+def quantity_issue_reason(ordered: dict[str, Any], shipped: dict[str, Any]) -> str:
+    if ordered["invalid"] or shipped["invalid"]:
+        return "invalid_quantity"
+    if not ordered["present"] and not shipped["present"]:
+        return "missing_qty_ordered_and_qty_shipped"
+    return "missing_quantity"
+
+
+def resolve_order_item_product(
+    item_row: dict[str, Any],
+    product_by_orderpro_id: dict[str, Product],
+    product_by_sku: dict[str, Product],
+) -> Product | None:
+    orderpro_product_id = order_item_product_id(item_row)
+    sku = order_item_sku(item_row)
+    return (product_by_orderpro_id.get(orderpro_product_id) if orderpro_product_id else None) or (
+        product_by_sku.get(sku) if sku else None
+    )
+
+
+def order_item_product_id(item_row: dict[str, Any]) -> str | None:
+    product = item_row.get("product") if isinstance(item_row.get("product"), dict) else {}
+    return clean_text(item_row.get("product_id")) or clean_text(product.get("id"))
+
+
+def order_item_sku(item_row: dict[str, Any]) -> str | None:
+    product = item_row.get("product") if isinstance(item_row.get("product"), dict) else {}
+    return (
+        clean_text(item_row.get("sku"))
+        or clean_text(item_row.get("product_sku"))
+        or clean_text(product.get("sku"))
+    )
+
+
+def order_item_name(item_row: dict[str, Any]) -> str | None:
+    product = item_row.get("product") if isinstance(item_row.get("product"), dict) else {}
+    return clean_text(item_row.get("name")) or clean_text(item_row.get("product_name")) or clean_text(product.get("name"))
+
+
+def order_item_line_key(order_row: dict[str, Any], item_row: dict[str, Any], *, index: int) -> str:
+    orderpro_order_id = clean_text(order_row.get("id")) or "unknown-order"
+    product_part = order_item_product_id(item_row) or order_item_sku(item_row) or order_item_name(item_row) or "unknown-product"
+    return f"{orderpro_order_id}:{index}:{product_part}"
+
+
 def changed_fields(model: Any, desired: dict[str, Any]) -> dict[str, dict[str, Any]]:
     changes = {}
     for field, desired_value in desired.items():
@@ -1009,14 +1461,72 @@ def to_float(value: Any) -> float:
         return 0.0
 
 
+def to_optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_datetime(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return sync_time_without_timezone(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return sync_time_without_timezone(parsed)
+
+
 def normalize_compare_value(value: Any) -> Any:
     if isinstance(value, float):
         return round(value, 6)
     return value
 
 
+def sanitize_snapshot(value: Any) -> Any:
+    sensitive_parts = ("token", "secret", "password", "authorization", "api_key")
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, child in value.items():
+            key_text = str(key)
+            if any(part in key_text.lower() for part in sensitive_parts):
+                continue
+            sanitized[key_text] = sanitize_snapshot(child)
+        return sanitized
+    if isinstance(value, list):
+        return [sanitize_snapshot(item) for item in value]
+    return value
+
+
 def product_identity(row: dict[str, Any]) -> dict[str, Any]:
     return {"orderpro_id": clean_text(row.get("id")), "sku": clean_text(row.get("sku")), "name": clean_text(row.get("name"))}
+
+
+def order_identity(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "orderpro_id": clean_text(row.get("id")),
+        "order_number": clean_text(row.get("order_number")) or clean_text(row.get("number")),
+        "status": clean_text(row.get("status")),
+        "order_date": clean_text(row.get("order_date") or row.get("date")),
+    }
+
+
+def order_item_identity(order_row: dict[str, Any], item_row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "orderpro_order_id": clean_text(order_row.get("id")),
+        "order_number": clean_text(order_row.get("order_number")) or clean_text(order_row.get("number")),
+        "orderpro_product_id": order_item_product_id(item_row),
+        "sku": order_item_sku(item_row),
+        "name": order_item_name(item_row),
+    }
 
 
 def inventory_identity(row: dict[str, Any]) -> dict[str, Any]:

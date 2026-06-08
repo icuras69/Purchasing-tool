@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import BaseModel
 
 
@@ -28,6 +30,21 @@ class ForecastResponse(BaseModel):
     inventory_source: str
 
     avg_daily_usage: float
+    demand_source: str | None = None
+    demand_lookback_days: int | None = None
+    demand_history_start: date | None = None
+    demand_history_end: date | None = None
+    observation_days: int | None = None
+    shipped_units_in_window: float | None = None
+    shipped_order_count: int | None = None
+    open_confirmed_units: float | None = None
+    open_packed_units: float | None = None
+    open_backorder_units: float | None = None
+    total_open_demand: float | None = None
+    effective_available_stock: float | None = None
+    units_sold_in_window: float | None = None
+    eligible_order_count: int | None = None
+    excluded_order_count: int | None = None
     days_until_stockout: float | None
 
     supplier_name: str | None

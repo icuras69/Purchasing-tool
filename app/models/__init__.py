@@ -10,6 +10,7 @@ from app.models.supplier import Supplier
 from app.models.supplier_alias import SupplierAlias
 from app.models.product_master_item import ProductMasterItem
 from app.models.product_supplier import ProductSupplier
+from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 
 __all__ = [
     "Product",
@@ -25,4 +26,6 @@ __all__ = [
     "SupplierAlias",
     "ProductMasterItem",
     "ProductSupplier",
+    "OrderProOrder",
+    "OrderProOrderItem",
 ]

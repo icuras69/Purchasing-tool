@@ -24,9 +24,9 @@ from app.services.orderpro_sync_planner import (  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Dry-run OrderPro supplier/product/inventory sync planner.")
+    parser = argparse.ArgumentParser(description="Dry-run OrderPro supplier/product/inventory/order sync planner.")
     parser.add_argument("--run", action="store_true", help="Required to call read-only OrderPro endpoints.")
-    parser.add_argument("--products-csv", required=True, help="Path to the OrderPro product export CSV.")
+    parser.add_argument("--products-csv", help="Path to the OrderPro product export CSV.")
     parser.add_argument(
         "--limit-pages",
         type=int,
@@ -55,12 +55,23 @@ def main() -> int:
         "--purchase-order-limit-pages",
         type=int,
         default=None,
-        help="Reserved for later purchase-order planning. Accepted now for command compatibility.",
+        help="Optional /purchase-orders page limit. Reserved for later purchase-order planning.",
+    )
+    parser.add_argument(
+        "--order-limit-pages",
+        type=int,
+        default=None,
+        help="Optional /orders page limit. Defaults to --limit-pages when omitted.",
     )
     parser.add_argument(
         "--include-inventory",
         action="store_true",
         help="Also fetch /inventory and include warehouse/inventory-position planning.",
+    )
+    parser.add_argument(
+        "--include-orders",
+        action="store_true",
+        help="Also fetch /orders and include OrderPro demand order planning.",
     )
     parser.add_argument(
         "--save-report",
@@ -87,24 +98,36 @@ def main() -> int:
         print("Refusing to call OrderPro because ORDERPRO_SYNC_ENABLED is not true.")
         return 2
 
-    csv_path = Path(args.products_csv)
-    if not csv_path.exists():
+    if not args.products_csv and not args.include_orders:
+        print("Product CSV is required unless only OrderPro order planning is requested with --include-orders.")
+        return 2
+
+    csv_path = Path(args.products_csv) if args.products_csv else None
+    if csv_path is not None and not csv_path.exists():
         print(f"Product CSV not found: {csv_path}")
         return 2
 
     client = OrderProClient()
-    product_csv_rows = load_product_csv(csv_path)
+    product_csv_rows = load_product_csv(csv_path) if csv_path is not None else {}
     supplier_limit_pages = args.supplier_limit_pages
     product_limit_pages = args.product_limit_pages if args.product_limit_pages is not None else args.limit_pages
     inventory_limit_pages = args.inventory_limit_pages if args.inventory_limit_pages is not None else args.limit_pages
-    supplier_fetch = fetch_orderpro_records_with_status(client, "/suppliers", limit_pages=supplier_limit_pages)
-    suppliers = supplier_fetch.records
-    products = fetch_orderpro_records(client, "/products", limit_pages=product_limit_pages)
+    order_limit_pages = args.order_limit_pages if args.order_limit_pages is not None else args.limit_pages
+    should_fetch_products = csv_path is not None or args.include_inventory
+    should_fetch_suppliers = csv_path is not None
+    supplier_fetch = (
+        fetch_orderpro_records_with_status(client, "/suppliers", limit_pages=supplier_limit_pages)
+        if should_fetch_suppliers
+        else None
+    )
+    suppliers = supplier_fetch.records if supplier_fetch is not None else []
+    products = fetch_orderpro_records(client, "/products", limit_pages=product_limit_pages) if should_fetch_products else []
     inventory = (
         fetch_orderpro_records(client, "/inventory", limit_pages=inventory_limit_pages)
         if args.include_inventory
         else None
     )
+    orders = fetch_orderpro_records(client, "/orders", limit_pages=order_limit_pages) if args.include_orders else None
 
     db = SessionLocal()
     try:
@@ -115,6 +138,7 @@ def main() -> int:
                 products=products,
                 product_csv_rows=product_csv_rows,
                 inventory=inventory if args.include_inventory else None,
+                orders=orders if args.include_orders else None,
                 mark_missing_inactive=args.mark_missing_inactive,
             )
             db.commit()
@@ -125,7 +149,8 @@ def main() -> int:
                 products=products,
                 product_csv_rows=product_csv_rows,
                 inventory=inventory,
-                supplier_pages_limited=supplier_fetch.truncated_by_limit,
+                orders=orders,
+                supplier_pages_limited=supplier_fetch.truncated_by_limit if supplier_fetch is not None else False,
             )
     finally:
         db.close()
@@ -167,6 +192,9 @@ def print_report(report: dict[str, Any]) -> None:
         print_section("Inventory summary", report["inventory"]["summary"])
         print_samples("Inventory rows missing product sample", report["inventory"].get("rows_missing_product_match_sample", []))
         print_samples("Inventory rows missing warehouse sample", report["inventory"].get("rows_missing_warehouse_id_sample", []))
+    if "orders" in report:
+        print_section("Order demand summary", report["orders"]["summary"])
+        print_samples("Order items missing product sample", report["orders"].get("items_missing_product_match_sample", []))
     if report["warnings"]:
         print("\nWarnings")
         for warning in report["warnings"]:

@@ -1,15 +1,19 @@
 import httpx
 
 from app.models.inventory_position import InventoryPosition
+from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.warehouse import Warehouse
 from app.services.orderpro_client import OrderProClient
 from app.services.orderpro_sync_planner import (
     apply_orderpro_supplier_product_sync,
+    desired_order_item_fields,
     fetch_orderpro_records,
     fetch_orderpro_records_with_status,
     load_product_csv,
+    order_quantity_diagnostics,
+    plan_order_sync,
     plan_inventory_sync,
     plan_orderpro_sync,
     plan_product_sync,
@@ -317,6 +321,134 @@ def test_dry_run_inventory_performs_no_writes(db_session):
     assert db_session.query(Warehouse).count() == 0
     assert db_session.query(InventoryPosition).count() == 0
     assert product.current_stock == 0
+
+
+def test_orderpro_order_dry_run_parses_headers_and_items(db_session):
+    product = Product(name="Product", orderpro_id="100", orderpro_sku="SKU-100")
+    db_session.add(product)
+    db_session.flush()
+
+    report = plan_order_sync(
+        db_session,
+        [
+            {
+                "id": 500,
+                "order_number": "SO-500",
+                "order_date": "2026-05-30T10:00:00Z",
+                "status": "shipped",
+                "source": "web",
+                "items": [
+                    {"id": 1, "product_id": 100, "sku": "SKU-100", "name": "Product", "qty_ordered": "2.000", "qty_shipped": "2.000", "unit_price": "5.0000", "line_total": "10.00"}
+                ],
+            }
+        ],
+    )
+
+    assert report["summary"]["orderpro_orders"] == 1
+    assert report["summary"]["orderpro_order_items"] == 1
+    assert report["summary"]["orders_to_create"] == 1
+    assert report["summary"]["order_items_to_create"] == 1
+    assert report["summary"]["statuses_found"] == ["shipped"]
+    assert report["summary"]["date_range"]["first_order_date"].startswith("2026-05-30T10:00:00")
+    assert "product_id" in report["summary"]["sample_item_keys"]
+    assert report["summary"]["positive_qty_ordered_count"] == 1
+    assert report["summary"]["positive_qty_shipped_count"] == 1
+    assert report["summary"]["total_qty_ordered"] == 2
+    assert report["summary"]["total_qty_shipped"] == 2
+
+
+def test_orderpro_order_item_matches_product_by_orderpro_id_and_sku_fallback(db_session):
+    product_by_id = Product(name="By ID", orderpro_id="100", orderpro_sku="SKU-100")
+    product_by_sku = Product(name="By SKU", orderpro_id="101", orderpro_sku="SKU-101")
+    db_session.add_all([product_by_id, product_by_sku])
+    db_session.flush()
+
+    report = plan_order_sync(
+        db_session,
+        [
+            {
+                "id": 501,
+                "order_number": "SO-501",
+                "items": [
+                    {"id": "line-1", "product_id": 100, "qty_ordered": "1.000", "qty_shipped": "1.000"},
+                    {"id": "line-2", "product": {"sku": "SKU-101"}, "qty_ordered": "3.000", "qty_shipped": "3.000"},
+                ],
+            }
+        ],
+    )
+
+    planned_by_key = {row["orderpro_id"]: row for row in report["order_items_to_create"]}
+    assert planned_by_key["line-1"]["product_id"] == product_by_id.id
+    assert planned_by_key["line-2"]["product_id"] == product_by_sku.id
+    assert report["summary"]["items_missing_product_match"] == 0
+
+
+def test_orderpro_order_dry_run_reports_missing_product_match(db_session):
+    report = plan_order_sync(
+        db_session,
+        [{"id": 502, "order_number": "SO-502", "items": [{"id": "line-1", "sku": "UNKNOWN", "qty_ordered": "1.000", "qty_shipped": "1.000"}]}],
+    )
+
+    assert report["summary"]["items_missing_product_match"] == 1
+    assert report["items_missing_product_match_sample"] == [
+        {
+            "orderpro_order_id": "502",
+            "order_number": "SO-502",
+            "orderpro_product_id": None,
+            "sku": "UNKNOWN",
+            "name": None,
+        }
+    ]
+
+
+def test_orderpro_order_dry_run_performs_no_writes(db_session):
+    report = plan_orderpro_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        inventory=None,
+        orders=[{"id": 503, "order_number": "SO-503", "items": [{"sku": "UNKNOWN", "qty_ordered": "1.000", "qty_shipped": "1.000"}]}],
+    )
+
+    assert report["orders"]["summary"]["orders_to_create"] == 1
+    assert db_session.query(OrderProOrder).count() == 0
+    assert db_session.query(OrderProOrderItem).count() == 0
+
+
+def test_orderpro_order_dry_run_reports_quantity_statistics_and_invalid_samples(db_session):
+    report = plan_order_sync(
+        db_session,
+        [
+            {
+                "id": 504,
+                "order_number": "SO-504",
+                "items": [
+                    {"id": "valid", "sku": "SKU-1", "qty_ordered": "3.500", "qty_picked": "2.000", "qty_shipped": "1.250"},
+                    {"id": "missing", "sku": "SKU-2"},
+                    {"id": "invalid", "sku": "SKU-3", "qty_ordered": "not-a-number", "qty_shipped": "0.000"},
+                    {"id": "negative", "sku": "SKU-4", "qty_ordered": "-2.000", "qty_shipped": "-1.000"},
+                ],
+            }
+        ],
+    )
+
+    assert report["summary"]["order_item_total_count"] == 4
+    assert report["summary"]["positive_qty_ordered_count"] == 1
+    assert report["summary"]["positive_qty_shipped_count"] == 1
+    assert report["summary"]["zero_qty_shipped_count"] == 1
+    assert report["summary"]["missing_or_invalid_quantity_count"] == 2
+    assert report["summary"]["total_qty_ordered"] == 1.5
+    assert report["summary"]["total_qty_shipped"] == 0.25
+    assert report["summary"]["total_calculated_open_quantity"] == 2.25
+    assert report["quantity_source_field_counts"] == {
+        "qty_ordered": 3,
+        "qty_picked": 1,
+        "qty_shipped": 3,
+        "legacy_quantity": 0,
+        "legacy_qty": 0,
+    }
+    assert {sample["sku"] for sample in report["invalid_quantity_samples"]} == {"SKU-2", "SKU-3"}
 
 
 def test_load_product_csv_indexes_rows_by_sku(tmp_path):
@@ -915,3 +1047,257 @@ def test_apply_inventory_updates_current_stock_as_total_across_warehouses(db_ses
     db_session.refresh(product)
 
     assert product.current_stock == 10
+
+
+def test_apply_orderpro_orders_creates_headers_and_items(db_session):
+    product = Product(name="Product", orderpro_id="100", orderpro_sku="SKU-100")
+    db_session.add(product)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        orders=[
+            {
+                "id": 900,
+                "order_number": "SO-900",
+                "order_date": "2026-05-31T09:00:00Z",
+                "status": "complete",
+                "source": "web",
+                "customer_name": "Customer One",
+                "warehouse_id": "W1",
+                "subtotal": "10.0",
+                "tax_amount": "2.0",
+                "shipping_cost": "1.5",
+                "total_amount": "13.5",
+                "currency": "GBP",
+                "items": [
+                    {
+                        "id": "line-1",
+                        "product_id": 100,
+                        "sku": "SKU-100",
+                        "name": "Product",
+                        "qty_ordered": "2.500",
+                        "qty_picked": "2.000",
+                        "qty_shipped": "2.000",
+                        "unit_price": "5.2500",
+                        "line_total": "10.50",
+                    }
+                ],
+            }
+        ],
+    )
+
+    order = db_session.query(OrderProOrder).filter_by(orderpro_id="900").one()
+    item = db_session.query(OrderProOrderItem).one()
+
+    assert report["orders"]["summary"]["orders_created"] == 1
+    assert report["orders"]["summary"]["order_items_created"] == 1
+    assert order.order_number == "SO-900"
+    assert order.status == "complete"
+    assert order.orderpro_warehouse_id == "W1"
+    assert order.total_amount == 13.5
+    assert order.raw_snapshot["order_number"] == "SO-900"
+    assert item.order_id == order.id
+    assert item.product_id == product.id
+    assert item.orderpro_product_id == "100"
+    assert item.sku == "SKU-100"
+    assert item.quantity == 2
+    assert item.quantity_ordered == 2.5
+    assert item.quantity_picked == 2
+    assert item.quantity_shipped == 2
+    assert item.unit_price == 5.25
+    assert item.total == 10.5
+
+
+def test_orderpro_order_item_quantity_parser_preserves_explicit_orderpro_quantities():
+    desired = desired_order_item_fields(
+        {"id": 900, "status": "shipped"},
+        {
+            "id": "line-1",
+            "product_id": 100,
+            "sku": "SKU-100",
+            "qty_ordered": "3.500",
+            "qty_picked": "2.250",
+            "qty_shipped": "1.750",
+            "unit_price": "19.0000",
+            "line_total": "33.25",
+        },
+        index=1,
+        product_id=10,
+    )
+
+    assert desired["quantity_ordered"] == 3.5
+    assert desired["quantity_picked"] == 2.25
+    assert desired["quantity_shipped"] == 1.75
+    assert desired["quantity"] == 1.75
+    assert desired["unit_price"] == 19
+    assert desired["total"] == 33.25
+
+
+def test_orderpro_order_item_quantity_parser_uses_ordered_when_shipped_missing():
+    desired = desired_order_item_fields(
+        {"id": 901, "status": "confirmed"},
+        {
+            "id": "line-1",
+            "product_id": 100,
+            "sku": "SKU-100",
+            "qty_ordered": "4.000",
+            "qty_picked": "0.000",
+        },
+        index=1,
+        product_id=10,
+    )
+
+    assert desired["quantity_ordered"] == 4
+    assert desired["quantity_picked"] == 0
+    assert desired["quantity_shipped"] is None
+    assert desired["quantity"] == 4
+
+
+def test_orderpro_order_quantity_diagnostics_reports_missing_invalid_negative_and_open_quantities():
+    report = order_quantity_diagnostics(
+        [
+            {
+                "id": 900,
+                "order_number": "SO-900",
+                "items": [
+                    {"id": "line-1", "sku": "VALID", "qty_ordered": "3.500", "qty_shipped": "1.000"},
+                    {"id": "line-2", "sku": "MISSING"},
+                    {"id": "line-3", "sku": "INVALID", "qty_ordered": "not-a-number", "qty_shipped": "0.000"},
+                    {"id": "line-4", "sku": "RETURN", "qty_ordered": "-2.000", "qty_shipped": "-1.000"},
+                ],
+            }
+        ]
+    )
+
+    assert report["summary"]["order_item_total_count"] == 4
+    assert report["summary"]["positive_qty_ordered_count"] == 1
+    assert report["summary"]["positive_qty_shipped_count"] == 1
+    assert report["summary"]["zero_qty_shipped_count"] == 1
+    assert report["summary"]["missing_or_invalid_quantity_count"] == 2
+    assert report["summary"]["total_qty_ordered"] == 1.5
+    assert report["summary"]["total_qty_shipped"] == 0
+    assert report["summary"]["total_calculated_open_quantity"] == 2.5
+    assert report["quantity_source_field_counts"]["qty_ordered"] == 3
+    assert report["quantity_source_field_counts"]["qty_shipped"] == 3
+    assert {sample["reason"] for sample in report["invalid_quantity_samples"]} == {
+        "missing_qty_ordered_and_qty_shipped",
+        "invalid_quantity",
+    }
+
+
+def test_apply_orderpro_orders_updates_instead_of_duplicating(db_session):
+    product = Product(name="Product", orderpro_id="100", orderpro_sku="SKU-100")
+    db_session.add(product)
+    db_session.flush()
+
+    first_payload = {
+        "id": 901,
+        "order_number": "SO-901",
+        "status": "new",
+        "items": [{"id": "line-1", "product_id": 100, "sku": "SKU-100", "qty_ordered": "1.000", "qty_shipped": "1.000", "unit_price": "5.0000"}],
+    }
+    apply_orderpro_supplier_product_sync(db_session, suppliers=[], products=[], product_csv_rows={}, orders=[first_payload])
+    second_payload = {
+        "id": 901,
+        "order_number": "SO-901",
+        "status": "shipped",
+        "items": [{"id": "line-1", "product_id": 100, "sku": "SKU-100", "qty_ordered": "3.000", "qty_shipped": "3.000", "unit_price": "4.0000"}],
+    }
+    report = apply_orderpro_supplier_product_sync(db_session, suppliers=[], products=[], product_csv_rows={}, orders=[second_payload])
+
+    order = db_session.query(OrderProOrder).filter_by(orderpro_id="901").one()
+    item = db_session.query(OrderProOrderItem).one()
+
+    assert report["orders"]["summary"]["orders_updated"] == 1
+    assert report["orders"]["summary"]["order_items_updated"] == 1
+    assert db_session.query(OrderProOrder).count() == 1
+    assert db_session.query(OrderProOrderItem).count() == 1
+    assert order.status == "shipped"
+    assert item.quantity == 3
+    assert item.quantity_ordered == 3
+    assert item.quantity_shipped == 3
+    assert item.unit_price == 4
+
+
+def test_apply_orderpro_orders_repairs_existing_zero_quantity_item(db_session):
+    product = Product(name="Product", orderpro_id="100", orderpro_sku="SKU-100")
+    order = OrderProOrder(orderpro_id="903", order_number="SO-903", status="shipped")
+    db_session.add_all([product, order])
+    db_session.flush()
+    db_session.add(
+        OrderProOrderItem(
+            order=order,
+            product=product,
+            orderpro_id="line-1",
+            orderpro_line_key="line-1",
+            orderpro_product_id="100",
+            sku="SKU-100",
+            quantity=0,
+        )
+    )
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        orders=[
+            {
+                "id": 903,
+                "order_number": "SO-903",
+                "status": "shipped",
+                "items": [
+                    {
+                        "id": "line-1",
+                        "product_id": 100,
+                        "sku": "SKU-100",
+                        "qty_ordered": "3.000",
+                        "qty_picked": "3.000",
+                        "qty_shipped": "3.000",
+                        "unit_price": "19.0000",
+                        "line_total": "57.00",
+                    }
+                ],
+            }
+        ],
+    )
+
+    item = db_session.query(OrderProOrderItem).one()
+
+    assert report["orders"]["summary"]["order_items_updated"] == 1
+    assert db_session.query(OrderProOrderItem).count() == 1
+    assert item.quantity == 3
+    assert item.quantity_ordered == 3
+    assert item.quantity_picked == 3
+    assert item.quantity_shipped == 3
+    assert item.unit_price == 19
+    assert item.total == 57
+
+
+def test_orderpro_order_snapshots_do_not_store_tokens(db_session):
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[],
+        products=[],
+        product_csv_rows={},
+        orders=[
+            {
+                "id": 902,
+                "order_number": "SO-902",
+                "api_token": "secret-token",
+                "items": [{"id": "line-1", "sku": "UNKNOWN", "qty_ordered": "1.000", "qty_shipped": "1.000", "authorization": "Bearer secret-token"}],
+            }
+        ],
+    )
+
+    order = db_session.query(OrderProOrder).filter_by(orderpro_id="902").one()
+    item = db_session.query(OrderProOrderItem).one()
+
+    assert "secret-token" not in str(report)
+    assert "api_token" not in order.raw_snapshot
+    assert "authorization" not in item.raw_snapshot

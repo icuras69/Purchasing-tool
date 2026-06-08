@@ -4,6 +4,12 @@ from sqlalchemy.orm import Session
 
 from app.models.product import Product
 from app.models.usage_history import UsageHistory
+from app.services.orderpro_demand import (
+    DemandResult,
+    calculate_orderpro_demand,
+    empty_demand_result,
+    product_has_orderpro_history,
+)
 
 
 def calculate_reorder_point(avg_daily_usage: float, lead_time_days: int, safety_stock: float) -> float:
@@ -11,6 +17,10 @@ def calculate_reorder_point(avg_daily_usage: float, lead_time_days: int, safety_
 
 
 def calculate_avg_daily_usage(db: Session, product_id: int) -> float:
+    return calculate_usage_history_demand(db, product_id).avg_daily_usage
+
+
+def calculate_usage_history_demand(db: Session, product_id: int) -> DemandResult:
     usage_rows = (
         db.query(UsageHistory)
         .filter(UsageHistory.product_id == product_id)
@@ -19,14 +29,48 @@ def calculate_avg_daily_usage(db: Session, product_id: int) -> float:
     )
 
     if not usage_rows:
-        return 0.0
+        return empty_demand_result("none")
 
     total_used = sum(row.qty_used for row in usage_rows)
     first_day = usage_rows[0].date
     last_day = usage_rows[-1].date
     day_span = max((last_day - first_day).days + 1, 1)
 
-    return round(total_used / day_span, 2)
+    return DemandResult(
+        avg_daily_usage=round(total_used / day_span, 2),
+        demand_source="usage_history",
+        demand_lookback_days=None,
+        demand_history_start=first_day,
+        demand_history_end=last_day,
+        observation_days=day_span,
+        shipped_units_in_window=round(total_used, 2),
+        shipped_order_count=len(usage_rows),
+        open_confirmed_units=0.0,
+        open_packed_units=0.0,
+        open_backorder_units=0.0,
+        total_open_demand=0.0,
+        units_sold_in_window=round(total_used, 2),
+        eligible_order_count=len(usage_rows),
+        excluded_order_count=0,
+    )
+
+
+def resolve_demand_context(db: Session, product: Product) -> DemandResult:
+    has_orderpro_identity = bool(product.orderpro_id or product.orderpro_sku or product.source_system == "orderpro")
+    has_orderpro_rows = product_has_orderpro_history(db, product.id)
+
+    if has_orderpro_identity or has_orderpro_rows:
+        orderpro_result = calculate_orderpro_demand(db, product)
+        if orderpro_result.eligible_order_count > 0:
+            return orderpro_result
+
+        legacy_result = calculate_usage_history_demand(db, product.id)
+        if legacy_result.avg_daily_usage > 0:
+            return legacy_result
+        if has_orderpro_rows:
+            return orderpro_result
+
+    return calculate_usage_history_demand(db, product.id)
 
 
 def resolve_supplier_context(product: Product) -> dict:
@@ -162,6 +206,21 @@ def build_forecast(db: Session, product: Product) -> dict:
             "current_stock": product.current_stock,
             "inventory_source": "ignored",
             "avg_daily_usage": 0.0,
+            "demand_source": "not_applicable",
+            "demand_lookback_days": None,
+            "demand_history_start": None,
+            "demand_history_end": None,
+            "observation_days": None,
+            "shipped_units_in_window": 0.0,
+            "shipped_order_count": 0,
+            "open_confirmed_units": 0.0,
+            "open_packed_units": 0.0,
+            "open_backorder_units": 0.0,
+            "total_open_demand": 0.0,
+            "effective_available_stock": 0.0,
+            "units_sold_in_window": 0.0,
+            "eligible_order_count": 0,
+            "excluded_order_count": 0,
             "days_until_stockout": None,
             "supplier_name": None,
             "matched_sku": None,
@@ -192,21 +251,24 @@ def build_forecast(db: Session, product: Product) -> dict:
             "explanation": "This row is classified as non-inventory and should not drive purchasing decisions.",
         }
 
-    avg_daily_usage = calculate_avg_daily_usage(db, product.id)
+    demand_ctx = resolve_demand_context(db, product)
+    avg_daily_usage = demand_ctx.avg_daily_usage
     supplier_ctx = resolve_supplier_context(product)
     inventory_ctx = resolve_inventory_context(product)
 
     current_stock = inventory_ctx["current_stock"]
+    effective_available_stock = round(max(current_stock - demand_ctx.total_open_demand, 0), 2)
     lead_time_days_used = supplier_ctx["lead_time_days_used"]
     minimum_order_quantity_used = supplier_ctx["minimum_order_quantity_used"]
 
+    projected_lead_time_demand = avg_daily_usage * lead_time_days_used
     reorder_point = round(
-        calculate_reorder_point(avg_daily_usage, lead_time_days_used, product.safety_stock),
+        projected_lead_time_demand + float(product.safety_stock or 0),
         2,
     )
 
     if avg_daily_usage > 0:
-        days_until_stockout = round(current_stock / avg_daily_usage, 2)
+        days_until_stockout = round(effective_available_stock / avg_daily_usage, 2)
     else:
         days_until_stockout = None
 
@@ -225,18 +287,9 @@ def build_forecast(db: Session, product: Product) -> dict:
             "Map the product to a supplier with a valid lead time before generating a purchase recommendation."
         )
 
-    elif not inventory_ctx["has_live_inventory"] and current_stock == 0:
-        recommended_action = "needs_inventory_sync"
-        recommended_qty = 0.0
-        risk_level = "medium"
-        explanation = (
-            "Demand history and supplier lead time are available, but live stock has not been synced from OrderPro yet. "
-            "Current stock is still the default value of 0, so no purchase order should be generated from this number alone."
-        )
-
-    elif current_stock <= reorder_point:
+    elif effective_available_stock <= reorder_point:
         recommended_action = "order_now"
-        raw_qty = ((lead_time_days_used + 7) * avg_daily_usage) - current_stock
+        raw_qty = reorder_point - effective_available_stock
         recommended_qty = max(raw_qty, minimum_order_quantity_used, 0)
         risk_level = "high"
         explanation = (
@@ -246,7 +299,7 @@ def build_forecast(db: Session, product: Product) -> dict:
 
     elif days_until_stockout is not None and days_until_stockout <= lead_time_days_used + 2:
         recommended_action = "order_soon"
-        raw_qty = ((lead_time_days_used + 7) * avg_daily_usage) - current_stock
+        raw_qty = reorder_point - effective_available_stock
         recommended_qty = max(raw_qty, minimum_order_quantity_used, 0)
         risk_level = "medium"
         explanation = (
@@ -260,7 +313,7 @@ def build_forecast(db: Session, product: Product) -> dict:
         risk_level = "low"
         explanation = "Current stock is sufficient based on recent average daily usage."
 
-    recommended_qty = float(ceil(recommended_qty)) if recommended_qty > 0 else 0.0
+    recommended_qty = round_order_quantity(recommended_qty, product)
 
     return {
         "product_id": product.id,
@@ -268,6 +321,21 @@ def build_forecast(db: Session, product: Product) -> dict:
         "current_stock": current_stock,
         "inventory_source": inventory_ctx["inventory_source"],
         "avg_daily_usage": avg_daily_usage,
+        "demand_source": demand_ctx.demand_source,
+        "demand_lookback_days": demand_ctx.demand_lookback_days,
+        "demand_history_start": demand_ctx.demand_history_start,
+        "demand_history_end": demand_ctx.demand_history_end,
+        "observation_days": demand_ctx.observation_days,
+        "shipped_units_in_window": demand_ctx.shipped_units_in_window,
+        "shipped_order_count": demand_ctx.shipped_order_count,
+        "open_confirmed_units": demand_ctx.open_confirmed_units,
+        "open_packed_units": demand_ctx.open_packed_units,
+        "open_backorder_units": demand_ctx.open_backorder_units,
+        "total_open_demand": demand_ctx.total_open_demand,
+        "effective_available_stock": effective_available_stock,
+        "units_sold_in_window": demand_ctx.units_sold_in_window,
+        "eligible_order_count": demand_ctx.eligible_order_count,
+        "excluded_order_count": demand_ctx.excluded_order_count,
         "days_until_stockout": days_until_stockout,
         "supplier_name": supplier_ctx["supplier_name"],
         "matched_sku": supplier_ctx["matched_sku"],
@@ -280,3 +348,13 @@ def build_forecast(db: Session, product: Product) -> dict:
         "risk_level": risk_level,
         "explanation": explanation,
     }
+
+
+def round_order_quantity(quantity: float, product: Product) -> float:
+    if quantity <= 0:
+        return 0.0
+    rounded = float(ceil(quantity))
+    pack_size = getattr(product, "pack_size", None)
+    if pack_size and pack_size > 0:
+        rounded = float(ceil(rounded / pack_size) * pack_size)
+    return rounded

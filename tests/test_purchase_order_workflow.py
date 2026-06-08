@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
+from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
 from app.models.supplier import Supplier
@@ -87,6 +88,28 @@ def add_usage_history(db_session, product: Product, qty_used: float = 1) -> None
             qty_used=qty_used,
             net_qty=qty_used,
             source_system="test",
+        )
+    )
+    db_session.commit()
+
+
+def add_orderpro_demand_history(db_session, product: Product, qty_used: float = 1) -> None:
+    order = OrderProOrder(
+        orderpro_id=f"order-{product.id}",
+        order_number=f"SO-{product.id}",
+        status="shipped",
+        order_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(
+        OrderProOrderItem(
+            order=order,
+            product=product,
+            orderpro_line_key=f"order-{product.id}:1",
+            orderpro_product_id=product.orderpro_id,
+            sku=product.orderpro_sku,
+            quantity=qty_used,
         )
     )
     db_session.commit()
@@ -614,7 +637,7 @@ def test_draft_po_from_products_uses_forecast_recommended_quantity_when_availabl
             "match_status": "matched",
         },
     )
-    add_usage_history(db_session, product, qty_used=2)
+    add_orderpro_demand_history(db_session, product, qty_used=2)
 
     response = client.post(
         "/purchase-orders/draft-from-products",
@@ -623,7 +646,7 @@ def test_draft_po_from_products_uses_forecast_recommended_quantity_when_availabl
 
     assert response.status_code == 201
     line = response.json()["purchase_order"]["lines"][0]
-    assert line["quantity"] == 21
+    assert line["quantity"] == 17
     assert line["pack_size"] is None
 
 
@@ -681,7 +704,7 @@ def test_supplier_forecast_returns_products_assigned_to_supplier(client, db_sess
     other_product = Product(name="Other Supplier Product", supplier_record=other_supplier, current_stock=1)
     db_session.add_all([other_supplier, other_product])
     db_session.commit()
-    add_usage_history(db_session, product, qty_used=2)
+    add_orderpro_demand_history(db_session, product, qty_used=2)
 
     response = client.get(f"/suppliers/{supplier.id}/forecast")
 
@@ -690,9 +713,10 @@ def test_supplier_forecast_returns_products_assigned_to_supplier(client, db_sess
     assert payload["supplier_id"] == supplier.id
     assert payload["product_count"] == 1
     assert [forecast["product_id"] for forecast in payload["forecasts"]] == [product.id]
+    assert payload["forecasts"][0]["demand_source"] == "orderpro_orders"
     assert payload["products_needing_reorder"] == [product.id]
-    assert payload["total_recommended_quantity"] == 21
-    assert payload["total_estimated_cost"] == 210.0
+    assert payload["total_recommended_quantity"] == 17
+    assert payload["total_estimated_cost"] == 170.0
 
 
 def test_supplier_forecast_to_draft_creates_draft_for_reorder_products_only(client, db_session):
@@ -710,7 +734,7 @@ def test_supplier_forecast_to_draft_creates_draft_for_reorder_products_only(clie
     )
     db_session.add(monitor_product)
     db_session.commit()
-    add_usage_history(db_session, reorder_product, qty_used=2)
+    add_orderpro_demand_history(db_session, reorder_product, qty_used=2)
 
     response = client.post(
         f"/suppliers/{supplier.id}/draft-po-from-forecast",
