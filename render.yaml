@@ -2,6 +2,7 @@ services:
   - type: web
     name: purchasing-ai-api
     runtime: python
+    region: frankfurt
     plan: free
     autoDeployTrigger: 'off'
     buildCommand: pip install -r requirements-deploy.txt
@@ -55,7 +56,8 @@ services:
 
 databases:
   - name: purchasing-ai-staging-db
-    plan: basic-256mb
+    plan: free
+    region: frankfurt
     databaseName: purchasing_ai_staging
     user: purchasing_ai
     postgresMajorVersion: "17"
