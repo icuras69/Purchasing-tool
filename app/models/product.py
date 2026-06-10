@@ -60,6 +60,11 @@ class Product(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    seasonality_backtests = relationship(
+        "ProductSeasonalityBacktest",
+        back_populates="product",
+        cascade="all, delete-orphan",
+    )
     historical_links = relationship(
         "ProductHistoricalLink",
         foreign_keys="ProductHistoricalLink.orderpro_product_id",

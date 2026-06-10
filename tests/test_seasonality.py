@@ -18,6 +18,15 @@ from app.services.seasonality import (
     calculate_quantity_transform_metrics,
     interpret_current_seasonality,
 )
+from app.models.product_seasonality_backtest import ProductSeasonalityBacktest
+from app.models.supplier import Supplier
+from app.services.forecasting import build_forecast
+from app.services.seasonality_backtesting import (
+    apply_backtest_results,
+    audit_product_forecast_inputs,
+    backtest_product,
+    build_backtest_plan,
+)
 
 
 def make_product(db_session, name: str = "Seasonal Product", **overrides) -> Product:
@@ -674,3 +683,168 @@ def test_forecast_uses_orderpro_profile_and_missing_profile_is_explicit(db_sessi
     assert missing_forecast["recommended_qty"] == 0.0
     assert missing_forecast["seasonality_context"]["seasonality_tag"] == "insufficient_data"
     assert "No reconciled" in missing_forecast["seasonality_context"]["advisory_message"]
+
+
+def test_backtest_training_data_does_not_include_test_period(db_session):
+    product = make_product(db_session, name="Leakage Guard")
+    add_monthly_usage(db_session, product, years=(2022, 2023), base=10)
+    add_monthly_usage(db_session, product, years=(2024,), base=10, peaks={1: 100})
+
+    result = backtest_product(db_session, product, test_year=2024)
+
+    january = next(row for row in result["windows"][0]["monthly_results"] if row["month"] == 1)
+    assert january["actual_units"] == 100
+    assert january["baseline_predicted_units"] == 10
+    assert january["seasonal_predicted_units"] == 10
+
+
+def test_backtest_seasonal_product_improves_over_baseline(db_session):
+    product = make_product(db_session, name="Validated Summer")
+    add_monthly_usage(db_session, product, years=(2022, 2023, 2024, 2025), base=5, peaks={6: 50, 7: 55, 8: 52})
+    apply_seasonality_profiles(db_session, product_id=product.id)
+
+    result = backtest_product(db_session, product, test_year=2024)
+
+    assert result["seasonal_absolute_error"] < result["baseline_absolute_error"]
+    assert result["seasonal_improvement_percent"] > 0
+    assert result["readiness_status"] in {"validated", "promising"}
+
+
+def test_backtest_year_round_product_shows_little_benefit(db_session):
+    product = make_product(db_session, name="Year Round Backtest")
+    add_monthly_usage(db_session, product, years=(2022, 2023, 2024, 2025), base=12)
+
+    result = backtest_product(db_session, product, test_year=2024)
+
+    assert result["seasonal_improvement_percent"] == 0
+    assert result["readiness_status"] == "neutral"
+
+
+def test_backtest_wrong_seasonal_signal_can_be_harmful(db_session):
+    product = make_product(db_session, name="Wrong Season")
+    add_monthly_usage(db_session, product, years=(2022, 2023), base=10, peaks={6: 50})
+    training_average = (50 + (11 * 10)) / 12
+    add_monthly_usage(db_session, product, years=(2024,), base=training_average)
+
+    result = backtest_product(db_session, product, test_year=2024)
+
+    assert result["seasonal_absolute_error"] > result["baseline_absolute_error"]
+    assert result["seasonal_mae"] > result["baseline_mae"]
+    assert result["seasonal_wape"] > result["baseline_wape"]
+    assert result["readiness_status"] == "harmful"
+
+
+def test_backtest_sparse_and_zero_demand_history_is_insufficient(db_session):
+    sparse = make_product(db_session, name="Sparse Backtest")
+    add_monthly_usage(db_session, sparse, years=(2024,), base=5, months=[1, 2])
+    zero = make_product(db_session, name="Zero Backtest")
+    add_monthly_usage(db_session, zero, years=(2022, 2023, 2024, 2025), base=0)
+
+    sparse_result = backtest_product(db_session, sparse)
+    zero_result = backtest_product(db_session, zero)
+
+    assert sparse_result["readiness_status"] == "insufficient_data"
+    assert zero_result["readiness_status"] == "insufficient_data"
+    assert zero_result["baseline_wape"] is None
+
+
+def test_backtest_returns_are_handled_consistently(db_session):
+    product = make_product(db_session, name="Returns Backtest")
+    add_monthly_usage(db_session, product, years=(2022, 2023, 2024), base=10)
+    db_session.add(
+        UsageHistory(
+            product_id=product.id,
+            date=date(2024, 6, 20),
+            qty_used=0,
+            qty_returned=4,
+            net_qty=-4,
+            gross_revenue=-40,
+            source_system="historical_sales_excel_adjustment",
+        )
+    )
+    db_session.flush()
+
+    result = backtest_product(db_session, product, test_year=2024)
+    june = next(row for row in result["windows"][0]["monthly_results"] if row["month"] == 6)
+
+    assert june["raw_actual_units"] == 6
+    assert june["actual_units"] == 6
+
+
+def test_backtest_dry_run_apply_idempotency_and_no_forecast_quantity_change(db_session):
+    product = make_product(db_session, name="Backtest Apply", current_stock=0, lead_time_days=7)
+    add_monthly_usage(db_session, product, years=(2022, 2023, 2024, 2025), base=5, peaks={6: 50, 7: 55})
+    apply_seasonality_profiles(db_session, product_id=product.id)
+    before_forecast = build_forecast(db_session, product)
+
+    dry_run = build_backtest_plan(db_session, product_id=product.id)
+    assert db_session.query(ProductSeasonalityBacktest).count() == 0
+
+    apply_plan = apply_backtest_results(db_session, product_id=product.id)
+    first_id = db_session.query(ProductSeasonalityBacktest).one().id
+    second_plan = apply_backtest_results(db_session, product_id=product.id)
+    after_forecast = build_forecast(db_session, product)
+
+    assert dry_run.products_evaluated == 1
+    assert apply_plan.products_evaluated == 1
+    assert second_plan.products_evaluated == 1
+    assert db_session.query(ProductSeasonalityBacktest).count() == 1
+    assert db_session.query(ProductSeasonalityBacktest).one().id == first_id
+    assert product.seasonality_tag == "summer"
+    assert before_forecast["recommended_qty"] == after_forecast["recommended_qty"]
+
+
+def test_forecast_readiness_audit_detects_missing_inputs_and_advisory_signals(db_session):
+    product = make_product(db_session, name="Readiness Missing", cost_price=None, lead_time_days=0, supplier_id=None)
+    add_monthly_usage(db_session, product, years=(2022, 2023, 2024, 2025), base=8, peaks={6: 30})
+    apply_seasonality_profiles(db_session, product_id=product.id)
+    apply_backtest_results(db_session, product_id=product.id)
+
+    audit = audit_product_forecast_inputs(db_session, product)
+
+    assert "missing_supplier" in audit["blocking_issues"]
+    assert "missing_lead_time" in audit["warning_issues"]
+    assert "missing_cost" in audit["warning_issues"]
+    assert "current_stock" in audit["inputs_currently_used"]
+    assert "usable_seasonality_profile" in audit["advisory_inputs"]
+    assert "seasonality_backtest_result" in audit["advisory_inputs"]
+
+
+def test_forecast_readiness_endpoints_return_coverage_counts(client, db_session):
+    supplier = Supplier(
+        name="Ready Supplier",
+        normalized_name="ready supplier",
+        lead_time_days=5,
+        orderpro_code="READY",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+    ready = make_product(
+        db_session,
+        name="Ready Product",
+        supplier_id=supplier.id,
+        supplier_sku="SUP-1",
+        cost_price=10,
+        lead_time_days=5,
+        orderpro_sku="READY-1",
+    )
+    missing = make_product(db_session, name="Missing Supplier Product", orderpro_sku="MISS-1", supplier_id=None)
+    add_monthly_usage(db_session, ready, years=(2022, 2023, 2024, 2025), base=10, peaks={6: 40})
+    apply_seasonality_profiles(db_session, product_id=ready.id)
+    apply_backtest_results(db_session, product_id=ready.id)
+    db_session.commit()
+
+    summary = client.get("/forecast-readiness/summary")
+    detail = client.get(f"/products/{missing.id}/forecast-readiness")
+    filtered = client.get("/products/forecast-readiness", params={"filter": "missing_supplier"})
+
+    assert summary.status_code == 200
+    assert summary.json()["product_count"] == 2
+    assert summary.json()["products_missing_supplier"] == 1
+    assert summary.json()["products_missing_lead_time"] >= 1
+    assert summary.json()["products_missing_cost"] >= 1
+    assert summary.json()["products_with_validated_seasonality"] + summary.json()["products_with_harmful_seasonality"] >= 0
+    assert detail.status_code == 200
+    assert "missing_supplier" in detail.json()["blocking_issues"]
+    assert filtered.status_code == 200
+    assert [row["product_id"] for row in filtered.json()] == [missing.id]

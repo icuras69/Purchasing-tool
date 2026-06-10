@@ -12,6 +12,7 @@ from app.routes.purchase_orders import router as purchase_orders_router
 from app.routes.recommendations import router as recommendations_router
 from app.routes.seasonality import router as seasonality_router
 from app.routes.suppliers import router as suppliers_router
+from app.routes.forecast_readiness import router as forecast_readiness_router
 
 import app.models  # noqa: F401
 
@@ -31,6 +32,7 @@ if settings.database_auto_create_tables:
 
 app.include_router(health_router)
 app.include_router(seasonality_router)
+app.include_router(forecast_readiness_router)
 app.include_router(products_router)
 app.include_router(inventory_router)
 app.include_router(product_suppliers_router)
