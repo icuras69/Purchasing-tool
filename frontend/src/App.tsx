@@ -17,8 +17,11 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   generateRecommendationLLMExplanation,
+  getProductSeasonality,
   getPurchaseOrder,
   getRecommendation,
+  getSeasonalProducts,
+  getSeasonalitySummary,
   getSupplierForecast,
   issuePurchaseOrder,
   listRecommendations,
@@ -36,6 +39,7 @@ import type {
   ForecastResponse,
   ForecastSupplierContext,
   RecommendationLLMExplanation,
+  ProductSeasonalityDetail,
   Product,
   ProductSupplierInput,
   ProductSupplierMapping,
@@ -44,6 +48,8 @@ import type {
   AddPurchaseOrderLineRequest,
   CreatePurchaseOrderRequest,
   DraftFromProductsResponse,
+  SeasonalProduct,
+  SeasonalitySummary,
   SupplierForecastResponse,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
@@ -56,6 +62,7 @@ type TabId =
   | "mappings"
   | "forecast"
   | "supplier-forecast"
+  | "seasonality"
   | "purchase-orders"
   | "recommendations";
 
@@ -80,9 +87,40 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "mappings", label: "Supplier Mappings" },
   { id: "forecast", label: "Forecast" },
   { id: "supplier-forecast", label: "Supplier Forecast" },
+  { id: "seasonality", label: "Seasonality" },
   { id: "purchase-orders", label: "Purchase Orders" },
   { id: "recommendations", label: "Recommendations" },
 ];
+
+const monthNames = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+const seasonalityStatusPriority: Record<string, number> = {
+  in_season: 5,
+  approaching_season: 4,
+  year_round: 3,
+  off_season: 2,
+  insufficient_data: 1,
+};
+
+const confidencePriority: Record<string, number> = {
+  high: 4,
+  medium: 3,
+  low: 2,
+  insufficient: 1,
+};
 
 function initialResource<T>(): ResourceState<T> {
   return {
@@ -215,6 +253,47 @@ function forecastHasNoDemandHistory(row: ForecastResponse): boolean {
 
 function forecastMissingLeadTime(row: ForecastResponse): boolean {
   return Number(row.lead_time_days_used || 0) <= 0 || row.lead_time_source === "missing";
+}
+
+function seasonalityStatusLabel(status: string | null | undefined): string {
+  if (status === "in_season") return "In season";
+  if (status === "approaching_season") return "Approaching season";
+  if (status === "off_season") return "Off season";
+  if (status === "year_round") return "Year-round";
+  if (status === "insufficient_data") return "Insufficient data";
+  return formatValue(status);
+}
+
+function seasonalityTagLabel(tag: string | null | undefined): string {
+  if (tag === "winter") return "Winter";
+  if (tag === "spring") return "Spring";
+  if (tag === "summer") return "Summer";
+  if (tag === "autumn") return "Autumn";
+  if (tag === "multi_peak") return "Multi-peak";
+  if (tag === "year_round") return "Year-round";
+  if (tag === "insufficient_data") return "Insufficient data";
+  return formatValue(tag);
+}
+
+function seasonalityStatusClassName(status: string | null | undefined): string {
+  if (status === "in_season" || status === "year_round") return "status mapped";
+  if (status === "approaching_season") return "status pending-approval";
+  if (status === "insufficient_data") return "status rejected";
+  return "status needs-review";
+}
+
+function stockStatus(product: Pick<SeasonalProduct, "current_stock">): string {
+  if (Number(product.current_stock || 0) <= 0) return "out_of_stock";
+  if (Number(product.current_stock || 0) <= 5) return "low_stock";
+  return "in_stock";
+}
+
+function formatMonth(month: number): string {
+  return monthNames[month - 1] ?? `Month ${month}`;
+}
+
+function formatMonths(months: number[]): string {
+  return months.length ? months.map(formatMonth).join(", ") : "-";
 }
 
 function forecastMatchesFilter(row: ForecastResponse, filter: SupplierForecastFilter): boolean {
@@ -590,6 +669,8 @@ function App() {
       {activeTab === "supplier-forecast" && (
         <SupplierForecastPanel onViewPurchaseOrder={handleViewGeneratedPo} />
       )}
+
+      {activeTab === "seasonality" && <SeasonalityPanel />}
 
       {activeTab === "purchase-orders" && <PurchaseOrdersPanel initialPoId={poToViewId} />}
 
@@ -2282,6 +2363,485 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
           </section>
         </div>
       )}
+    </section>
+  );
+}
+
+function SeasonalityPanel() {
+  const currentMonth = new Date().getMonth() + 1;
+  const [month, setMonth] = useState(currentMonth);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [tagFilter, setTagFilter] = useState("all");
+  const [confidenceFilter, setConfidenceFilter] = useState("all");
+  const [supplierFilter, setSupplierFilter] = useState("");
+  const [stockFilter, setStockFilter] = useState("all");
+  const [supplierAssignmentFilter, setSupplierAssignmentFilter] = useState("all");
+  const [quickFilter, setQuickFilter] = useState("none");
+  const [sortBy, setSortBy] = useState("seasonal_index");
+  const [summary, setSummary] = useState<SeasonalitySummary | null>(null);
+  const [products, setProducts] = useState<ResourceState<SeasonalProduct>>(initialResource);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [selectedProduct, setSelectedProduct] = useState<SeasonalProduct | null>(null);
+  const [detail, setDetail] = useState<ProductSeasonalityDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [forecast, setForecast] = useState<ForecastResponse | null>(null);
+  const [forecastLoading, setForecastLoading] = useState(false);
+  const [forecastError, setForecastError] = useState<string | null>(null);
+
+  const loadSeasonality = useCallback(
+    (active = true) => {
+      setProducts((current) => ({ ...current, loading: true, error: null }));
+      setSummaryError(null);
+      Promise.all([
+        getSeasonalitySummary(month),
+        getSeasonalProducts({
+          month,
+          status: statusFilter === "all" ? undefined : statusFilter,
+          seasonality_tag: tagFilter === "all" ? undefined : tagFilter,
+          supplier_id: supplierFilter ? Number(supplierFilter) : undefined,
+          min_confidence: confidenceFilter === "all" ? undefined : confidenceFilter,
+          sort_by: sortBy,
+          limit: 500,
+        }),
+      ])
+        .then(([loadedSummary, loadedProducts]) => {
+          if (active) {
+            setSummary(loadedSummary);
+            setProducts({ data: loadedProducts, loading: false, error: null });
+          }
+        })
+        .catch((loadError: Error) => {
+          if (active) {
+            setProducts({ data: [], loading: false, error: loadError.message });
+            setSummaryError(loadError.message);
+          }
+        });
+    },
+    [confidenceFilter, month, sortBy, statusFilter, supplierFilter, tagFilter],
+  );
+
+  useEffect(() => {
+    let active = true;
+    loadSeasonality(active);
+    return () => {
+      active = false;
+    };
+  }, [loadSeasonality]);
+
+  const visibleProducts = useMemo(() => {
+    const filtered = products.data.filter((product) => {
+      if (stockFilter === "out_of_stock" && stockStatus(product) !== "out_of_stock") return false;
+      if (stockFilter === "low_stock" && stockStatus(product) !== "low_stock") return false;
+      if (stockFilter === "in_stock" && stockStatus(product) !== "in_stock") return false;
+      if (supplierAssignmentFilter === "assigned" && !product.supplier_id) return false;
+      if (supplierAssignmentFilter === "missing" && product.supplier_id) return false;
+      if (quickFilter === "in_season_out_of_stock") {
+        return product.current_seasonality_status === "in_season" && stockStatus(product) === "out_of_stock";
+      }
+      if (quickFilter === "in_season_low_stock") {
+        return product.current_seasonality_status === "in_season" && stockStatus(product) !== "in_stock";
+      }
+      if (quickFilter === "approaching_low_stock") {
+        return product.current_seasonality_status === "approaching_season" && stockStatus(product) !== "in_stock";
+      }
+      if (quickFilter === "high_confidence_seasonal") {
+        return product.confidence_label === "high" && !["year_round", "insufficient_data"].includes(product.seasonality_tag ?? "");
+      }
+      if (quickFilter === "seasonal_missing_supplier") {
+        return !product.supplier_id && !["year_round", "insufficient_data"].includes(product.seasonality_tag ?? "");
+      }
+      if (quickFilter === "seasonal_missing_lead_time") {
+        return !["year_round", "insufficient_data"].includes(product.seasonality_tag ?? "");
+      }
+      return true;
+    });
+
+    return [...filtered].sort((left, right) => {
+      if (sortBy === "current_stock") {
+        return Number(left.current_stock || 0) - Number(right.current_stock || 0);
+      }
+      if (sortBy === "confidence") {
+        return (
+          (confidencePriority[right.confidence_label ?? "insufficient"] ?? 0) -
+          (confidencePriority[left.confidence_label ?? "insufficient"] ?? 0)
+        );
+      }
+      if (sortBy === "product_name") {
+        return left.name.localeCompare(right.name);
+      }
+      const statusDiff =
+        (seasonalityStatusPriority[right.current_seasonality_status] ?? 0) -
+        (seasonalityStatusPriority[left.current_seasonality_status] ?? 0);
+      if (statusDiff !== 0) return statusDiff;
+      const indexDiff = Number(right.selected_month_index || 0) - Number(left.selected_month_index || 0);
+      if (indexDiff !== 0) return indexDiff;
+      const confidenceDiff =
+        (confidencePriority[right.confidence_label ?? "insufficient"] ?? 0) -
+        (confidencePriority[left.confidence_label ?? "insufficient"] ?? 0);
+      if (confidenceDiff !== 0) return confidenceDiff;
+      const stockDiff = Number(left.current_stock || 0) - Number(right.current_stock || 0);
+      if (stockDiff !== 0) return stockDiff;
+      return left.name.localeCompare(right.name);
+    });
+  }, [products.data, quickFilter, sortBy, stockFilter, supplierAssignmentFilter]);
+
+  async function openDetail(product: SeasonalProduct) {
+    setSelectedProduct(product);
+    setDetailLoading(true);
+    setDetailError(null);
+    setForecast(null);
+    setForecastError(null);
+    try {
+      setDetail(await getProductSeasonality(product.product_id, month));
+    } catch (loadError) {
+      setDetail(null);
+      setDetailError((loadError as Error).message);
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  async function openForecast(product: SeasonalProduct) {
+    setSelectedProduct(product);
+    setForecastLoading(true);
+    setForecastError(null);
+    try {
+      setForecast(await fetchProductForecast(product.product_id));
+    } catch (loadError) {
+      setForecast(null);
+      setForecastError((loadError as Error).message);
+    } finally {
+      setForecastLoading(false);
+    }
+  }
+
+  const usableSeasonality = summary
+    ? summary.product_count - (summary.current_season_counts.insufficient_data ?? 0)
+    : 0;
+
+  return (
+    <div className="review-stack" aria-label="Seasonality dashboard">
+      <section className="detail-panel">
+        <div className="section-header">
+          <div>
+            <h2>Seasonality</h2>
+            <p className="muted-text">
+              Seasonality is advisory and does not automatically change recommended purchase quantity.
+            </p>
+          </div>
+          <label>
+            <span>Month</span>
+            <select value={month} onChange={(event) => setMonth(Number(event.target.value))}>
+              {monthNames.map((name, index) => (
+                <option key={name} value={index + 1}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {summaryError && <div className="state error">Could not load seasonality: {summaryError}</div>}
+        {summary && (
+          <div className="summary-grid" aria-label="Seasonality summary cards">
+            <SummaryCard label="Total OrderPro products" value={summary.product_count} />
+            <SummaryCard label="Products with usable seasonality" value={usableSeasonality} />
+            <SummaryCard label="In season" value={summary.current_season_counts.in_season ?? 0} />
+            <SummaryCard label="Approaching season" value={summary.current_season_counts.approaching_season ?? 0} />
+            <SummaryCard label="Off season" value={summary.current_season_counts.off_season ?? 0} />
+            <SummaryCard label="Year-round" value={summary.current_season_counts.year_round ?? 0} />
+            <SummaryCard label="Insufficient data" value={summary.current_season_counts.insufficient_data ?? 0} />
+            <SummaryCard label="High-confidence profiles" value={summary.confidence_counts.high ?? 0} />
+            <SummaryCard label="Medium-confidence profiles" value={summary.confidence_counts.medium ?? 0} />
+            <SummaryCard label="Low-confidence profiles" value={summary.confidence_counts.low ?? 0} />
+          </div>
+        )}
+        {summary && (
+          <div className="classification-row" aria-label="Recurring classification counts">
+            {["winter", "spring", "summer", "autumn", "multi_peak", "year_round", "insufficient_data"].map((tag) => (
+              <span className="selected-pill" key={tag}>
+                {seasonalityTagLabel(tag)}: {summary.classification_counts[tag] ?? 0}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="detail-panel" aria-label="Seasonality filters">
+        <div className="filter-grid">
+          <label>
+            <span>Current status</span>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="all">All</option>
+              <option value="in_season">In season</option>
+              <option value="approaching_season">Approaching season</option>
+              <option value="off_season">Off season</option>
+              <option value="year_round">Year-round</option>
+              <option value="insufficient_data">Insufficient data</option>
+            </select>
+          </label>
+          <label>
+            <span>Recurring tag</span>
+            <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}>
+              <option value="all">All</option>
+              <option value="winter">Winter</option>
+              <option value="spring">Spring</option>
+              <option value="summer">Summer</option>
+              <option value="autumn">Autumn</option>
+              <option value="multi_peak">Multi-peak</option>
+              <option value="year_round">Year-round</option>
+              <option value="insufficient_data">Insufficient data</option>
+            </select>
+          </label>
+          <label>
+            <span>Supplier ID</span>
+            <input value={supplierFilter} onChange={(event) => setSupplierFilter(event.target.value)} />
+          </label>
+          <label>
+            <span>Confidence</span>
+            <select value={confidenceFilter} onChange={(event) => setConfidenceFilter(event.target.value)}>
+              <option value="all">All</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+              <option value="insufficient">Insufficient</option>
+            </select>
+          </label>
+          <label>
+            <span>Stock</span>
+            <select value={stockFilter} onChange={(event) => setStockFilter(event.target.value)}>
+              <option value="all">All</option>
+              <option value="out_of_stock">Out of stock</option>
+              <option value="low_stock">Low stock</option>
+              <option value="in_stock">In stock</option>
+            </select>
+          </label>
+          <label>
+            <span>Assigned supplier</span>
+            <select
+              value={supplierAssignmentFilter}
+              onChange={(event) => setSupplierAssignmentFilter(event.target.value)}
+            >
+              <option value="all">All</option>
+              <option value="assigned">Supplier assigned</option>
+              <option value="missing">Missing supplier</option>
+            </select>
+          </label>
+          <label>
+            <span>Sort</span>
+            <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+              <option value="seasonal_index">Seasonal index</option>
+              <option value="current_stock">Current stock</option>
+              <option value="confidence">Confidence</option>
+              <option value="product_name">Product name</option>
+            </select>
+          </label>
+          <label>
+            <span>Quick filter</span>
+            <select value={quickFilter} onChange={(event) => setQuickFilter(event.target.value)}>
+              <option value="none">None</option>
+              <option value="in_season_out_of_stock">In season and out of stock</option>
+              <option value="in_season_low_stock">In season and low stock</option>
+              <option value="approaching_low_stock">Approaching season and low stock</option>
+              <option value="high_confidence_seasonal">High-confidence seasonal products</option>
+              <option value="seasonal_missing_supplier">Seasonal products missing supplier</option>
+              <option value="seasonal_missing_lead_time">Seasonal products missing lead time</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <SeasonalProductsTable
+        loading={products.loading}
+        error={products.error}
+        onOpenDetail={openDetail}
+        onOpenForecast={openForecast}
+        products={visibleProducts}
+      />
+
+      {selectedProduct && (
+        <section className="detail-panel" aria-label="Selected seasonal product">
+          <h2>{selectedProduct.name}</h2>
+          {detailLoading && <div className="state">Loading seasonality detail...</div>}
+          {detailError && <div className="state error">Could not load seasonality detail: {detailError}</div>}
+          {detail && <SeasonalityDetail detail={detail} product={selectedProduct} />}
+          {forecastLoading && <div className="state">Loading forecast...</div>}
+          {forecastError && <div className="state error">Could not load forecast: {forecastError}</div>}
+          {forecast && <SeasonalityForecastSummary forecast={forecast} />}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function SummaryCard({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="summary-card">
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
+function SeasonalProductsTable({
+  error,
+  loading,
+  onOpenDetail,
+  onOpenForecast,
+  products,
+}: {
+  error: string | null;
+  loading: boolean;
+  onOpenDetail: (product: SeasonalProduct) => void;
+  onOpenForecast: (product: SeasonalProduct) => void;
+  products: SeasonalProduct[];
+}) {
+  if (loading) return <div className="state">Loading seasonal products...</div>;
+  if (error) return <div className="state error">Could not load seasonal products: {error}</div>;
+
+  return (
+    <section className="table-wrap" aria-label="Seasonal product table">
+      <table>
+        <thead>
+          <tr>
+            <th>Product ID</th>
+            <th>OrderPro SKU</th>
+            <th>Product name</th>
+            <th>Supplier</th>
+            <th>Current stock</th>
+            <th>Recurring tag</th>
+            <th>Current month status</th>
+            <th>Month units</th>
+            <th>Month index</th>
+            <th>Peak months</th>
+            <th>Primary season</th>
+            <th>Strength</th>
+            <th>Confidence</th>
+            <th>History</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {products.map((product) => (
+            <tr key={product.product_id}>
+              <td>{product.product_id}</td>
+              <td>{formatValue(product.orderpro_sku)}</td>
+              <td>{product.name}</td>
+              <td>
+                {formatValue(product.supplier_name)}
+                {!product.supplier_id && <div className="review-need">Missing supplier</div>}
+              </td>
+              <td>
+                {formatValue(product.current_stock)}
+                {stockStatus(product) === "out_of_stock" && <div className="review-need">Out of stock</div>}
+                {stockStatus(product) === "low_stock" && <div className="review-need">Low stock</div>}
+              </td>
+              <td>{seasonalityTagLabel(product.seasonality_tag)}</td>
+              <td>
+                <span className={seasonalityStatusClassName(product.current_seasonality_status)}>
+                  {seasonalityStatusLabel(product.current_seasonality_status)}
+                </span>
+              </td>
+              <td>{formatValue(product.selected_month_units)}</td>
+              <td>{formatValue(product.selected_month_index)}</td>
+              <td>{formatMonths(product.peak_months)}</td>
+              <td>{formatValue(product.primary_season)}</td>
+              <td>{formatValue(product.seasonality_strength)}</td>
+              <td>
+                {formatValue(product.confidence_score)}{" "}
+                <span className={product.confidence_label === "low" ? "status needs-review" : "status mapped"}>
+                  {formatValue(product.confidence_label)}
+                </span>
+                {product.confidence_label === "low" && <div className="review-need">Review manually</div>}
+              </td>
+              <td>
+                {formatValue(product.history_start)} to {formatValue(product.history_end)}
+                <div>{formatValue(product.years_covered)} years</div>
+              </td>
+              <td>
+                <div className="action-row">
+                  <button onClick={() => onOpenDetail(product)} type="button">
+                    Details
+                  </button>
+                  <button onClick={() => onOpenForecast(product)} type="button">
+                    View Forecast
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {products.length === 0 && <div className="state">No seasonal products match these filters.</div>}
+    </section>
+  );
+}
+
+function SeasonalityDetail({
+  detail,
+  product,
+}: {
+  detail: ProductSeasonalityDetail;
+  product: SeasonalProduct;
+}) {
+  const months = Array.from({ length: 12 }, (_, index) => index + 1);
+  return (
+    <div className="review-stack">
+      <dl className="detail-list">
+        <div><dt>Product</dt><dd>{detail.name} ({formatValue(detail.orderpro_sku)})</dd></div>
+        <div><dt>Supplier</dt><dd>{formatValue(product.supplier_name)}</dd></div>
+        <div><dt>Current stock</dt><dd>{formatValue(product.current_stock)}</dd></div>
+        <div><dt>Recurring classification</dt><dd>{seasonalityTagLabel(detail.seasonality_tag)}</dd></div>
+        <div><dt>Current status</dt><dd>{seasonalityStatusLabel(detail.current_interpretation.current_status)}</dd></div>
+        <div><dt>Primary season</dt><dd>{formatValue(detail.primary_season)}</dd></div>
+        <div><dt>Peak months</dt><dd>{formatMonths(detail.peak_months)}</dd></div>
+        <div><dt>Low months</dt><dd>{formatMonths(detail.low_months)}</dd></div>
+        <div><dt>Confidence</dt><dd>{detail.confidence_score} ({detail.confidence_label})</dd></div>
+        <div><dt>History</dt><dd>{formatValue(detail.history_start)} to {formatValue(detail.history_end)}, {detail.years_covered} years, {detail.active_months} active months</dd></div>
+        <div><dt>Historical links</dt><dd>{detail.direct_history_row_count} direct rows, {detail.linked_history_row_count} linked rows from {detail.contributing_historical_product_ids.join(", ") || "none"}</dd></div>
+        <div><dt>Reconciliation methods</dt><dd>{detail.reconciliation_methods.join(", ") || "-"}</dd></div>
+        <div><dt>Advisory explanation</dt><dd>{detail.current_interpretation.advisory_message}</dd></div>
+      </dl>
+      <section className="table-wrap nested-table" aria-label="Monthly seasonality values">
+        <table>
+          <thead>
+            <tr>
+              <th>Month</th>
+              <th>Monthly units</th>
+              <th>Monthly index</th>
+            </tr>
+          </thead>
+          <tbody>
+            {months.map((month) => (
+              <tr key={month}>
+                <td>{formatMonth(month)}</td>
+                <td>{formatValue(detail.monthly_units?.[String(month)])}</td>
+                <td>{formatValue(detail.monthly_indices?.[String(month)])}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </div>
+  );
+}
+
+function SeasonalityForecastSummary({ forecast }: { forecast: ForecastResponse }) {
+  return (
+    <section className="nested-panel" aria-label="Seasonality forecast summary">
+      <h3>Forecast</h3>
+      <div className="state warning">
+        Seasonality is currently advisory and does not automatically change the recommended purchase quantity.
+      </div>
+      <dl className="detail-list">
+        <div><dt>Current stock</dt><dd>{formatValue(forecast.current_stock)}</dd></div>
+        <div><dt>Open demand</dt><dd>{formatValue(forecast.total_open_demand)}</dd></div>
+        <div><dt>Average daily usage</dt><dd>{formatValue(forecast.avg_daily_usage)}</dd></div>
+        <div><dt>Lead time</dt><dd>{formatValue(forecast.lead_time_days_used)}</dd></div>
+        <div><dt>Recommended action</dt><dd>{formatValue(forecast.recommended_action)}</dd></div>
+        <div><dt>Recommended quantity</dt><dd>{formatValue(forecast.recommended_qty)}</dd></div>
+        <div><dt>Seasonality advisory</dt><dd>{formatValue(forecast.seasonality_context?.advisory_message)}</dd></div>
+      </dl>
     </section>
   );
 }

@@ -20,6 +20,9 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   generateRecommendationLLMExplanation,
+  getProductSeasonality,
+  getSeasonalProducts,
+  getSeasonalitySummary,
   getSupplierForecast,
   getPurchaseOrder,
   getRecommendation,
@@ -35,11 +38,14 @@ import {
 } from "./api";
 import type {
   ForecastResponse,
+  ProductSeasonalityDetail,
   Product,
   ProductSupplierMapping,
   PurchaseOrder,
   PurchaseRecommendation,
   RecommendationLLMExplanation,
+  SeasonalProduct,
+  SeasonalitySummary,
   SupplierForecastResponse,
   WeakMapping,
 } from "./types";
@@ -51,6 +57,9 @@ vi.mock("./api", () => ({
   fetchProductSuppliers: vi.fn(),
   fetchProductForecast: vi.fn(),
   generateRecommendationLLMExplanation: vi.fn(),
+  getSeasonalitySummary: vi.fn(),
+  getSeasonalProducts: vi.fn(),
+  getProductSeasonality: vi.fn(),
   getSupplierForecast: vi.fn(),
   createDraftPOFromSupplierForecast: vi.fn(),
   createProductSupplier: vi.fn(),
@@ -202,6 +211,117 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
     recommended_qty: 0,
     risk_level: "low",
     explanation: "Current stock is sufficient.",
+    seasonality_context: {
+      seasonality_tag: "summer",
+      current_status: "in_season",
+      selected_month_index: 1.8,
+      primary_season: "summer",
+      peak_months: [6, 7, 8],
+      confidence_score: 0.82,
+      confidence_label: "high",
+      advisory_message: "June is part of this product's elevated demand period.",
+    },
+    ...overrides,
+  };
+}
+
+function mockSeasonalitySummary(
+  overrides: Partial<SeasonalitySummary> = {},
+): SeasonalitySummary {
+  return {
+    classification_counts: {
+      insufficient_data: 1170,
+      year_round: 179,
+      summer: 33,
+      autumn: 44,
+      spring: 20,
+      winter: 28,
+      multi_peak: 10,
+    },
+    confidence_counts: {
+      high: 42,
+      medium: 83,
+      low: 189,
+      insufficient: 1170,
+    },
+    current_season_counts: {
+      insufficient_data: 1170,
+      year_round: 179,
+      approaching_season: 38,
+      in_season: 24,
+      off_season: 73,
+    },
+    profile_count: 1484,
+    product_count: 1484,
+    missing_profile_count: 0,
+    selected_month: 6,
+    include_legacy: false,
+    ...overrides,
+  };
+}
+
+function mockSeasonalProduct(overrides: Partial<SeasonalProduct> = {}): SeasonalProduct {
+  return {
+    product_id: 7832,
+    orderpro_sku: "SUMMER-7832",
+    name: "Seasonal Fly Sheet",
+    supplier_id: 34,
+    supplier_name: "Seasonal Supplier",
+    current_stock: 0,
+    seasonality_tag: "summer",
+    current_seasonality_status: "in_season",
+    selected_month: 6,
+    selected_month_units: 44,
+    selected_month_index: 1.8,
+    peak_months: [6, 7, 8],
+    primary_season: "summer",
+    seasonality_strength: 0.8,
+    confidence_score: 0.86,
+    confidence_label: "high",
+    history_start: "2022-01-01",
+    history_end: "2025-12-03",
+    years_covered: 4,
+    ...overrides,
+  };
+}
+
+function mockProductSeasonalityDetail(
+  overrides: Partial<ProductSeasonalityDetail> = {},
+): ProductSeasonalityDetail {
+  return {
+    product_id: 7832,
+    orderpro_sku: "SUMMER-7832",
+    name: "Seasonal Fly Sheet",
+    history_start: "2022-01-01",
+    history_end: "2025-12-03",
+    history_months: 48,
+    active_months: 28,
+    years_covered: 4,
+    total_units: 320,
+    average_monthly_units: 26.67,
+    monthly_units: { "6": 44, "7": 48, "8": 45 },
+    monthly_indices: { "6": 1.8, "7": 1.95, "8": 1.82 },
+    peak_months: [6, 7, 8],
+    low_months: [1, 2],
+    primary_season: "summer",
+    seasonality_tag: "summer",
+    seasonality_strength: 0.8,
+    confidence_score: 0.86,
+    confidence_label: "high",
+    coefficient_of_variation: 0.42,
+    calculation_version: "seasonality-v1",
+    calculated_at: "2026-06-10T10:00:00",
+    current_interpretation: {
+      current_status: "in_season",
+      selected_month: 6,
+      selected_month_units: 44,
+      selected_month_index: 1.8,
+      advisory_message: "June is part of this product's elevated demand period.",
+    },
+    direct_history_row_count: 0,
+    linked_history_row_count: 24,
+    contributing_historical_product_ids: [101, 102],
+    reconciliation_methods: ["barcode_exact"],
     ...overrides,
   };
 }
@@ -348,6 +468,9 @@ beforeEach(() => {
   vi.mocked(fetchWeakMappings).mockResolvedValue([]);
   vi.mocked(fetchProductSuppliers).mockResolvedValue([]);
   vi.mocked(fetchProductForecast).mockResolvedValue(mockForecast());
+  vi.mocked(getSeasonalitySummary).mockResolvedValue(mockSeasonalitySummary());
+  vi.mocked(getSeasonalProducts).mockResolvedValue([]);
+  vi.mocked(getProductSeasonality).mockResolvedValue(mockProductSeasonalityDetail());
   vi.mocked(getSupplierForecast).mockResolvedValue(mockSupplierForecast());
   vi.mocked(generateRecommendationLLMExplanation).mockResolvedValue(mockLLMExplanation());
   vi.mocked(createProductSupplier).mockResolvedValue(mockSupplierMapping());
@@ -410,7 +533,180 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Supplier Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Seasonality" })).toBeInTheDocument();
     expect(await screen.findByText("No products found.")).toBeInTheDocument();
+  });
+
+  it("seasonality summary cards display backend counts", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Seasonality" }));
+
+    const summary = await screen.findByLabelText("Seasonality summary cards");
+    expect(within(summary).getByText("Total OrderPro products")).toBeInTheDocument();
+    expect(within(summary).getByText("1484")).toBeInTheDocument();
+    expect(within(summary).getByText("In season")).toBeInTheDocument();
+    expect(within(summary).getByText("24")).toBeInTheDocument();
+    expect(screen.getByText("Summer: 33")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Seasonality is advisory and does not automatically change recommended purchase quantity.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("month selection sends the correct seasonality query", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Seasonality" }));
+    await screen.findByLabelText("Seasonality summary cards");
+    await userEvent.selectOptions(screen.getByLabelText("Month"), "6");
+
+    expect(getSeasonalitySummary).toHaveBeenLastCalledWith(6);
+    expect(getSeasonalProducts).toHaveBeenLastCalledWith(
+      expect.objectContaining({ month: 6 }),
+    );
+  });
+
+  it("seasonality filters call the products endpoint with selected filters", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Seasonality" }));
+    await screen.findByLabelText("Seasonality summary cards");
+    await userEvent.selectOptions(screen.getByLabelText("Current status"), "in_season");
+    await userEvent.selectOptions(screen.getByLabelText("Recurring tag"), "summer");
+    await userEvent.type(screen.getByLabelText("Supplier ID"), "34");
+    await userEvent.selectOptions(screen.getByLabelText("Confidence"), "high");
+
+    expect(getSeasonalProducts).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        status: "in_season",
+        seasonality_tag: "summer",
+        supplier_id: 34,
+        min_confidence: "high",
+      }),
+    );
+  });
+
+  it("seasonal table displays warnings and sorts by seasonal priority", async () => {
+    vi.mocked(getSeasonalProducts).mockResolvedValue([
+      mockSeasonalProduct({
+        product_id: 2,
+        name: "Monitor Product",
+        current_seasonality_status: "off_season",
+        selected_month_index: 0.5,
+        confidence_label: "low",
+        current_stock: 12,
+      }),
+      mockSeasonalProduct({
+        product_id: 1,
+        name: "In Season Product",
+        current_seasonality_status: "in_season",
+        selected_month_index: 1.9,
+        supplier_id: null,
+        supplier_name: null,
+        current_stock: 0,
+      }),
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Seasonality" }));
+
+    const table = await screen.findByLabelText("Seasonal product table");
+    const rows = within(table).getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("In Season Product");
+    expect(screen.getAllByText("Missing supplier").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Out of stock").length).toBeGreaterThan(0);
+    expect(screen.getByText("Review manually")).toBeInTheDocument();
+  });
+
+  it("stock and quick filters narrow seasonal products on the client", async () => {
+    vi.mocked(getSeasonalProducts).mockResolvedValue([
+      mockSeasonalProduct({ name: "Stocked Summer", current_stock: 20 }),
+      mockSeasonalProduct({ name: "Empty Summer", current_stock: 0 }),
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Seasonality" }));
+    await screen.findByText("Stocked Summer");
+    await userEvent.selectOptions(screen.getByLabelText("Stock"), "out_of_stock");
+
+    expect(screen.getByText("Empty Summer")).toBeInTheDocument();
+    expect(screen.queryByText("Stocked Summer")).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(screen.getByLabelText("Quick filter"), "in_season_out_of_stock");
+    expect(screen.getByText("Empty Summer")).toBeInTheDocument();
+  });
+
+  it("product seasonality detail displays monthly values and reconciliation coverage", async () => {
+    vi.mocked(getSeasonalProducts).mockResolvedValue([mockSeasonalProduct()]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Seasonality" }));
+    await screen.findByText("Seasonal Fly Sheet");
+    await userEvent.click(screen.getByRole("button", { name: "Details" }));
+
+    expect(getProductSeasonality).toHaveBeenCalledWith(7832, expect.any(Number));
+    expect(await screen.findByText("June is part of this product's elevated demand period.")).toBeInTheDocument();
+    const monthlyTable = screen.getByLabelText("Monthly seasonality values");
+    expect(within(monthlyTable).getByText("June")).toBeInTheDocument();
+    expect(within(monthlyTable).getByText("44")).toBeInTheDocument();
+    expect(within(monthlyTable).getByText("1.8")).toBeInTheDocument();
+    expect(screen.getByText("0 direct rows, 24 linked rows from 101, 102")).toBeInTheDocument();
+    expect(screen.getByText("barcode_exact")).toBeInTheDocument();
+  });
+
+  it("forecast action opens forecast summary from a seasonal product", async () => {
+    vi.mocked(getSeasonalProducts).mockResolvedValue([mockSeasonalProduct()]);
+    vi.mocked(fetchProductForecast).mockResolvedValue(
+      mockForecast({
+        product_id: 7832,
+        product_name: "Seasonal Fly Sheet",
+        total_open_demand: 64,
+        recommended_action: "reorder",
+        recommended_qty: 64,
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Seasonality" }));
+    await screen.findByText("Seasonal Fly Sheet");
+    await userEvent.click(screen.getByRole("button", { name: "View Forecast" }));
+
+    expect(fetchProductForecast).toHaveBeenCalledWith(7832);
+    const forecastSummary = await screen.findByLabelText("Seasonality forecast summary");
+    expect(within(forecastSummary).getAllByText("64").length).toBeGreaterThanOrEqual(2);
+    expect(within(forecastSummary).getByText("reorder")).toBeInTheDocument();
+    expect(
+      within(forecastSummary).getByText(
+        "Seasonality is currently advisory and does not automatically change the recommended purchase quantity.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("insufficient-data products are clearly labeled", async () => {
+    vi.mocked(getSeasonalProducts).mockResolvedValue([
+      mockSeasonalProduct({
+        name: "Unknown Season Product",
+        seasonality_tag: "insufficient_data",
+        current_seasonality_status: "insufficient_data",
+        confidence_label: "insufficient",
+        selected_month_index: null,
+      }),
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Seasonality" }));
+
+    expect(await screen.findByText("Unknown Season Product")).toBeInTheDocument();
+    expect(screen.getAllByText("Insufficient data").length).toBeGreaterThan(0);
+  });
+
+  it("existing PO workflows remain available and no API keys are requested", async () => {
+    render(<App />);
+
+    expect(screen.getByRole("button", { name: "Products" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Supplier Forecast" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/api key/i)).not.toBeInTheDocument();
   });
 
   it("shows unmapped products with a clear review status", async () => {

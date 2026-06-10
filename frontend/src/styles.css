@@ -10,7 +10,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -195,6 +196,67 @@ button:disabled {
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   padding: 8px 9px;
+}
+
+.detail-panel select,
+.detail-panel input {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 8px 9px;
+}
+
+.muted-text {
+  color: #5b6472;
+  margin: 0;
+}
+
+.summary-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: 14px;
+}
+
+.summary-card {
+  background: #fbfcfe;
+  border: 1px solid #e5e9ef;
+  border-radius: 6px;
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+}
+
+.summary-card dt {
+  color: #5b6472;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.summary-card dd {
+  font-size: 22px;
+  font-weight: 800;
+  margin: 0;
+}
+
+.classification-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.filter-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.filter-grid label,
+.detail-panel label {
+  color: #374151;
+  display: grid;
+  font-size: 13px;
+  gap: 6px;
 }
 
 .mapping-form button {
@@ -406,6 +468,8 @@ button:disabled {
 
   .forecast-form,
   .forecast-grid,
+  .filter-grid,
+  .summary-grid,
   .mapping-form {
     display: grid;
     grid-template-columns: 1fr;

@@ -140,6 +140,109 @@ export interface ForecastResponse {
   recommended_qty: number;
   risk_level: string;
   explanation: string;
+  seasonality_context?: ForecastSeasonalityContext | null;
+}
+
+export type SeasonalityStatus =
+  | "in_season"
+  | "approaching_season"
+  | "off_season"
+  | "year_round"
+  | "insufficient_data"
+  | string;
+
+export type SeasonalityTag =
+  | "winter"
+  | "spring"
+  | "summer"
+  | "autumn"
+  | "multi_peak"
+  | "year_round"
+  | "insufficient_data"
+  | string;
+
+export type SeasonalityConfidence = "high" | "medium" | "low" | "insufficient" | string;
+
+export interface ForecastSeasonalityContext {
+  seasonality_tag: SeasonalityTag | null;
+  current_status: SeasonalityStatus;
+  selected_month_index: number | null;
+  primary_season: string | null;
+  peak_months: number[];
+  confidence_score: number | null;
+  confidence_label: SeasonalityConfidence | null;
+  advisory_message: string;
+}
+
+export interface SeasonalitySummary {
+  classification_counts: Record<string, number>;
+  confidence_counts: Record<string, number>;
+  current_season_counts: Record<string, number>;
+  profile_count: number;
+  product_count: number;
+  missing_profile_count: number;
+  selected_month: number;
+  include_legacy?: boolean;
+}
+
+export interface SeasonalProduct {
+  product_id: number;
+  orderpro_sku: string | null;
+  name: string;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  current_stock: number;
+  seasonality_tag: SeasonalityTag | null;
+  current_seasonality_status: SeasonalityStatus;
+  selected_month: number;
+  selected_month_units: number | null;
+  selected_month_index: number | null;
+  peak_months: number[];
+  primary_season: string | null;
+  seasonality_strength: number | null;
+  confidence_score: number | null;
+  confidence_label: SeasonalityConfidence | null;
+  history_start: string | null;
+  history_end: string | null;
+  years_covered: number | null;
+}
+
+export interface SeasonalityInterpretation {
+  current_status: SeasonalityStatus;
+  selected_month: number;
+  selected_month_units: number | null;
+  selected_month_index: number | null;
+  advisory_message: string;
+}
+
+export interface ProductSeasonalityDetail {
+  product_id: number;
+  orderpro_sku: string | null;
+  name: string;
+  history_start: string | null;
+  history_end: string | null;
+  history_months: number;
+  active_months: number;
+  years_covered: number;
+  total_units: number;
+  average_monthly_units: number;
+  monthly_units: Record<string, number> | null;
+  monthly_indices: Record<string, number> | null;
+  peak_months: number[];
+  low_months: number[];
+  primary_season: string | null;
+  seasonality_tag: SeasonalityTag;
+  seasonality_strength: number;
+  confidence_score: number;
+  confidence_label: SeasonalityConfidence;
+  coefficient_of_variation: number | null;
+  calculation_version: string;
+  calculated_at: string;
+  current_interpretation: SeasonalityInterpretation;
+  direct_history_row_count: number;
+  linked_history_row_count: number;
+  contributing_historical_product_ids: number[];
+  reconciliation_methods: string[];
 }
 
 export type PurchaseOrderStatus =

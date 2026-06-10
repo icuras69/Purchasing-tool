@@ -11,9 +11,12 @@ import type {
   PurchaseOrder,
   PurchaseRecommendation,
   RecommendationLLMExplanation,
+  ProductSeasonalityDetail,
   RecommendationAcceptRequest,
   RecommendationConvertResponse,
   RecommendationRejectRequest,
+  SeasonalProduct,
+  SeasonalitySummary,
   SupplierForecastDraftRequest,
   SupplierForecastResponse,
   UpdatePurchaseOrderLineRequest,
@@ -94,6 +97,45 @@ export function fetchProductSuppliers(): Promise<ProductSupplierMapping[]> {
 
 export function fetchProductForecast(productId: number): Promise<ForecastResponse> {
   return fetchJson<ForecastResponse>(`/products/${productId}/forecast`, "product forecast");
+}
+
+export function getSeasonalitySummary(month?: number): Promise<SeasonalitySummary> {
+  const query = month ? `?month=${month}` : "";
+  return fetchJson<SeasonalitySummary>(`/seasonality/summary${query}`, "seasonality summary");
+}
+
+export interface SeasonalProductsQuery {
+  month?: number;
+  status?: string;
+  seasonality_tag?: string;
+  supplier_id?: number;
+  min_confidence?: string;
+  active_only?: boolean;
+  sort_by?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export function getSeasonalProducts(query: SeasonalProductsQuery = {}): Promise<SeasonalProduct[]> {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "" && value !== "all") {
+      params.set(key, String(value));
+    }
+  });
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return fetchJson<SeasonalProduct[]>(`/products/seasonal${suffix}`, "seasonal products");
+}
+
+export function getProductSeasonality(
+  productId: number,
+  month?: number,
+): Promise<ProductSeasonalityDetail> {
+  const query = month ? `?month=${month}` : "";
+  return fetchJson<ProductSeasonalityDetail>(
+    `/products/${productId}/seasonality${query}`,
+    "product seasonality",
+  );
 }
 
 export function createProductSupplier(
