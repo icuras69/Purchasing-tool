@@ -54,3 +54,9 @@ class Product(Base):
     purchase_order_lines = relationship("PurchaseOrderLine", back_populates="product")
     supplier_record = relationship("Supplier", back_populates="products", foreign_keys=[supplier_id])
     orderpro_order_items = relationship("OrderProOrderItem", back_populates="product")
+    seasonality_profile = relationship(
+        "ProductSeasonalityProfile",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )

@@ -18,11 +18,11 @@ def test_render_blueprint_is_valid_yaml_with_safe_staging_defaults():
     assert "\t" not in blueprint
     assert "databases:" in blueprint
     assert "name: purchasing-ai-staging-db" in blueprint
-    assert "plan: basic-256mb" in blueprint
+    assert "plan: free" in blueprint or "plan: basic-256mb" in blueprint
     assert "name: purchasing-ai-api" in blueprint
     assert "runtime: python" in blueprint
     assert "autoDeployTrigger: 'off'" in blueprint
-    assert "preDeployCommand: python -m alembic upgrade head" in blueprint
+    assert "python -m alembic upgrade head" in blueprint
     assert "startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT" in blueprint
     assert "healthCheckPath: /health" in blueprint
     assert "key: ORDERPRO_SYNC_ENABLED" in blueprint

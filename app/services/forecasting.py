@@ -10,6 +10,7 @@ from app.services.orderpro_demand import (
     empty_demand_result,
     product_has_orderpro_history,
 )
+from app.services.seasonality import seasonality_context_for_product
 
 
 def calculate_reorder_point(avg_daily_usage: float, lead_time_days: int, safety_stock: float) -> float:
@@ -248,6 +249,7 @@ def build_forecast(db: Session, product: Product) -> dict:
                 "has_supplier_mapping": False,
                 "needs_supplier_mapping": False,
             },
+            "seasonality_context": None,
             "reorder_point": 0.0,
             "recommended_action": "ignore",
             "recommended_qty": 0.0,
@@ -259,6 +261,7 @@ def build_forecast(db: Session, product: Product) -> dict:
     avg_daily_usage = demand_ctx.avg_daily_usage
     supplier_ctx = resolve_supplier_context(product)
     inventory_ctx = resolve_inventory_context(product)
+    seasonality_context = seasonality_context_for_product(db, product.id)
 
     current_stock = inventory_ctx["current_stock"]
     effective_available_stock = round(max(current_stock - demand_ctx.total_open_demand, 0), 2)
@@ -357,6 +360,7 @@ def build_forecast(db: Session, product: Product) -> dict:
         "lead_time_days_used": lead_time_days_used,
         "lead_time_source": supplier_ctx["lead_time_source"],
         "supplier_context": build_supplier_context_response(supplier_ctx),
+        "seasonality_context": seasonality_context,
         "reorder_point": reorder_point,
         "recommended_action": recommended_action,
         "recommended_qty": recommended_qty,

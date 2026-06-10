@@ -2,6 +2,8 @@ from datetime import date
 
 from pydantic import BaseModel
 
+from app.schemas.seasonality import ForecastSeasonalityContext
+
 
 class ForecastSupplierContext(BaseModel):
     supplier_id: int | None
@@ -56,6 +58,7 @@ class ForecastResponse(BaseModel):
     lead_time_days_used: int
     lead_time_source: str
     supplier_context: ForecastSupplierContext | None = None
+    seasonality_context: ForecastSeasonalityContext | None = None
 
     reorder_point: float
     recommended_action: str

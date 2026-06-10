@@ -11,6 +11,7 @@ from app.models.supplier_alias import SupplierAlias
 from app.models.product_master_item import ProductMasterItem
 from app.models.product_supplier import ProductSupplier
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
+from app.models.product_seasonality_profile import ProductSeasonalityProfile
 
 __all__ = [
     "Product",
@@ -28,4 +29,5 @@ __all__ = [
     "ProductSupplier",
     "OrderProOrder",
     "OrderProOrderItem",
+    "ProductSeasonalityProfile",
 ]

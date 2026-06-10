@@ -6,4 +6,4 @@ def test_alembic_config_loads_current_head():
     config = Config("alembic.ini")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_current_head() == "b3c4d5e6f7a8"
+    assert script.get_current_head() == "e5f6a7b8c9d0"
