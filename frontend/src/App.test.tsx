@@ -214,6 +214,9 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
     incoming_stock_context: {
       product_id: 1,
       incoming_qty: 0,
+      incoming_qty_local: 0,
+      incoming_qty_orderpro: 0,
+      incoming_qty_total: 0,
       incoming_qty_by_source: {},
       source_breakdown: {},
       open_po_count: 0,
@@ -964,10 +967,16 @@ describe("App mapping review workflow", () => {
         incoming_stock_context: {
           product_id: 1,
           incoming_qty: 20,
-          incoming_qty_by_source: { local_purchase_orders: 20 },
-          source_breakdown: { local_purchase_orders: { incoming_qty: 20, open_po_line_count: 1 } },
-          open_po_count: 1,
-          open_po_line_count: 1,
+          incoming_qty_local: 5,
+          incoming_qty_orderpro: 15,
+          incoming_qty_total: 20,
+          incoming_qty_by_source: { local_purchase_orders: 5, orderpro_purchase_orders: 15 },
+          source_breakdown: {
+            local_purchase_orders: { incoming_qty: 5, open_po_line_count: 1 },
+            orderpro_purchase_orders: { incoming_qty: 15, open_po_line_count: 1 },
+          },
+          open_po_count: 2,
+          open_po_line_count: 2,
           earliest_expected_date: null,
           latest_expected_date: null,
           supplier_ids: [10],
@@ -982,6 +991,9 @@ describe("App mapping review workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Fetch Forecast" }));
 
     expect(await screen.findByText("Incoming Stock")).toBeInTheDocument();
+    expect(screen.getByText("Total incoming")).toBeInTheDocument();
+    expect(screen.getByText("Local incoming")).toBeInTheDocument();
+    expect(screen.getByText("OrderPro incoming")).toBeInTheDocument();
     expect(screen.getByText("Recommended before inbound")).toBeInTheDocument();
     expect(screen.getByText("Inbound adjustment")).toBeInTheDocument();
     expect(screen.getByText("Line-level received/cancelled quantities are unavailable; full open line quantity is counted.")).toBeInTheDocument();

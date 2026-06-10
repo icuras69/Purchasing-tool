@@ -11,6 +11,7 @@ from app.models.supplier_alias import SupplierAlias
 from app.models.product_master_item import ProductMasterItem
 from app.models.product_supplier import ProductSupplier
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
+from app.models.orderpro_purchase_order import OrderProPurchaseOrder, OrderProPurchaseOrderLine
 from app.models.product_seasonality_profile import ProductSeasonalityProfile
 from app.models.product_historical_link import ProductHistoricalLink
 from app.models.product_seasonality_backtest import ProductSeasonalityBacktest
@@ -31,6 +32,8 @@ __all__ = [
     "ProductSupplier",
     "OrderProOrder",
     "OrderProOrderItem",
+    "OrderProPurchaseOrder",
+    "OrderProPurchaseOrderLine",
     "ProductSeasonalityProfile",
     "ProductHistoricalLink",
     "ProductSeasonalityBacktest",

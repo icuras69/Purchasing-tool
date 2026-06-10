@@ -107,6 +107,9 @@ export interface ForecastSupplierContext {
 export interface IncomingStockContext {
   product_id: number;
   incoming_qty: number;
+  incoming_qty_local?: number;
+  incoming_qty_orderpro?: number;
+  incoming_qty_total?: number;
   incoming_qty_by_source: Record<string, number>;
   source_breakdown: Record<string, { incoming_qty?: number; open_po_line_count?: number }>;
   open_po_count: number;

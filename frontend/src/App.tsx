@@ -1562,13 +1562,27 @@ function IncomingStockDetails({ context }: { context: ForecastResponse["incoming
     );
   }
 
+  const localIncoming =
+    context.incoming_qty_local ?? context.source_breakdown.local_purchase_orders?.incoming_qty ?? 0;
+  const orderproIncoming =
+    context.incoming_qty_orderpro ?? context.source_breakdown.orderpro_purchase_orders?.incoming_qty ?? 0;
+  const totalIncoming = context.incoming_qty_total ?? context.incoming_qty;
+
   return (
     <section className="detail-panel" aria-label="Incoming stock">
       <h2>Incoming Stock</h2>
       <dl className="detail-list">
         <div>
-          <dt>Incoming stock</dt>
-          <dd>{formatValue(context.incoming_qty)}</dd>
+          <dt>Total incoming</dt>
+          <dd>{formatValue(totalIncoming)}</dd>
+        </div>
+        <div>
+          <dt>Local incoming</dt>
+          <dd>{formatValue(localIncoming)}</dd>
+        </div>
+        <div>
+          <dt>OrderPro incoming</dt>
+          <dd>{formatValue(orderproIncoming)}</dd>
         </div>
         <div>
           <dt>Open supplier POs</dt>

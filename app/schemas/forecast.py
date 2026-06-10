@@ -27,6 +27,9 @@ class ForecastSupplierContext(BaseModel):
 class IncomingStockContext(BaseModel):
     product_id: int
     incoming_qty: float
+    incoming_qty_local: float = 0.0
+    incoming_qty_orderpro: float = 0.0
+    incoming_qty_total: float = 0.0
     incoming_qty_by_source: dict[str, float]
     source_breakdown: dict
     open_po_count: int
