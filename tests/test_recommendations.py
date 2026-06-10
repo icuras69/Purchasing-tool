@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
-from app.models.purchase_order import PurchaseOrder
+from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.recommendation import Recommendation
 from app.models.supplier import Supplier
 from app.models.usage_history import UsageHistory
@@ -171,6 +171,54 @@ def test_recommendation_uses_open_demand_shortage_quantity(client, db_session):
     assert payload["forecast_snapshot"]["recommended_action"] == "reorder"
     assert payload["forecast_snapshot"]["risk_level"] == "high"
     assert payload["forecast_snapshot"]["net_available_stock"] == -64
+
+
+def test_recommendation_snapshot_includes_inbound_adjustment_fields(client, db_session):
+    product, supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    order = OrderProOrder(
+        orderpro_id="rec-inbound-open-demand",
+        order_number="SO-REC-INBOUND",
+        status="confirmed",
+        order_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(order)
+    db_session.flush()
+    db_session.add(
+        OrderProOrderItem(
+            order=order,
+            product=product,
+            orderpro_line_key="rec-inbound-open-demand:1",
+            orderpro_product_id=product.orderpro_id,
+            sku=product.orderpro_sku,
+            quantity=0,
+            quantity_ordered=64,
+            quantity_shipped=0,
+        )
+    )
+    po = PurchaseOrder(supplier=supplier, status="approved", created_by="test")
+    db_session.add(po)
+    db_session.flush()
+    db_session.add(
+        PurchaseOrderLine(
+            purchase_order=po,
+            product=product,
+            quantity=20,
+            unit_cost=product.cost_price,
+        )
+    )
+    db_session.commit()
+
+    payload = create_recommendation(client, product.id)
+
+    assert payload["recommended_quantity"] == 44
+    assert payload["forecast_snapshot"]["incoming_qty"] == 20
+    assert payload["forecast_snapshot"]["recommended_qty_before_inbound"] == 64
+    assert payload["forecast_snapshot"]["recommended_qty_after_inbound"] == 44
+    assert payload["input_snapshot"]["inbound_stock"]["incoming_qty"] == 20
+    assert payload["input_snapshot"]["inbound_stock"]["inbound_adjustment_qty"] == 20
 
 
 def test_product_supplier_is_not_selected_over_orderpro_product_supplier(client, db_session):

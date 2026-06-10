@@ -1512,12 +1512,28 @@ function ForecastDetails({ forecast }: { forecast: ForecastResponse }) {
             <dd>{formatValue(forecast.reorder_point)}</dd>
           </div>
           <div>
+            <dt>Incoming stock</dt>
+            <dd>{formatValue(forecast.incoming_qty)}</dd>
+          </div>
+          <div>
+            <dt>Available for reorder</dt>
+            <dd>{formatValue(forecast.effective_available_stock_for_reorder)}</dd>
+          </div>
+          <div>
+            <dt>Recommended before inbound</dt>
+            <dd>{formatValue(forecast.recommended_qty_before_inbound)}</dd>
+          </div>
+          <div>
             <dt>Recommended action</dt>
             <dd>{formatValue(forecast.recommended_action)}</dd>
           </div>
           <div>
             <dt>Recommended quantity</dt>
             <dd>{formatValue(forecast.recommended_qty)}</dd>
+          </div>
+          <div>
+            <dt>Inbound adjustment</dt>
+            <dd>{formatValue(forecast.inbound_adjustment_qty)}</dd>
           </div>
           <div>
             <dt>Risk level</dt>
@@ -1531,7 +1547,54 @@ function ForecastDetails({ forecast }: { forecast: ForecastResponse }) {
       </section>
 
       <SupplierContextDetails context={forecast.supplier_context ?? null} />
+      <IncomingStockDetails context={forecast.incoming_stock_context ?? null} />
     </div>
+  );
+}
+
+function IncomingStockDetails({ context }: { context: ForecastResponse["incoming_stock_context"] | null }) {
+  if (!context) {
+    return (
+      <section className="detail-panel" aria-label="Incoming stock">
+        <h2>Incoming Stock</h2>
+        <div className="state">No incoming stock context returned.</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="detail-panel" aria-label="Incoming stock">
+      <h2>Incoming Stock</h2>
+      <dl className="detail-list">
+        <div>
+          <dt>Incoming stock</dt>
+          <dd>{formatValue(context.incoming_qty)}</dd>
+        </div>
+        <div>
+          <dt>Open supplier POs</dt>
+          <dd>{formatValue(context.open_po_count)}</dd>
+        </div>
+        <div>
+          <dt>Open PO lines</dt>
+          <dd>{formatValue(context.open_po_line_count)}</dd>
+        </div>
+        <div>
+          <dt>Earliest expected</dt>
+          <dd>{formatDate(context.earliest_expected_date)}</dd>
+        </div>
+        <div>
+          <dt>Latest expected</dt>
+          <dd>{formatDate(context.latest_expected_date)}</dd>
+        </div>
+      </dl>
+      {context.warnings.length > 0 && (
+        <ul className="warning-list">
+          {context.warnings.map((warning) => (
+            <li key={warning}>{warning}</li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -2077,6 +2140,18 @@ function RecommendationDetail({
             <dd>{snapshotValue(forecastSnapshot, "reorder_point")}</dd>
           </div>
           <div>
+            <dt>Incoming stock</dt>
+            <dd>{snapshotValue(forecastSnapshot, "incoming_qty")}</dd>
+          </div>
+          <div>
+            <dt>Recommended before inbound</dt>
+            <dd>{snapshotValue(forecastSnapshot, "recommended_qty_before_inbound")}</dd>
+          </div>
+          <div>
+            <dt>Recommended after inbound</dt>
+            <dd>{snapshotValue(forecastSnapshot, "recommended_qty_after_inbound")}</dd>
+          </div>
+          <div>
             <dt>Explanation</dt>
             <dd>{snapshotValue(forecastSnapshot, "explanation")}</dd>
           </div>
@@ -2314,8 +2389,10 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
                   <th>Open packed</th>
                   <th>Open backorder</th>
                   <th>Total open</th>
+                  <th>Incoming</th>
                   <th>Lead time</th>
                   <th>Reorder point</th>
+                  <th>Before inbound</th>
                   <th>Recommended qty</th>
                   <th>Action</th>
                   <th>Risk level</th>
@@ -2337,10 +2414,12 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
                     <td>{formatValue(row.open_packed_units)}</td>
                     <td>{formatValue(row.open_backorder_units)}</td>
                     <td>{formatValue(row.total_open_demand)}</td>
+                    <td>{formatValue(row.incoming_qty)}</td>
                     <td>
                       {formatValue(row.lead_time_days_used)} ({formatValue(row.lead_time_source)})
                     </td>
                     <td>{formatValue(row.reorder_point)}</td>
+                    <td>{formatValue(row.recommended_qty_before_inbound)}</td>
                     <td>{formatValue(row.recommended_qty)}</td>
                     <td>{row.recommended_action}</td>
                     <td>

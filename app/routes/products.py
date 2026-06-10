@@ -9,6 +9,7 @@ from app.schemas.product import ProductCreate, ProductResponse
 from app.schemas.product_supplier import ProductSupplierMappingResponse, WeakMappingResponse
 from app.schemas.forecast import ForecastResponse
 from app.services.forecasting import build_forecast
+from app.services.inbound_stock import get_product_inbound_stock as get_product_inbound_stock_context
 from app.routes.product_suppliers import serialize_product_supplier
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -193,6 +194,14 @@ def list_product_supplier_mappings(product_id: int, db: Session = Depends(get_db
         .all()
     )
     return [serialize_product_supplier(mapping) for mapping in mappings]
+
+
+@router.get("/{product_id}/inbound-stock")
+def get_product_inbound_stock(product_id: int, db: Session = Depends(get_db)):
+    product = db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found.")
+    return get_product_inbound_stock_context(db, product_id)
 
 
 @router.get("/{product_id}", response_model=ProductResponse)

@@ -10,6 +10,7 @@ from app.services.orderpro_demand import (
     empty_demand_result,
     product_has_orderpro_history,
 )
+from app.services.inbound_stock import get_product_inbound_stock
 from app.services.seasonality import seasonality_context_for_product
 
 
@@ -223,6 +224,11 @@ def build_forecast(db: Session, product: Product) -> dict:
             "net_available_stock": 0.0,
             "projected_lead_time_demand": 0.0,
             "total_required_stock": 0.0,
+            "incoming_qty": 0.0,
+            "effective_available_stock_for_reorder": 0.0,
+            "recommended_qty_before_inbound": 0.0,
+            "recommended_qty_after_inbound": 0.0,
+            "inbound_adjustment_qty": 0.0,
             "units_sold_in_window": 0.0,
             "eligible_order_count": 0,
             "excluded_order_count": 0,
@@ -250,6 +256,7 @@ def build_forecast(db: Session, product: Product) -> dict:
                 "needs_supplier_mapping": False,
             },
             "seasonality_context": None,
+            "incoming_stock_context": None,
             "reorder_point": 0.0,
             "recommended_action": "ignore",
             "recommended_qty": 0.0,
@@ -262,10 +269,13 @@ def build_forecast(db: Session, product: Product) -> dict:
     supplier_ctx = resolve_supplier_context(product)
     inventory_ctx = resolve_inventory_context(product)
     seasonality_context = seasonality_context_for_product(db, product.id)
+    incoming_stock_context = get_product_inbound_stock(db, product.id)
 
     current_stock = inventory_ctx["current_stock"]
+    incoming_qty = round(float(incoming_stock_context.get("incoming_qty") or 0), 2)
     effective_available_stock = round(max(current_stock - demand_ctx.total_open_demand, 0), 2)
     net_available_stock = round(current_stock - demand_ctx.total_open_demand, 2)
+    effective_available_stock_for_reorder = round(current_stock + incoming_qty - demand_ctx.total_open_demand, 2)
     lead_time_days_used = supplier_ctx["lead_time_days_used"]
     minimum_order_quantity_used = supplier_ctx["minimum_order_quantity_used"]
 
@@ -275,8 +285,13 @@ def build_forecast(db: Session, product: Product) -> dict:
         2,
     )
     total_required_stock = round(projected_lead_time_demand + demand_ctx.total_open_demand + float(product.safety_stock or 0), 2)
-    raw_recommended_qty = max(total_required_stock - current_stock, 0)
-    has_open_demand_shortage = demand_ctx.total_open_demand > current_stock
+    raw_recommended_qty_before_inbound = max(total_required_stock - current_stock, 0)
+    raw_recommended_qty = max(total_required_stock - current_stock - incoming_qty, 0)
+    recommended_qty_before_inbound = round_order_quantity(
+        max(raw_recommended_qty_before_inbound, minimum_order_quantity_used if raw_recommended_qty_before_inbound > 0 else 0),
+        product,
+    )
+    has_open_demand_shortage = demand_ctx.total_open_demand > (current_stock + incoming_qty)
 
     if avg_daily_usage > 0:
         days_until_stockout = round(effective_available_stock / avg_daily_usage, 2)
@@ -290,7 +305,7 @@ def build_forecast(db: Session, product: Product) -> dict:
         explanation_parts = []
         if has_open_demand_shortage:
             explanation_parts.append(
-                f"Open committed demand is {demand_ctx.total_open_demand} units, which exceeds current stock of {current_stock}."
+                f"Open committed demand is {demand_ctx.total_open_demand} units, which exceeds current stock plus incoming stock of {current_stock + incoming_qty}."
             )
         if avg_daily_usage > 0:
             explanation_parts.append(
@@ -299,6 +314,15 @@ def build_forecast(db: Session, product: Product) -> dict:
         if not explanation_parts:
             explanation_parts.append("Current stock is below required stock for open demand and safety stock.")
         explanation = " ".join(explanation_parts)
+
+    elif incoming_qty > 0 and raw_recommended_qty_before_inbound > 0:
+        recommended_action = "monitor"
+        recommended_qty = 0.0
+        risk_level = "medium" if demand_ctx.total_open_demand > 0 else "low"
+        explanation = (
+            f"Incoming purchase orders cover the current shortfall. Recommended quantity before inbound stock was "
+            f"{recommended_qty_before_inbound}, and incoming stock is {incoming_qty} units."
+        )
 
     elif avg_daily_usage == 0:
         recommended_action = "monitor"
@@ -328,6 +352,8 @@ def build_forecast(db: Session, product: Product) -> dict:
         explanation = "Current stock is sufficient based on recent average daily usage."
 
     recommended_qty = round_order_quantity(recommended_qty, product)
+    recommended_qty_after_inbound = recommended_qty
+    inbound_adjustment_qty = round(max(recommended_qty_before_inbound - recommended_qty_after_inbound, 0), 2)
 
     return {
         "product_id": product.id,
@@ -351,6 +377,11 @@ def build_forecast(db: Session, product: Product) -> dict:
         "net_available_stock": net_available_stock,
         "projected_lead_time_demand": projected_lead_time_demand,
         "total_required_stock": total_required_stock,
+        "incoming_qty": incoming_qty,
+        "effective_available_stock_for_reorder": effective_available_stock_for_reorder,
+        "recommended_qty_before_inbound": recommended_qty_before_inbound,
+        "recommended_qty_after_inbound": recommended_qty_after_inbound,
+        "inbound_adjustment_qty": inbound_adjustment_qty,
         "units_sold_in_window": demand_ctx.units_sold_in_window,
         "eligible_order_count": demand_ctx.eligible_order_count,
         "excluded_order_count": demand_ctx.excluded_order_count,
@@ -361,6 +392,7 @@ def build_forecast(db: Session, product: Product) -> dict:
         "lead_time_source": supplier_ctx["lead_time_source"],
         "supplier_context": build_supplier_context_response(supplier_ctx),
         "seasonality_context": seasonality_context,
+        "incoming_stock_context": incoming_stock_context,
         "reorder_point": reorder_point,
         "recommended_action": recommended_action,
         "recommended_qty": recommended_qty,

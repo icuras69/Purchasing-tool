@@ -104,6 +104,19 @@ export interface ForecastSupplierContext {
   needs_supplier_mapping: boolean;
 }
 
+export interface IncomingStockContext {
+  product_id: number;
+  incoming_qty: number;
+  incoming_qty_by_source: Record<string, number>;
+  source_breakdown: Record<string, { incoming_qty?: number; open_po_line_count?: number }>;
+  open_po_count: number;
+  open_po_line_count: number;
+  earliest_expected_date: string | null;
+  latest_expected_date: string | null;
+  supplier_ids: number[];
+  warnings: string[];
+}
+
 export interface ForecastResponse {
   product_id: number;
   product_name: string;
@@ -126,6 +139,11 @@ export interface ForecastResponse {
   net_available_stock?: number | null;
   projected_lead_time_demand?: number | null;
   total_required_stock?: number | null;
+  incoming_qty?: number | null;
+  effective_available_stock_for_reorder?: number | null;
+  recommended_qty_before_inbound?: number | null;
+  recommended_qty_after_inbound?: number | null;
+  inbound_adjustment_qty?: number | null;
   units_sold_in_window?: number | null;
   eligible_order_count?: number | null;
   excluded_order_count?: number | null;
@@ -135,6 +153,7 @@ export interface ForecastResponse {
   lead_time_days_used: number;
   lead_time_source: string;
   supplier_context?: ForecastSupplierContext | null;
+  incoming_stock_context?: IncomingStockContext | null;
   reorder_point: number;
   recommended_action: string;
   recommended_qty: number;

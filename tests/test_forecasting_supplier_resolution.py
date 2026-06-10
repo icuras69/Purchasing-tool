@@ -4,10 +4,13 @@ from app.models.inventory_position import InventoryPosition
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
+from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.supplier import Supplier
 from app.models.usage_history import UsageHistory
 from app.models.warehouse import Warehouse
 from app.services.forecasting import build_forecast, resolve_supplier_context
+from app.services.inbound_stock import get_product_inbound_stock, inbound_stock_summary
+from app.services.purchase_order_drafting import create_draft_po_from_supplier_forecast, DraftPurchaseOrderError
 
 
 def supplier(name: str, lead_time_days: int | None = None, **overrides) -> Supplier:
@@ -77,6 +80,36 @@ def add_orderpro_order_item(
             quantity_shipped=quantity_shipped,
         )
     )
+
+
+def add_purchase_order_line(
+    db_session,
+    product_obj: Product,
+    supplier_obj: Supplier,
+    *,
+    status: str = "approved",
+    quantity: float = 0,
+    delivery_date: date | None = None,
+) -> PurchaseOrder:
+    po = PurchaseOrder(
+        supplier=supplier_obj,
+        status=status,
+        delivery_date=delivery_date,
+        created_by="test",
+    )
+    db_session.add(po)
+    db_session.flush()
+    db_session.add(
+        PurchaseOrderLine(
+            purchase_order=po,
+            product=product_obj,
+            quantity=quantity,
+            unit_cost=product_obj.cost_price,
+            line_total=quantity * product_obj.cost_price if product_obj.cost_price is not None else None,
+        )
+    )
+    db_session.flush()
+    return po
 
 
 def test_orderpro_product_supplier_is_used(db_session):
@@ -657,3 +690,114 @@ def test_product_current_stock_cache_is_used_even_when_inventory_positions_exist
 
     assert forecast["current_stock"] == 13
     assert forecast["inventory_source"] == "orderpro_current_stock_cache"
+def seed_inbound_forecast_product(db_session, *, current_stock: float = 0) -> tuple[Product, Supplier]:
+    supplier_obj = supplier("Inbound Supplier", lead_time_days=0, orderpro_code="INBOUND")
+    product_obj = product(
+        "Inbound Product",
+        source_system="orderpro",
+        orderpro_id="9001",
+        orderpro_sku="INBOUND-1",
+        supplier_record=supplier_obj,
+        supplier_sku="SUP-IN",
+        current_stock=current_stock,
+        min_order_qty=1,
+        cost_price=2,
+    )
+    db_session.add_all([supplier_obj, product_obj])
+    db_session.flush()
+    add_orderpro_order_item(
+        db_session,
+        product_obj,
+        orderpro_order_id="OPEN-INBOUND",
+        quantity=0,
+        quantity_ordered=64,
+        quantity_shipped=0,
+        status="confirmed",
+    )
+    db_session.commit()
+    return product_obj, supplier_obj
+
+
+def test_product_with_no_inbound_stock_keeps_previous_recommended_quantity(db_session):
+    product_obj, _supplier = seed_inbound_forecast_product(db_session)
+
+    forecast = build_forecast(db_session, product_obj)
+
+    assert forecast["incoming_qty"] == 0
+    assert forecast["recommended_qty_before_inbound"] == 64
+    assert forecast["recommended_qty_after_inbound"] == 64
+    assert forecast["recommended_qty"] == 64
+
+
+def test_product_with_inbound_stock_reduces_recommended_quantity(db_session):
+    product_obj, supplier_obj = seed_inbound_forecast_product(db_session)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="approved", quantity=20)
+
+    forecast = build_forecast(db_session, product_obj)
+
+    assert forecast["incoming_qty"] == 20
+    assert forecast["recommended_qty_before_inbound"] == 64
+    assert forecast["recommended_qty_after_inbound"] == 44
+    assert forecast["recommended_qty"] == 44
+    assert forecast["inbound_adjustment_qty"] == 20
+    assert forecast["incoming_stock_context"]["open_po_count"] == 1
+
+
+def test_inbound_stock_fully_covering_shortfall_returns_monitor(db_session):
+    product_obj, supplier_obj = seed_inbound_forecast_product(db_session)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="issued", quantity=100)
+
+    forecast = build_forecast(db_session, product_obj)
+
+    assert forecast["incoming_qty"] == 100
+    assert forecast["recommended_qty_before_inbound"] == 64
+    assert forecast["recommended_qty_after_inbound"] == 0
+    assert forecast["recommended_qty"] == 0
+    assert forecast["recommended_action"] == "monitor"
+    assert "Incoming purchase orders cover" in forecast["explanation"]
+
+
+def test_draft_cancelled_and_received_purchase_orders_are_excluded_from_inbound(db_session):
+    product_obj, supplier_obj = seed_inbound_forecast_product(db_session)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="draft", quantity=20)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="pending_approval", quantity=20)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="cancelled", quantity=20)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="received", quantity=20)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="approved", quantity=5)
+
+    inbound = get_product_inbound_stock(db_session, product_obj.id)
+    forecast = build_forecast(db_session, product_obj)
+
+    assert inbound["incoming_qty"] == 5
+    assert forecast["recommended_qty"] == 59
+
+
+def test_inbound_stock_endpoint_and_summary_return_source_breakdown(client, db_session):
+    product_obj, supplier_obj = seed_inbound_forecast_product(db_session)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="approved", quantity=12)
+    db_session.commit()
+
+    detail = client.get(f"/products/{product_obj.id}/inbound-stock")
+    summary = client.get("/inbound-stock/summary")
+
+    assert detail.status_code == 200
+    assert detail.json()["incoming_qty"] == 12
+    assert detail.json()["source_breakdown"]["local_purchase_orders"]["incoming_qty"] == 12
+    assert summary.status_code == 200
+    assert summary.json()["products_with_inbound_stock"] == 1
+    assert summary.json()["total_inbound_units"] == 12
+
+
+def test_supplier_forecast_and_draft_po_use_after_inbound_quantity(db_session):
+    product_obj, supplier_obj = seed_inbound_forecast_product(db_session)
+    add_purchase_order_line(db_session, product_obj, supplier_obj, status="approved", quantity=64)
+
+    forecast = build_forecast(db_session, product_obj)
+    assert forecast["recommended_qty"] == 0
+
+    try:
+        create_draft_po_from_supplier_forecast(db_session, supplier_id=supplier_obj.id, only_reorder_needed=True)
+    except DraftPurchaseOrderError as error:
+        assert error.message == "No products need reorder for this supplier."
+    else:
+        raise AssertionError("Supplier forecast should not draft PO lines fully covered by inbound stock.")

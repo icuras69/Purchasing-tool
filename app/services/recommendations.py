@@ -83,7 +83,7 @@ def create_reorder_recommendation_for_product(
         currency=None,
         reason=recommendation_reason(forecast, needs_mapping),
         confidence=None,
-        input_snapshot=input_snapshot(product, supplier_context),
+        input_snapshot=input_snapshot(product, supplier_context, forecast),
         forecast_snapshot=json_safe_snapshot(forecast),
         supplier_context_snapshot=json_safe_snapshot(supplier_context),
         model_name=None,
@@ -98,6 +98,8 @@ def create_reorder_recommendation_for_product(
 
 def recommended_quantity(forecast: dict[str, Any], product: Product) -> float:
     quantity = float(forecast.get("recommended_qty") or 0)
+    if quantity <= 0 and forecast.get("incoming_qty", 0) > 0:
+        return 0.0
     if quantity <= 0:
         quantity = float(product.min_order_qty or 1)
 
@@ -115,7 +117,8 @@ def recommendation_reason(forecast: dict[str, Any], needs_mapping: bool) -> str 
     return explanation
 
 
-def input_snapshot(product: Product, supplier_context: dict[str, Any]) -> dict[str, Any]:
+def input_snapshot(product: Product, supplier_context: dict[str, Any], forecast: dict[str, Any] | None = None) -> dict[str, Any]:
+    forecast = forecast or {}
     return {
         "product": {
             "id": product.id,
@@ -139,6 +142,13 @@ def input_snapshot(product: Product, supplier_context: dict[str, Any]) -> dict[s
             "mapping_source": supplier_context.get("mapping_source"),
             "has_supplier_mapping": supplier_context.get("has_supplier_mapping"),
             "needs_supplier_mapping": supplier_context.get("needs_supplier_mapping"),
+        },
+        "inbound_stock": {
+            "incoming_qty": forecast.get("incoming_qty", 0),
+            "open_po_count": (forecast.get("incoming_stock_context") or {}).get("open_po_count", 0),
+            "recommended_qty_before_inbound": forecast.get("recommended_qty_before_inbound"),
+            "recommended_qty_after_inbound": forecast.get("recommended_qty_after_inbound"),
+            "inbound_adjustment_qty": forecast.get("inbound_adjustment_qty"),
         },
     }
 

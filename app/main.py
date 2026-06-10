@@ -7,6 +7,7 @@ from app.db.session import engine
 from app.routes.health import router as health_router
 from app.routes.products import router as products_router
 from app.routes.inventory import router as inventory_router
+from app.routes.inbound_stock import router as inbound_stock_router
 from app.routes.product_suppliers import router as product_suppliers_router
 from app.routes.purchase_orders import router as purchase_orders_router
 from app.routes.recommendations import router as recommendations_router
@@ -35,6 +36,7 @@ app.include_router(seasonality_router)
 app.include_router(forecast_readiness_router)
 app.include_router(products_router)
 app.include_router(inventory_router)
+app.include_router(inbound_stock_router)
 app.include_router(product_suppliers_router)
 app.include_router(purchase_orders_router)
 app.include_router(recommendations_router)

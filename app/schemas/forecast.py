@@ -24,6 +24,19 @@ class ForecastSupplierContext(BaseModel):
     needs_supplier_mapping: bool
 
 
+class IncomingStockContext(BaseModel):
+    product_id: int
+    incoming_qty: float
+    incoming_qty_by_source: dict[str, float]
+    source_breakdown: dict
+    open_po_count: int
+    open_po_line_count: int
+    earliest_expected_date: date | None
+    latest_expected_date: date | None
+    supplier_ids: list[int]
+    warnings: list[str]
+
+
 class ForecastResponse(BaseModel):
     product_id: int
     product_name: str
@@ -48,6 +61,11 @@ class ForecastResponse(BaseModel):
     net_available_stock: float | None = None
     projected_lead_time_demand: float | None = None
     total_required_stock: float | None = None
+    incoming_qty: float | None = None
+    effective_available_stock_for_reorder: float | None = None
+    recommended_qty_before_inbound: float | None = None
+    recommended_qty_after_inbound: float | None = None
+    inbound_adjustment_qty: float | None = None
     units_sold_in_window: float | None = None
     eligible_order_count: int | None = None
     excluded_order_count: int | None = None
@@ -59,6 +77,7 @@ class ForecastResponse(BaseModel):
     lead_time_source: str
     supplier_context: ForecastSupplierContext | None = None
     seasonality_context: ForecastSeasonalityContext | None = None
+    incoming_stock_context: IncomingStockContext | None = None
 
     reorder_point: float
     recommended_action: str

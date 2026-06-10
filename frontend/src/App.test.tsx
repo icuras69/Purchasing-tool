@@ -180,6 +180,11 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
     net_available_stock: 12,
     projected_lead_time_demand: 6,
     total_required_stock: 6,
+    incoming_qty: 0,
+    effective_available_stock_for_reorder: 12,
+    recommended_qty_before_inbound: 0,
+    recommended_qty_after_inbound: 0,
+    inbound_adjustment_qty: 0,
     units_sold_in_window: 10,
     eligible_order_count: 2,
     excluded_order_count: 0,
@@ -205,6 +210,18 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
       mapping_source: "orderpro_product_supplier",
       has_supplier_mapping: true,
       needs_supplier_mapping: false,
+    },
+    incoming_stock_context: {
+      product_id: 1,
+      incoming_qty: 0,
+      incoming_qty_by_source: {},
+      source_breakdown: {},
+      open_po_count: 0,
+      open_po_line_count: 0,
+      earliest_expected_date: null,
+      latest_expected_date: null,
+      supplier_ids: [],
+      warnings: [],
     },
     reorder_point: 6,
     recommended_action: "monitor",
@@ -935,6 +952,41 @@ describe("App mapping review workflow", () => {
     expect(await screen.findByText("No supplier context returned.")).toBeInTheDocument();
   });
 
+  it("shows inbound stock and before/after reorder quantities on product forecast", async () => {
+    vi.mocked(fetchProductForecast).mockResolvedValue(
+      mockForecast({
+        incoming_qty: 20,
+        effective_available_stock_for_reorder: 8,
+        recommended_qty_before_inbound: 64,
+        recommended_qty_after_inbound: 44,
+        recommended_qty: 44,
+        inbound_adjustment_qty: 20,
+        incoming_stock_context: {
+          product_id: 1,
+          incoming_qty: 20,
+          incoming_qty_by_source: { local_purchase_orders: 20 },
+          source_breakdown: { local_purchase_orders: { incoming_qty: 20, open_po_line_count: 1 } },
+          open_po_count: 1,
+          open_po_line_count: 1,
+          earliest_expected_date: null,
+          latest_expected_date: null,
+          supplier_ids: [10],
+          warnings: ["Line-level received/cancelled quantities are unavailable; full open line quantity is counted."],
+        },
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Forecast" }));
+    await userEvent.type(screen.getByLabelText("Product ID"), "1");
+    await userEvent.click(screen.getByRole("button", { name: "Fetch Forecast" }));
+
+    expect(await screen.findByText("Incoming Stock")).toBeInTheDocument();
+    expect(screen.getByText("Recommended before inbound")).toBeInTheDocument();
+    expect(screen.getByText("Inbound adjustment")).toBeInTheDocument();
+    expect(screen.getByText("Line-level received/cancelled quantities are unavailable; full open line quantity is counted.")).toBeInTheDocument();
+  });
+
   it("shows a warning when supplier mapping is needed", async () => {
     vi.mocked(fetchProductForecast).mockResolvedValue(
       mockForecast({
@@ -1254,6 +1306,34 @@ describe("App mapping review workflow", () => {
     expect(rows[1]).toHaveTextContent("Large Reorder");
     expect(rows[2]).toHaveTextContent("Small Reorder");
     expect(rows[3]).toHaveTextContent("Monitor Product");
+  });
+
+  it("supplier forecast displays inbound stock before and after recommendation fields", async () => {
+    vi.mocked(getSupplierForecast).mockResolvedValue(
+      mockSupplierForecast({
+        forecasts: [
+          mockForecast({
+            product_id: 1,
+            product_name: "Inbound Covered Product",
+            incoming_qty: 20,
+            recommended_qty_before_inbound: 64,
+            recommended_qty: 44,
+          }),
+        ],
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Forecast" }));
+    await userEvent.type(screen.getByLabelText("Supplier ID"), "53");
+    await userEvent.click(screen.getByRole("button", { name: "Load Supplier Forecast" }));
+
+    const table = await screen.findByLabelText("Supplier forecast rows");
+    expect(within(table).getByText("Incoming")).toBeInTheDocument();
+    expect(within(table).getByText("Before inbound")).toBeInTheDocument();
+    expect(within(table).getByText("20")).toBeInTheDocument();
+    expect(within(table).getByText("64")).toBeInTheDocument();
+    expect(within(table).getByText("44")).toBeInTheDocument();
   });
 
   it("filters supplier forecast by high risk and open demand", async () => {
