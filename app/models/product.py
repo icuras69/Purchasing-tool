@@ -60,3 +60,15 @@ class Product(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    historical_links = relationship(
+        "ProductHistoricalLink",
+        foreign_keys="ProductHistoricalLink.orderpro_product_id",
+        back_populates="orderpro_product",
+        cascade="all, delete-orphan",
+    )
+    orderpro_links = relationship(
+        "ProductHistoricalLink",
+        foreign_keys="ProductHistoricalLink.historical_product_id",
+        back_populates="historical_product",
+        cascade="all, delete-orphan",
+    )

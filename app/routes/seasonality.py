@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
 from app.models.product import Product
+from app.models.product_historical_link import ProductHistoricalLink
 from app.models.product_seasonality_profile import ProductSeasonalityProfile
 from app.schemas.seasonality import (
     ProductSeasonalityProfileResponse,
@@ -14,6 +15,11 @@ from app.schemas.seasonality import (
     SeasonalitySummaryResponse,
 )
 from app.services.seasonality import interpret_current_seasonality, normalize_month
+from app.services.historical_product_reconciliation import (
+    build_reconciliation_plan,
+    confirmed_links_for_products,
+)
+from app.services.seasonality import collect_contributing_usage_rows
 
 
 router = APIRouter(tags=["seasonality"])
@@ -24,6 +30,14 @@ CONFIDENCE_ORDER = {
     "medium": 2,
     "high": 3,
 }
+
+
+def _orderpro_product_filter():
+    return (
+        (Product.source_system == "orderpro")
+        | (Product.orderpro_id.is_not(None))
+        | (Product.orderpro_sku.is_not(None))
+    )
 
 
 def _profile_to_product_response(product: Product, month: int) -> SeasonalProductResponse:
@@ -54,11 +68,17 @@ def _profile_to_product_response(product: Product, month: int) -> SeasonalProduc
     )
 
 
-def _profile_detail_response(product: Product, month: int) -> ProductSeasonalityProfileResponse:
+def _profile_detail_response(
+    db: Session,
+    product: Product,
+    month: int,
+) -> ProductSeasonalityProfileResponse:
     profile = product.seasonality_profile
     if profile is None:
         raise HTTPException(status_code=404, detail="Seasonality profile not found for product.")
     interpretation = interpret_current_seasonality(profile, month=month)
+    confirmed_links = confirmed_links_for_products(db, [product.id])
+    _, contribution = collect_contributing_usage_rows(db, product, confirmed_links)
 
     return ProductSeasonalityProfileResponse(
         product_id=product.id,
@@ -84,20 +104,27 @@ def _profile_detail_response(product: Product, month: int) -> ProductSeasonality
         calculation_version=profile.calculation_version,
         calculated_at=profile.calculated_at,
         current_interpretation=interpretation,
+        direct_history_row_count=contribution["direct_history_row_count"],
+        linked_history_row_count=contribution["linked_history_row_count"],
+        contributing_historical_product_ids=contribution["contributing_historical_product_ids"],
+        reconciliation_methods=contribution["reconciliation_methods"],
     )
 
 
 @router.get("/seasonality/summary", response_model=SeasonalitySummaryResponse)
 def get_seasonality_summary(
     month: int | None = Query(default=None, ge=1, le=12),
+    include_legacy: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     selected_month = normalize_month(month)
     products = (
         db.query(Product)
         .options(joinedload(Product.seasonality_profile))
-        .all()
     )
+    if not include_legacy:
+        products = products.filter(_orderpro_product_filter())
+    products = products.all()
     profiles = [product.seasonality_profile for product in products if product.seasonality_profile is not None]
     current_status_counts = Counter(
         interpret_current_seasonality(profile, month=selected_month)["current_status"]
@@ -115,6 +142,7 @@ def get_seasonality_summary(
         product_count=len(products),
         missing_profile_count=missing_profile_count,
         selected_month=selected_month,
+        include_legacy=include_legacy,
     )
 
 
@@ -126,6 +154,7 @@ def list_seasonal_products(
     supplier_id: int | None = Query(default=None),
     min_confidence: str | None = Query(default=None),
     active_only: bool = Query(default=True),
+    include_legacy: bool = Query(default=False),
     sort_by: str = Query(default="seasonal_index"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -138,6 +167,8 @@ def list_seasonal_products(
     )
     if active_only:
         query = query.filter(Product.is_active.is_(True))
+    if not include_legacy:
+        query = query.filter(_orderpro_product_filter())
     if supplier_id is not None:
         query = query.filter(Product.supplier_id == supplier_id)
 
@@ -186,4 +217,47 @@ def get_product_seasonality(
     )
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found.")
-    return _profile_detail_response(product, normalize_month(month))
+    return _profile_detail_response(db, product, normalize_month(month))
+
+
+@router.get("/historical-product-links/summary")
+def get_historical_product_link_summary(
+    include_name_suggestions: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    plan = build_reconciliation_plan(db, include_name_suggestions=include_name_suggestions)
+    return {
+        "summary": plan.summary,
+        "warnings": plan.warnings,
+    }
+
+
+@router.get("/historical-product-links/review")
+def list_historical_product_link_review(
+    include_name_suggestions: bool = Query(default=True),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    plan = build_reconciliation_plan(db, include_name_suggestions=include_name_suggestions)
+    review_rows = plan.ambiguous_matches + plan.name_suggestions
+    existing_review_links = (
+        db.query(ProductHistoricalLink)
+        .filter(ProductHistoricalLink.status == "needs_review")
+        .limit(limit)
+        .all()
+    )
+    existing_rows = [
+        {
+            "orderpro_product_id": link.orderpro_product_id,
+            "historical_product_id": link.historical_product_id,
+            "match_method": link.match_method,
+            "match_value": link.match_value,
+            "confidence_label": link.confidence_label,
+            "status": link.status,
+        }
+        for link in existing_review_links
+    ]
+    return {
+        "review_count": len(review_rows) + len(existing_rows),
+        "review_rows": (review_rows + existing_rows)[:limit],
+    }

@@ -31,6 +31,8 @@ def _json_default(value: Any) -> str:
 def _profile_sample(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "product_id": profile["product_id"],
+        "orderpro_sku": profile.get("orderpro_sku"),
+        "product_name": profile.get("product_name"),
         "seasonality_tag": profile["seasonality_tag"],
         "confidence_label": profile["confidence_label"],
         "confidence_score": profile["confidence_score"],
@@ -40,10 +42,41 @@ def _profile_sample(profile: dict[str, Any]) -> dict[str, Any]:
         "history_end": profile["history_end"],
         "years_covered": profile["years_covered"],
         "active_months": profile["active_months"],
+        "direct_history_row_count": profile.get("direct_history_row_count", 0),
+        "linked_history_row_count": profile.get("linked_history_row_count", 0),
+        "contributing_historical_product_ids": profile.get("contributing_historical_product_ids", []),
+        "raw_linked_net_quantity": profile.get("raw_linked_net_quantity", 0),
+        "quantity_used_for_seasonality": profile.get("quantity_used_for_seasonality", 0),
+        "quantity_transform_breakdown": profile.get("quantity_transform_breakdown", [])[:5],
     }
 
 
 def build_report(plan, *, mode: str) -> dict[str, Any]:
+    altered_month_samples = []
+    linked_month_samples = []
+    target_month_sum = 0.0
+    for profile in plan.profiles:
+        target_month_sum += sum(
+            row["quantity_actually_included"]
+            for row in profile.get("target_product_month_breakdown", [])
+        )
+        for row in profile.get("quantity_transform_breakdown", []):
+            altered_month_samples.append(
+                {
+                    "orderpro_product_id": profile["product_id"],
+                    "orderpro_sku": profile.get("orderpro_sku"),
+                    **row,
+                }
+            )
+        for row in profile.get("linked_historical_product_month_breakdown", []):
+            linked_month_samples.append(
+                {
+                    "orderpro_product_id": profile["product_id"],
+                    "orderpro_sku": profile.get("orderpro_sku"),
+                    **row,
+                }
+            )
+
     return {
         "mode": mode,
         "generated_at": utc_now(),
@@ -53,6 +86,14 @@ def build_report(plan, *, mode: str) -> dict[str, Any]:
         "classification_counts": plan.classification_counts,
         "confidence_counts": plan.confidence_counts,
         "insufficient_data_count": plan.insufficient_data_count,
+        "reconciliation_coverage": plan.reconciliation_coverage,
+        "quantity_diagnostics": {
+            "target_product_month_quantity_sum": round(target_month_sum, 4),
+            "matches_quantity_used_for_seasonality": round(target_month_sum, 4)
+            == plan.reconciliation_coverage.get("quantity_used_for_seasonality"),
+            "altered_target_product_month_samples": altered_month_samples[:25],
+            "linked_historical_product_month_samples": linked_month_samples[:25],
+        },
         "sample_profiles": [_profile_sample(profile) for profile in plan.profiles[:10]],
         "warnings": plan.warnings[:50],
     }
@@ -69,6 +110,8 @@ def print_report(report: dict[str, Any]) -> None:
     print(f"Negative/return rows: {audit['negative_quantity_rows']}")
     print(f"Profiles to create: {report['profiles_to_create']}")
     print(f"Profiles to update: {report['profiles_to_update']}")
+    print(f"Reconciliation coverage: {report['reconciliation_coverage']}")
+    print(f"Quantity diagnostics: {report['quantity_diagnostics']}")
     print(f"Classification counts: {report['classification_counts']}")
     print(f"Confidence counts: {report['confidence_counts']}")
     print(f"Insufficient-data count: {report['insufficient_data_count']}")
@@ -76,7 +119,8 @@ def print_report(report: dict[str, Any]) -> None:
         print("Sample profiles:")
         for sample in report["sample_profiles"][:5]:
             print(
-                f"  product {sample['product_id']}: {sample['seasonality_tag']} "
+                f"  product {sample['product_id']} ({sample.get('orderpro_sku') or 'no OrderPro SKU'}): "
+                f"{sample['seasonality_tag']} "
                 f"({sample['confidence_label']}, peaks={sample['peak_months']})"
             )
     if report["warnings"]:
@@ -102,6 +146,11 @@ def main() -> int:
     parser.add_argument("--product-id", type=int, default=None)
     parser.add_argument("--minimum-history-months", type=int, default=DEFAULT_MINIMUM_HISTORY_MONTHS)
     parser.add_argument("--calculation-version", default=CALCULATION_VERSION)
+    parser.add_argument(
+        "--include-legacy-products",
+        action="store_true",
+        help="Include legacy/local products. Default targets the OrderPro catalogue only.",
+    )
     parser.add_argument("--save-report", action="store_true")
     args = parser.parse_args()
 
@@ -113,6 +162,7 @@ def main() -> int:
                 product_id=args.product_id,
                 minimum_history_months=args.minimum_history_months,
                 calculation_version=args.calculation_version,
+                include_legacy_products=args.include_legacy_products,
             )
             report = build_report(plan, mode="apply")
         else:
@@ -121,6 +171,7 @@ def main() -> int:
                 product_id=args.product_id,
                 minimum_history_months=args.minimum_history_months,
                 calculation_version=args.calculation_version,
+                include_legacy_products=args.include_legacy_products,
             )
             report = build_report(plan, mode="dry_run")
 

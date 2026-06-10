@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.product import Product
+from app.models.product_historical_link import ProductHistoricalLink
 from app.models.product_seasonality_profile import ProductSeasonalityProfile
 from app.models.usage_history import UsageHistory
 
@@ -66,7 +67,35 @@ class SeasonalityPlan:
     classification_counts: dict[str, int]
     confidence_counts: dict[str, int]
     insufficient_data_count: int
+    reconciliation_coverage: dict[str, Any]
     warnings: list[str]
+
+
+REPORT_ONLY_PROFILE_FIELDS = {
+    "product_id",
+    "product_name",
+    "orderpro_sku",
+    "direct_history_row_count",
+    "linked_history_row_count",
+    "contributing_historical_product_ids",
+    "reconciliation_methods",
+    "raw_linked_net_quantity",
+    "positive_linked_quantity",
+    "negative_linked_quantity",
+    "negative_linked_row_count",
+    "monthly_raw_net_quantity",
+    "linked_product_month_clamped_quantity",
+    "target_product_month_clamped_quantity",
+    "quantity_used_for_seasonality",
+    "quantity_removed_by_target_month_clamp",
+    "quantity_removed_by_cross_link_offset",
+    "quantity_transform_breakdown",
+    "target_product_month_breakdown",
+    "linked_historical_product_month_breakdown",
+    "total_negative_quantity_retained",
+    "total_negative_quantity_discarded_or_clamped",
+    "total_quantity_removed",
+}
 
 
 def utc_now() -> datetime:
@@ -268,6 +297,174 @@ def calculate_product_profile(
     }
 
 
+def calculate_quantity_transform_metrics(
+    usage_rows: list[UsageHistory],
+    *,
+    linked_product_ids: set[int] | None = None,
+) -> dict[str, Any]:
+    linked_product_ids = linked_product_ids or set()
+    valid_rows = [row for row in usage_rows if row.date is not None]
+    linked_rows = [row for row in valid_rows if row.product_id in linked_product_ids]
+
+    def quantity_for(row: UsageHistory) -> float:
+        return float(row.net_qty if row.net_qty is not None else row.qty_used or 0)
+
+    raw_linked_net_quantity = round(sum(quantity_for(row) for row in linked_rows), 4)
+    positive_linked_quantity = round(sum(max(quantity_for(row), 0.0) for row in linked_rows), 4)
+    negative_linked_quantity = round(sum(min(quantity_for(row), 0.0) for row in linked_rows), 4)
+    negative_linked_row_count = sum(1 for row in linked_rows if quantity_for(row) < 0)
+
+    linked_product_months: dict[tuple[int, int, int], float] = defaultdict(float)
+    target_product_months: dict[tuple[int, int], float] = defaultdict(float)
+    linked_product_month_count_by_target_month: dict[tuple[int, int], int] = defaultdict(int)
+    for row in valid_rows:
+        quantity = quantity_for(row)
+        target_key = (row.date.year, row.date.month)
+        target_product_months[target_key] += quantity
+        if row.product_id in linked_product_ids:
+            linked_key = (row.product_id, row.date.year, row.date.month)
+            if linked_key not in linked_product_months:
+                linked_product_month_count_by_target_month[target_key] += 1
+            linked_product_months[linked_key] += quantity
+
+    monthly_raw_net_quantity = round(sum(target_product_months.values()), 4)
+    linked_product_month_clamped_quantity = round(
+        sum(max(quantity, 0.0) for quantity in linked_product_months.values()),
+        4,
+    )
+    target_product_month_clamped_quantity = round(
+        sum(max(quantity, 0.0) for quantity in target_product_months.values()),
+        4,
+    )
+    quantity_used_for_seasonality = target_product_month_clamped_quantity
+    quantity_removed_by_target_month_clamp = round(
+        sum(min(quantity, 0.0) for quantity in target_product_months.values()),
+        4,
+    )
+    quantity_removed_by_cross_link_offset = round(
+        linked_product_month_clamped_quantity - target_product_month_clamped_quantity,
+        4,
+    )
+
+    altered_months = []
+    target_product_month_breakdown = []
+    for (year, month), raw_quantity in sorted(target_product_months.items()):
+        transformed_quantity = max(raw_quantity, 0.0)
+        target_product_month_breakdown.append(
+            {
+                "calendar_month": f"{year:04d}-{month:02d}",
+                "raw_net_quantity": round(raw_quantity, 4),
+                "transformed_clamped_quantity": round(transformed_quantity, 4),
+                "quantity_actually_included": round(transformed_quantity, 4),
+                "quantity_removed": round(raw_quantity - transformed_quantity, 4),
+                "linked_product_month_count": linked_product_month_count_by_target_month.get((year, month), 0),
+            }
+        )
+        if round(raw_quantity, 4) != round(transformed_quantity, 4):
+            altered_months.append(
+                {
+                    "calendar_month": f"{year:04d}-{month:02d}",
+                    "raw_net_quantity": round(raw_quantity, 4),
+                    "transformed_clamped_quantity": round(transformed_quantity, 4),
+                    "quantity_actually_included": round(transformed_quantity, 4),
+                    "quantity_removed": round(raw_quantity - transformed_quantity, 4),
+                    "linked_product_month_count": linked_product_month_count_by_target_month.get((year, month), 0),
+                }
+            )
+
+    linked_historical_product_month_breakdown = [
+        {
+            "historical_product_id": product_id,
+            "calendar_month": f"{year:04d}-{month:02d}",
+            "raw_net_quantity": round(raw_quantity, 4),
+            "transformed_clamped_quantity": round(max(raw_quantity, 0.0), 4),
+        }
+        for (product_id, year, month), raw_quantity in sorted(linked_product_months.items())
+    ]
+
+    return {
+        "raw_linked_net_quantity": raw_linked_net_quantity,
+        "positive_linked_quantity": positive_linked_quantity,
+        "negative_linked_quantity": negative_linked_quantity,
+        "negative_linked_row_count": negative_linked_row_count,
+        "monthly_raw_net_quantity": monthly_raw_net_quantity,
+        "linked_product_month_clamped_quantity": linked_product_month_clamped_quantity,
+        "target_product_month_clamped_quantity": target_product_month_clamped_quantity,
+        "quantity_used_for_seasonality": quantity_used_for_seasonality,
+        "quantity_removed_by_target_month_clamp": quantity_removed_by_target_month_clamp,
+        "quantity_removed_by_cross_link_offset": quantity_removed_by_cross_link_offset,
+        "total_negative_quantity_retained": round(
+            negative_linked_quantity + abs(quantity_removed_by_target_month_clamp),
+            4,
+        ),
+        "total_negative_quantity_retained_abs": round(
+            abs(negative_linked_quantity) - abs(quantity_removed_by_target_month_clamp),
+            4,
+        ),
+        "total_negative_quantity_discarded_or_clamped": round(abs(quantity_removed_by_target_month_clamp), 4),
+        "total_quantity_removed": round(abs(quantity_removed_by_target_month_clamp), 4),
+        "quantity_transform_breakdown": altered_months,
+        "target_product_month_breakdown": target_product_month_breakdown,
+        "linked_historical_product_month_breakdown": linked_historical_product_month_breakdown,
+    }
+
+
+def is_orderpro_catalog_product(product: Product) -> bool:
+    return bool(product.source_system == "orderpro" or product.orderpro_id or product.orderpro_sku)
+
+
+def _confirmed_links_by_orderpro_product(db: Session, product_ids: list[int]) -> dict[int, list[ProductHistoricalLink]]:
+    if not product_ids:
+        return {}
+    links = (
+        db.query(ProductHistoricalLink)
+        .filter(
+            ProductHistoricalLink.orderpro_product_id.in_(product_ids),
+            ProductHistoricalLink.status.in_(["auto_confirmed", "manually_confirmed"]),
+        )
+        .all()
+    )
+    grouped: dict[int, list[ProductHistoricalLink]] = defaultdict(list)
+    for link in links:
+        grouped[link.orderpro_product_id].append(link)
+    return grouped
+
+
+def _usage_rows_by_product(db: Session, product_ids: list[int]) -> dict[int, list[UsageHistory]]:
+    if not product_ids:
+        return {}
+    rows = db.query(UsageHistory).filter(UsageHistory.product_id.in_(product_ids)).all()
+    grouped: dict[int, list[UsageHistory]] = defaultdict(list)
+    for row in rows:
+        grouped[row.product_id].append(row)
+    return grouped
+
+
+def collect_contributing_usage_rows(
+    db: Session,
+    product: Product,
+    confirmed_links: list[ProductHistoricalLink] | None = None,
+) -> tuple[list[UsageHistory], dict[str, Any]]:
+    confirmed_links = confirmed_links or []
+    linked_product_ids = [link.historical_product_id for link in confirmed_links]
+    linked_rows_by_product = _usage_rows_by_product(db, linked_product_ids)
+    direct_rows = list(product.usage_history)
+    rows_by_id: dict[int, UsageHistory] = {row.id: row for row in direct_rows}
+    linked_row_count = 0
+    for historical_product_id in linked_product_ids:
+        for row in linked_rows_by_product.get(historical_product_id, []):
+            if row.id not in rows_by_id:
+                linked_row_count += 1
+            rows_by_id[row.id] = row
+
+    return list(rows_by_id.values()), {
+        "direct_history_row_count": len(direct_rows),
+        "linked_history_row_count": linked_row_count,
+        "contributing_historical_product_ids": linked_product_ids,
+        "reconciliation_methods": sorted({link.match_method for link in confirmed_links}),
+    }
+
+
 def audit_historical_data(db: Session) -> SeasonalityAudit:
     usage_rows = db.query(UsageHistory).all()
     history_start = min((row.date for row in usage_rows), default=None)
@@ -311,21 +508,62 @@ def build_seasonality_plan(
     product_id: int | None = None,
     minimum_history_months: int = DEFAULT_MINIMUM_HISTORY_MONTHS,
     calculation_version: str = CALCULATION_VERSION,
+    include_legacy_products: bool = False,
 ) -> SeasonalityPlan:
     query = db.query(Product).options(selectinload(Product.usage_history), selectinload(Product.seasonality_profile))
+    if not include_legacy_products:
+        query = query.filter(
+            (Product.source_system == "orderpro")
+            | (Product.orderpro_id.is_not(None))
+            | (Product.orderpro_sku.is_not(None))
+        )
     if product_id is not None:
         query = query.filter(Product.id == product_id)
     products = query.order_by(Product.id.asc()).all()
+    product_ids = [product.id for product in products]
+    links_by_product = _confirmed_links_by_orderpro_product(db, product_ids) if not include_legacy_products else {}
 
-    profiles = [
-        calculate_product_profile(
+    profiles = []
+    total_direct_rows = 0
+    total_linked_rows = 0
+    contributing_historical_ids: set[int] = set()
+    for product in products:
+        if include_legacy_products:
+            usage_rows = list(product.usage_history)
+            contribution = {
+                "direct_history_row_count": len(usage_rows),
+                "linked_history_row_count": 0,
+                "contributing_historical_product_ids": [],
+                "reconciliation_methods": [],
+            }
+        else:
+            usage_rows, contribution = collect_contributing_usage_rows(
+                db,
+                product,
+                links_by_product.get(product.id, []),
+            )
+        quantity_metrics = calculate_quantity_transform_metrics(
+            usage_rows,
+            linked_product_ids=set(contribution["contributing_historical_product_ids"]),
+        )
+        total_direct_rows += contribution["direct_history_row_count"]
+        total_linked_rows += contribution["linked_history_row_count"]
+        contributing_historical_ids.update(contribution["contributing_historical_product_ids"])
+        profile = calculate_product_profile(
             product,
-            list(product.usage_history),
+            usage_rows,
             minimum_history_months=minimum_history_months,
             calculation_version=calculation_version,
         )
-        for product in products
-    ]
+        profile.update(
+            {
+                "product_name": product.name,
+                "orderpro_sku": product.orderpro_sku,
+                **contribution,
+                **quantity_metrics,
+            }
+        )
+        profiles.append(profile)
 
     existing_profile_ids = {
         product.id for product in products if product.seasonality_profile is not None
@@ -337,6 +575,67 @@ def build_seasonality_plan(
         for warning in profile.pop("warnings", []):
             warnings.append(f"product {profile['product_id']}: {warning}")
 
+    needs_review_links_excluded = (
+        db.query(ProductHistoricalLink)
+        .filter(ProductHistoricalLink.status == "needs_review")
+        .count()
+        if not include_legacy_products
+        else 0
+    )
+    ambiguous_links_excluded = needs_review_links_excluded
+    rejected_links_excluded = (
+        db.query(ProductHistoricalLink)
+        .filter(ProductHistoricalLink.status == "rejected")
+        .count()
+        if not include_legacy_products
+        else 0
+    )
+    quantity_used_for_seasonality = round(sum(profile["quantity_used_for_seasonality"] for profile in profiles), 4)
+    raw_linked_net_quantity = round(sum(profile["raw_linked_net_quantity"] for profile in profiles), 4)
+    positive_linked_quantity = round(sum(profile["positive_linked_quantity"] for profile in profiles), 4)
+    negative_linked_quantity = round(sum(profile["negative_linked_quantity"] for profile in profiles), 4)
+    negative_linked_row_count = sum(profile["negative_linked_row_count"] for profile in profiles)
+    monthly_raw_net_quantity = round(sum(profile["monthly_raw_net_quantity"] for profile in profiles), 4)
+    linked_product_month_clamped_quantity = round(
+        sum(profile["linked_product_month_clamped_quantity"] for profile in profiles),
+        4,
+    )
+    target_product_month_clamped_quantity = round(
+        sum(profile["target_product_month_clamped_quantity"] for profile in profiles),
+        4,
+    )
+    quantity_removed_by_target_month_clamp = round(
+        sum(profile["quantity_removed_by_target_month_clamp"] for profile in profiles),
+        4,
+    )
+    quantity_removed_by_cross_link_offset = round(
+        sum(profile["quantity_removed_by_cross_link_offset"] for profile in profiles),
+        4,
+    )
+    orderpro_products_with_direct_history = sum(1 for profile in profiles if profile["direct_history_row_count"] > 0)
+    orderpro_products_with_linked_history = sum(1 for profile in profiles if profile["linked_history_row_count"] > 0)
+    stale_orderpro_profiles_to_refresh = sum(
+        1
+        for product in products
+        if (
+            product.seasonality_profile is not None
+            and product.seasonality_profile.seasonality_tag == "insufficient_data"
+            and any(profile["product_id"] == product.id and profile["linked_history_row_count"] > 0 for profile in profiles)
+        )
+    )
+    legacy_profiles_left_unchanged = (
+        db.query(ProductSeasonalityProfile)
+        .join(Product, Product.id == ProductSeasonalityProfile.product_id)
+        .filter(
+            Product.source_system != "orderpro",
+            Product.orderpro_id.is_(None),
+            Product.orderpro_sku.is_(None),
+        )
+        .count()
+        if not include_legacy_products
+        else 0
+    )
+
     return SeasonalityPlan(
         audit=audit_historical_data(db),
         profiles=profiles,
@@ -345,6 +644,49 @@ def build_seasonality_plan(
         classification_counts=classification_counts,
         confidence_counts=confidence_counts,
         insufficient_data_count=classification_counts.get("insufficient_data", 0),
+        reconciliation_coverage={
+            "target_orderpro_products": len(products) if not include_legacy_products else 0,
+            "include_legacy_products": include_legacy_products,
+            "orderpro_products_with_direct_history": orderpro_products_with_direct_history,
+            "orderpro_products_with_linked_history": orderpro_products_with_linked_history,
+            "orderpro_products_without_history": sum(
+                1
+                for profile in profiles
+                if profile["direct_history_row_count"] == 0 and profile["linked_history_row_count"] == 0
+            ),
+            "confirmed_historical_links": sum(len(links) for links in links_by_product.values()),
+            "historical_products_contributing": len(contributing_historical_ids),
+            "usage_rows_contributing": total_direct_rows + total_linked_rows,
+            "raw_linked_net_quantity": raw_linked_net_quantity,
+            "positive_linked_quantity": positive_linked_quantity,
+            "negative_linked_quantity": negative_linked_quantity,
+            "negative_linked_row_count": negative_linked_row_count,
+            "monthly_raw_net_quantity": monthly_raw_net_quantity,
+            "linked_product_month_clamped_quantity": linked_product_month_clamped_quantity,
+            "target_product_month_clamped_quantity": target_product_month_clamped_quantity,
+            "quantity_used_for_seasonality": quantity_used_for_seasonality,
+            "quantity_removed_by_target_month_clamp": quantity_removed_by_target_month_clamp,
+            "quantity_removed_by_cross_link_offset": quantity_removed_by_cross_link_offset,
+            "quantity_used_minus_raw_linked_net_quantity": round(
+                quantity_used_for_seasonality - raw_linked_net_quantity,
+                4,
+            ),
+            "quantity_used_minus_monthly_raw_net_quantity": round(
+                quantity_used_for_seasonality - monthly_raw_net_quantity,
+                4,
+            ),
+            "quantity_reconciliation_difference": round(
+                quantity_used_for_seasonality - raw_linked_net_quantity,
+                4,
+            ),
+            "net_quantity_contributing_deprecated": quantity_used_for_seasonality,
+            "stale_orderpro_profiles_to_refresh": stale_orderpro_profiles_to_refresh,
+            "orderpro_profiles_updated": len(existing_profile_ids),
+            "legacy_profiles_left_unchanged": legacy_profiles_left_unchanged,
+            "ambiguous_links_excluded": ambiguous_links_excluded,
+            "needs_review_links_excluded": needs_review_links_excluded,
+            "rejected_links_excluded": rejected_links_excluded,
+        },
         warnings=warnings,
     )
 
@@ -355,12 +697,14 @@ def apply_seasonality_profiles(
     product_id: int | None = None,
     minimum_history_months: int = DEFAULT_MINIMUM_HISTORY_MONTHS,
     calculation_version: str = CALCULATION_VERSION,
+    include_legacy_products: bool = False,
 ) -> SeasonalityPlan:
     plan = build_seasonality_plan(
         db,
         product_id=product_id,
         minimum_history_months=minimum_history_months,
         calculation_version=calculation_version,
+        include_legacy_products=include_legacy_products,
     )
     now = utc_now()
 
@@ -383,11 +727,12 @@ def apply_seasonality_profiles(
             db.add(profile)
 
         for key, value in profile_data.items():
-            if key == "product_id":
+            if key in REPORT_ONLY_PROFILE_FIELDS:
                 continue
             setattr(profile, key, value)
         profile.updated_at = now
-        product.seasonality_tag = profile_data["seasonality_tag"]
+        if include_legacy_products or is_orderpro_catalog_product(product):
+            product.seasonality_tag = profile_data["seasonality_tag"]
 
     db.commit()
     return plan
@@ -468,7 +813,18 @@ def seasonality_context_for_product(
         .first()
     )
     if profile is None:
-        return None
+        return {
+            "seasonality_tag": "insufficient_data",
+            "current_status": "insufficient_data",
+            "selected_month_index": None,
+            "primary_season": None,
+            "peak_months": [],
+            "confidence_score": 0.0,
+            "confidence_label": "insufficient",
+            "advisory_message": (
+                "No reconciled multi-year historical seasonality profile exists for this OrderPro product."
+            ),
+        }
     interpretation = interpret_current_seasonality(profile, month=month)
     return {
         "seasonality_tag": profile.seasonality_tag,

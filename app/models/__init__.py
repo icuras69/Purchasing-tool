@@ -12,6 +12,7 @@ from app.models.product_master_item import ProductMasterItem
 from app.models.product_supplier import ProductSupplier
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product_seasonality_profile import ProductSeasonalityProfile
+from app.models.product_historical_link import ProductHistoricalLink
 
 __all__ = [
     "Product",
@@ -30,4 +31,5 @@ __all__ = [
     "OrderProOrder",
     "OrderProOrderItem",
     "ProductSeasonalityProfile",
+    "ProductHistoricalLink",
 ]

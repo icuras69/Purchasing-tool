@@ -20,6 +20,7 @@ class SeasonalitySummaryResponse(BaseModel):
     product_count: int
     missing_profile_count: int
     selected_month: int
+    include_legacy: bool = False
 
 
 class SeasonalProductResponse(BaseModel):
@@ -68,6 +69,10 @@ class ProductSeasonalityProfileResponse(BaseModel):
     calculation_version: str
     calculated_at: datetime
     current_interpretation: SeasonalityInterpretation
+    direct_history_row_count: int = 0
+    linked_history_row_count: int = 0
+    contributing_historical_product_ids: list[int] = []
+    reconciliation_methods: list[str] = []
 
 
 class ForecastSeasonalityContext(BaseModel):
