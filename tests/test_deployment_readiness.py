@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+from scripts.check_clean_database_migrations import _guard_database_url
 from scripts.check_deployment_secrets import format_findings, scan_path
 
 
@@ -22,6 +25,9 @@ def test_render_blueprint_is_valid_yaml_with_safe_staging_defaults():
     assert "name: purchasing-ai-api" in blueprint
     assert "runtime: python" in blueprint
     assert "autoDeployTrigger: 'off'" in blueprint
+    assert "buildCommand: pip install -r requirements-deploy.txt" in blueprint
+    assert "buildCommand: pip install -r requirements-deploy.txt && python -m alembic upgrade head" not in blueprint
+    assert "preDeployCommand: python -m alembic upgrade head" in blueprint
     assert "python -m alembic upgrade head" in blueprint
     assert "startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT" in blueprint
     assert "healthCheckPath: /health" in blueprint
@@ -83,3 +89,12 @@ def test_secret_scanner_allows_example_env_files(tmp_path):
     (tmp_path / ".env.example").write_text("ORDERPRO_API_TOKEN=\nOPENAI_API_KEY=\n", encoding="utf-8")
 
     assert scan_path(tmp_path) == []
+
+
+def test_clean_database_migration_check_refuses_normal_dev_database_without_override():
+    with pytest.raises(RuntimeError):
+        _guard_database_url("postgresql://user:pass@localhost:5432/purchasing_ai", allow_non_empty=False)
+
+
+def test_clean_database_migration_check_allows_disposable_test_database():
+    _guard_database_url("postgresql://user:pass@localhost:5432/purchasing_ai_render_test", allow_non_empty=False)
