@@ -798,6 +798,13 @@ describe("App mapping review workflow", () => {
         demand_history_available: false,
         open_customer_demand: 0,
       }),
+      mockSupplierAssignmentItem({
+        product_id: 8184,
+        orderpro_sku: "EXPORT-SUP",
+        name: "Export Suggested Product",
+        suggestion_source: "orderpro_product_export",
+        evidence_summary: { supplier_sku: "SUP-EXPORT-1" },
+      }),
     ]);
 
     render(<App />);
@@ -807,7 +814,9 @@ describe("App mapping review workflow", () => {
     expect(within(summary).getByText("Missing supplier")).toBeInTheDocument();
     expect(within(summary).getByText("PO evidence")).toBeInTheDocument();
     expect(screen.getByText("Missing Supplier Product")).toBeInTheDocument();
-    expect(screen.getByText("Suggested Supplier")).toBeInTheDocument();
+    expect(screen.getAllByText("Suggested Supplier").length).toBeGreaterThan(0);
+    expect(screen.getByText("orderpro_product_export")).toBeInTheDocument();
+    expect(screen.getByText("Supplier SKU: SUP-EXPORT-1")).toBeInTheDocument();
     expect(screen.getByText("No Evidence Product")).toBeInTheDocument();
     expect(screen.getByText("No deterministic supplier evidence is available locally.")).toBeInTheDocument();
     expect(

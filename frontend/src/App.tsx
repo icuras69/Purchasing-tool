@@ -2801,6 +2801,9 @@ function SupplierAssignmentReviewPanel() {
                   </td>
                   <td>
                     <div>{formatValue(row.suggestion_source)}</div>
+                    {typeof row.evidence_summary?.supplier_sku === "string" && (
+                      <div>Supplier SKU: {row.evidence_summary.supplier_sku}</div>
+                    )}
                     <div className="muted">
                       {formatValue(
                         typeof row.evidence_summary?.message === "string"

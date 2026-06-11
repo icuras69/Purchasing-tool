@@ -16,6 +16,9 @@ Allowed suggestion evidence is intentionally narrow:
 
 The workflow does not infer suppliers from product names, descriptions, categories, or fuzzy matching.
 
+Fresh OrderPro product exports can be imported through `scripts/import_orderpro_product_supplier_export.py`.
+See `app/docs/orderpro_product_supplier_export.md` for supported columns, matching precedence, and confirmation rules.
+
 ## Confidence Rules
 
 - `high`: repeated purchase order evidence from a single supplier, or an exact supplier-code match when provided by a trusted import.
@@ -34,6 +37,8 @@ Confirming a supplier assignment:
 - does not call OrderPro;
 - does not create or edit purchase orders;
 - does not change forecast formulas.
+
+Import-based exact-code confirmations use `reviewed_by = "orderpro_product_export"` and remain local-only.
 
 Rejecting a suggestion records the review decision and leaves `products.supplier_id` unchanged.
 
