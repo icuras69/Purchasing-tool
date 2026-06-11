@@ -14,6 +14,7 @@ from app.services.forecasting import build_forecast
 from app.services.forecast_input_reconciliation import effective_forecast_inputs, forecast_input_audit
 from app.services.historical_product_reconciliation import confirmed_links_for_products
 from app.services.seasonality import collect_contributing_usage_rows, is_orderpro_catalog_product, utc_now
+from app.services.supplier_assignment_review import suggest_supplier_for_product
 
 
 BACKTEST_VERSION = "seasonality-backtest-v1"
@@ -499,6 +500,19 @@ def audit_product_forecast_inputs(db: Session, product: Product) -> dict[str, An
     if latest_backtest and latest_backtest.readiness_status == "harmful":
         warnings.append("seasonality_backtest_harmful")
 
+    supplier_suggestion = None
+    if not input_flags["supplier_id"]:
+        suggestion = suggest_supplier_for_product(db, product)
+        if suggestion["suggested_supplier_id"] is not None:
+            warnings.append("supplier_assignment_suggestion_available")
+            supplier_suggestion = {
+                "suggested_supplier_id": suggestion["suggested_supplier_id"],
+                "suggested_supplier_name": suggestion["suggested_supplier_name"],
+                "suggestion_source": suggestion["suggestion_source"],
+                "confidence_label": suggestion["confidence_label"],
+                "confidence_score": suggestion["confidence_score"],
+            }
+
     score = round((len(available) / len(input_flags)) * 100, 2)
     return {
         "product_id": product.id,
@@ -528,6 +542,7 @@ def audit_product_forecast_inputs(db: Session, product: Product) -> dict[str, An
         ),
         "seasonality_readiness_status": latest_backtest.readiness_status if latest_backtest else None,
         "forecast_recommended_qty": forecast_before["recommended_qty"],
+        "supplier_assignment_suggestion": supplier_suggestion,
     }
 
 

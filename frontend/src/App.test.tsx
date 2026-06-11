@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import {
   confirmProductSupplier,
+  confirmSupplierAssignmentReview,
   addPurchaseOrderLine,
   acceptRecommendation,
   approvePurchaseOrder,
@@ -22,6 +23,8 @@ import {
   generateRecommendationLLMExplanation,
   getForecastReadinessRows,
   getForecastReadinessSummary,
+  getSupplierAssignmentReviewItems,
+  getSupplierAssignmentReviewSummary,
   getProductSeasonality,
   getSeasonalProducts,
   getSeasonalitySummary,
@@ -31,9 +34,11 @@ import {
   issuePurchaseOrder,
   listRecommendations,
   listPurchaseOrders,
+  listSuppliers,
   receivePurchaseOrder,
   rejectRecommendation,
   rejectProductSupplier,
+  rejectSupplierAssignmentReview,
   setPreferredProductSupplier,
   submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
@@ -50,7 +55,10 @@ import type {
   RecommendationLLMExplanation,
   SeasonalProduct,
   SeasonalitySummary,
+  SupplierAssignmentReviewItem,
+  SupplierAssignmentReviewSummary,
   SupplierForecastResponse,
+  SupplierOption,
   WeakMapping,
 } from "./types";
 
@@ -63,6 +71,11 @@ vi.mock("./api", () => ({
   generateRecommendationLLMExplanation: vi.fn(),
   getForecastReadinessSummary: vi.fn(),
   getForecastReadinessRows: vi.fn(),
+  getSupplierAssignmentReviewSummary: vi.fn(),
+  getSupplierAssignmentReviewItems: vi.fn(),
+  listSuppliers: vi.fn(),
+  confirmSupplierAssignmentReview: vi.fn(),
+  rejectSupplierAssignmentReview: vi.fn(),
   getSeasonalitySummary: vi.fn(),
   getSeasonalProducts: vi.fn(),
   getProductSeasonality: vi.fn(),
@@ -341,6 +354,74 @@ function mockForecastInputAudit(overrides: Partial<ForecastInputAudit> = {}): Fo
   };
 }
 
+function mockSupplierAssignmentSummary(
+  overrides: Partial<SupplierAssignmentReviewSummary> = {},
+): SupplierAssignmentReviewSummary {
+  return {
+    total_orderpro_products: 3,
+    missing_supplier_products: 2,
+    missing_supplier_products_with_stock: 1,
+    missing_supplier_products_with_demand_history: 1,
+    missing_supplier_products_with_open_customer_demand: 1,
+    missing_supplier_products_with_seasonality_profile: 0,
+    missing_supplier_products_with_po_supplier_evidence: 1,
+    missing_supplier_products_with_no_evidence: 1,
+    suggested_supplier_count_by_confidence: { high: 1, none: 1 },
+    suggestion_count_by_source: { orderpro_purchase_orders_repeated: 1, none: 1 },
+    review_status_counts: { suggested: 1, no_evidence: 1 },
+    no_suggestion_count: 1,
+    top_categories_affected: { Tack: 1 },
+    top_brands_affected: { Stable: 1 },
+    ...overrides,
+  };
+}
+
+function mockSupplierAssignmentItem(
+  overrides: Partial<SupplierAssignmentReviewItem> = {},
+): SupplierAssignmentReviewItem {
+  return {
+    product_id: 8182,
+    orderpro_id: "8182",
+    orderpro_sku: "MISS-SUP",
+    name: "Missing Supplier Product",
+    barcode: "123",
+    brand: "Stable",
+    category: "Tack",
+    current_stock: 4,
+    demand_history_available: true,
+    open_customer_demand: 6,
+    seasonality_tag: "summer",
+    cost_source: "orderpro_product_cost",
+    lead_time_status: "missing",
+    suggested_supplier_id: 34,
+    suggested_supplier_name: "Suggested Supplier",
+    suggestion_source: "orderpro_purchase_orders_repeated",
+    confidence_label: "high",
+    confidence_score: 0.9,
+    evidence_summary: { message: "Repeated OrderPro PO evidence" },
+    evidence_date: "2026-06-10T10:00:00",
+    warnings: [],
+    status: "suggested",
+    review_id: 22,
+    reviewed_supplier_id: null,
+    reviewed_by: null,
+    reviewed_at: null,
+    ...overrides,
+  };
+}
+
+function mockSupplierOption(overrides: Partial<SupplierOption> = {}): SupplierOption {
+  return {
+    id: 34,
+    name: "Suggested Supplier",
+    orderpro_id: "34",
+    orderpro_code: "SUG",
+    is_active: true,
+    lead_time_days: 7,
+    ...overrides,
+  };
+}
+
 function mockSeasonalitySummary(
   overrides: Partial<SeasonalitySummary> = {},
 ): SeasonalitySummary {
@@ -586,6 +667,11 @@ beforeEach(() => {
   vi.mocked(fetchProductForecast).mockResolvedValue(mockForecast());
   vi.mocked(getForecastReadinessSummary).mockResolvedValue(mockForecastReadinessSummary());
   vi.mocked(getForecastReadinessRows).mockResolvedValue([mockForecastInputAudit()]);
+  vi.mocked(getSupplierAssignmentReviewSummary).mockResolvedValue(mockSupplierAssignmentSummary());
+  vi.mocked(getSupplierAssignmentReviewItems).mockResolvedValue([]);
+  vi.mocked(listSuppliers).mockResolvedValue([mockSupplierOption()]);
+  vi.mocked(confirmSupplierAssignmentReview).mockResolvedValue({});
+  vi.mocked(rejectSupplierAssignmentReview).mockResolvedValue({});
   vi.mocked(getSeasonalitySummary).mockResolvedValue(mockSeasonalitySummary());
   vi.mocked(getSeasonalProducts).mockResolvedValue([]);
   vi.mocked(getProductSeasonality).mockResolvedValue(mockProductSeasonalityDetail());
@@ -650,6 +736,7 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast Readiness" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Supplier Assignment Review" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Seasonality" })).toBeInTheDocument();
@@ -692,6 +779,111 @@ describe("App mapping review workflow", () => {
 
     expect(getForecastReadinessRows).toHaveBeenLastCalledWith("missing_cost");
     expect(await screen.findByText("Missing Cost Product")).toBeInTheDocument();
+  });
+
+  it("supplier assignment review summary and suggested rows render", async () => {
+    vi.mocked(getSupplierAssignmentReviewItems).mockResolvedValueOnce([
+      mockSupplierAssignmentItem(),
+      mockSupplierAssignmentItem({
+        product_id: 8183,
+        orderpro_sku: "NO-EVIDENCE",
+        name: "No Evidence Product",
+        suggested_supplier_id: null,
+        suggested_supplier_name: null,
+        suggestion_source: "none",
+        confidence_label: "none",
+        confidence_score: 0,
+        status: "no_evidence",
+        evidence_summary: { message: "No deterministic supplier evidence is available locally." },
+        demand_history_available: false,
+        open_customer_demand: 0,
+      }),
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Assignment Review" }));
+
+    const summary = await screen.findByLabelText("Supplier assignment summary");
+    expect(within(summary).getByText("Missing supplier")).toBeInTheDocument();
+    expect(within(summary).getByText("PO evidence")).toBeInTheDocument();
+    expect(screen.getByText("Missing Supplier Product")).toBeInTheDocument();
+    expect(screen.getByText("Suggested Supplier")).toBeInTheDocument();
+    expect(screen.getByText("No Evidence Product")).toBeInTheDocument();
+    expect(screen.getByText("No deterministic supplier evidence is available locally.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Review missing product suppliers using deterministic evidence. Confirmations are local only and are not pushed to OrderPro."),
+    ).toBeInTheDocument();
+  });
+
+  it("supplier assignment confidence and demand filters call the endpoint", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Assignment Review" }));
+    await screen.findByLabelText("Supplier assignment review rows");
+    await userEvent.selectOptions(screen.getByLabelText("Confidence"), "high");
+    await userEvent.click(screen.getByLabelText("Has demand"));
+
+    expect(getSupplierAssignmentReviewItems).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        confidence: "high",
+        has_demand: true,
+      }),
+    );
+  });
+
+  it("supplier assignment confirm suggestion calls the local confirm endpoint", async () => {
+    vi.mocked(getSupplierAssignmentReviewItems).mockResolvedValue([mockSupplierAssignmentItem()]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Assignment Review" }));
+    await screen.findByText("Missing Supplier Product");
+    await userEvent.click(screen.getByRole("button", { name: "Confirm suggestion" }));
+
+    expect(confirmSupplierAssignmentReview).toHaveBeenCalledWith(
+      8182,
+      expect.objectContaining({ supplier_id: 34, reviewed_by: "manual" }),
+    );
+    expect(await screen.findByText("Supplier assignment confirmed locally.")).toBeInTheDocument();
+  });
+
+  it("supplier assignment reject asks for confirmation and calls reject endpoint", async () => {
+    vi.mocked(getSupplierAssignmentReviewItems).mockResolvedValue([mockSupplierAssignmentItem()]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Assignment Review" }));
+    await screen.findByText("Missing Supplier Product");
+    await userEvent.click(screen.getByRole("button", { name: "Reject suggestion" }));
+
+    expect(window.confirm).toHaveBeenCalledWith("Reject this supplier assignment suggestion?");
+    expect(rejectSupplierAssignmentReview).toHaveBeenCalledWith(
+      8182,
+      expect.objectContaining({ reviewed_by: "manual" }),
+    );
+  });
+
+  it("manual supplier selection calls the confirm endpoint", async () => {
+    vi.mocked(getSupplierAssignmentReviewItems).mockResolvedValue([
+      mockSupplierAssignmentItem({
+        suggested_supplier_id: null,
+        suggested_supplier_name: null,
+        confidence_label: "none",
+        status: "no_evidence",
+      }),
+    ]);
+    vi.mocked(listSuppliers).mockResolvedValue([
+      mockSupplierOption(),
+      mockSupplierOption({ id: 55, name: "Manual Supplier", orderpro_code: "MAN" }),
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Assignment Review" }));
+    await screen.findByText("Missing Supplier Product");
+    await userEvent.selectOptions(screen.getByLabelText("Manual supplier for Missing Supplier Product"), "55");
+    await userEvent.click(screen.getByRole("button", { name: "Confirm manual supplier" }));
+
+    expect(confirmSupplierAssignmentReview).toHaveBeenCalledWith(
+      8182,
+      expect.objectContaining({ supplier_id: 55, reviewed_by: "manual" }),
+    );
   });
 
   it("seasonality summary cards display backend counts", async () => {

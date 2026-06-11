@@ -21,6 +21,22 @@ from app.services.purchase_order_drafting import (
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 
 
+@router.get("")
+def list_suppliers(db: Session = Depends(get_db)):
+    suppliers = db.query(Supplier).order_by(Supplier.name.asc()).all()
+    return [
+        {
+            "id": supplier.id,
+            "name": supplier.name,
+            "orderpro_id": supplier.orderpro_id,
+            "orderpro_code": supplier.orderpro_code,
+            "is_active": supplier.is_active,
+            "lead_time_days": supplier.lead_time_days,
+        }
+        for supplier in suppliers
+    ]
+
+
 @router.get("/{supplier_id}/products", response_model=list[ProductSupplierMappingResponse])
 def list_supplier_products(supplier_id: int, db: Session = Depends(get_db)):
     supplier = db.get(Supplier, supplier_id)

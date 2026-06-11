@@ -71,6 +71,72 @@ export interface ProductSupplierInput {
   match_confidence?: number | null;
 }
 
+export interface SupplierOption {
+  id: number;
+  name: string;
+  orderpro_id: string | null;
+  orderpro_code: string | null;
+  is_active: boolean;
+  lead_time_days: number | null;
+}
+
+export interface SupplierAssignmentReviewSummary {
+  total_orderpro_products: number;
+  missing_supplier_products: number;
+  missing_supplier_products_with_stock: number;
+  missing_supplier_products_with_demand_history: number;
+  missing_supplier_products_with_open_customer_demand: number;
+  missing_supplier_products_with_seasonality_profile: number;
+  missing_supplier_products_with_po_supplier_evidence: number;
+  missing_supplier_products_with_no_evidence: number;
+  suggested_supplier_count_by_confidence: Record<string, number>;
+  suggestion_count_by_source: Record<string, number>;
+  review_status_counts: Record<string, number>;
+  no_suggestion_count: number;
+  top_categories_affected: Record<string, number>;
+  top_brands_affected: Record<string, number>;
+}
+
+export interface SupplierAssignmentReviewItem {
+  product_id: number;
+  orderpro_id: string | null;
+  orderpro_sku: string | null;
+  name: string;
+  barcode: string | null;
+  brand: string | null;
+  category: string | null;
+  current_stock: number | null;
+  demand_history_available: boolean;
+  open_customer_demand: number;
+  seasonality_tag: string | null;
+  cost_source: string | null;
+  lead_time_status: string;
+  suggested_supplier_id: number | null;
+  suggested_supplier_name: string | null;
+  suggestion_source: string | null;
+  confidence_label: string;
+  confidence_score: number;
+  evidence_summary: Record<string, unknown> | null;
+  evidence_date: string | null;
+  warnings: string[];
+  status: string;
+  review_id: number | null;
+  reviewed_supplier_id: number | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+}
+
+export interface SupplierAssignmentConfirmRequest {
+  supplier_id: number;
+  reviewed_by?: string | null;
+  note?: string | null;
+}
+
+export interface SupplierAssignmentRejectRequest {
+  reason?: string | null;
+  reviewed_by?: string | null;
+}
+
 export interface WeakMapping {
   product_id: number;
   product_name: string;
@@ -248,6 +314,13 @@ export interface ForecastInputAudit {
   seasonality_activation_recommendation?: string;
   seasonality_readiness_status?: string | null;
   forecast_recommended_qty?: number;
+  supplier_assignment_suggestion?: {
+    suggested_supplier_id: number;
+    suggested_supplier_name: string | null;
+    suggestion_source: string | null;
+    confidence_label: string;
+    confidence_score: number;
+  } | null;
 }
 
 export type SeasonalityStatus =

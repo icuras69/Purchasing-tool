@@ -19,8 +19,13 @@ import type {
   RecommendationRejectRequest,
   SeasonalProduct,
   SeasonalitySummary,
+  SupplierAssignmentConfirmRequest,
+  SupplierAssignmentRejectRequest,
+  SupplierAssignmentReviewItem,
+  SupplierAssignmentReviewSummary,
   SupplierForecastDraftRequest,
   SupplierForecastResponse,
+  SupplierOption,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
@@ -97,6 +102,10 @@ export function fetchProductSuppliers(): Promise<ProductSupplierMapping[]> {
   return fetchJson<ProductSupplierMapping[]>("/product-suppliers/", "supplier mappings");
 }
 
+export function listSuppliers(): Promise<SupplierOption[]> {
+  return fetchJson<SupplierOption[]>("/suppliers", "suppliers");
+}
+
 export function fetchProductForecast(productId: number): Promise<ForecastResponse> {
   return fetchJson<ForecastResponse>(`/products/${productId}/forecast`, "product forecast");
 }
@@ -108,6 +117,69 @@ export function getForecastReadinessSummary(): Promise<ForecastReadinessSummary>
 export function getForecastReadinessRows(filter?: string): Promise<ForecastInputAudit[]> {
   const query = filter && filter !== "all" ? `?filter=${encodeURIComponent(filter)}` : "";
   return fetchJson<ForecastInputAudit[]>(`/products/forecast-readiness${query}`, "forecast readiness");
+}
+
+export interface SupplierAssignmentReviewQuery {
+  status?: string;
+  confidence?: string;
+  suggestion_source?: string;
+  has_stock?: boolean;
+  has_demand?: boolean;
+  has_open_demand?: boolean;
+  category?: string;
+  brand?: string;
+  supplier_id?: number;
+}
+
+export function getSupplierAssignmentReviewSummary(): Promise<SupplierAssignmentReviewSummary> {
+  return fetchJson<SupplierAssignmentReviewSummary>(
+    "/supplier-assignment-review/summary",
+    "supplier assignment review summary",
+  );
+}
+
+export function getSupplierAssignmentReviewItems(
+  query: SupplierAssignmentReviewQuery = {},
+): Promise<SupplierAssignmentReviewItem[]> {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "" && value !== "all") {
+      params.set(key, String(value));
+    }
+  });
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return fetchJson<SupplierAssignmentReviewItem[]>(
+    `/supplier-assignment-review/items${suffix}`,
+    "supplier assignment review items",
+  );
+}
+
+export function confirmSupplierAssignmentReview(
+  productId: number,
+  payload: SupplierAssignmentConfirmRequest,
+): Promise<unknown> {
+  return sendJson<unknown>(
+    `/products/${productId}/supplier-assignment-review/confirm`,
+    "supplier assignment review",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function rejectSupplierAssignmentReview(
+  productId: number,
+  payload: SupplierAssignmentRejectRequest = {},
+): Promise<unknown> {
+  return sendJson<unknown>(
+    `/products/${productId}/supplier-assignment-review/reject`,
+    "supplier assignment review",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function getSeasonalitySummary(month?: number): Promise<SeasonalitySummary> {

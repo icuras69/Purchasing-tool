@@ -179,6 +179,26 @@ button:disabled {
   gap: 16px;
 }
 
+.action-stack {
+  align-items: start;
+  display: grid;
+  gap: 8px;
+  min-width: 190px;
+}
+
+.action-stack label,
+.checkbox-label {
+  color: #374151;
+  display: grid;
+  font-size: 13px;
+  gap: 6px;
+}
+
+.checkbox-label {
+  align-content: center;
+  grid-template-columns: auto 1fr;
+}
+
 .mapping-form {
   display: grid;
   gap: 12px;

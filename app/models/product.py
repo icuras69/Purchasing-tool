@@ -71,6 +71,12 @@ class Product(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    supplier_assignment_review = relationship(
+        "ProductSupplierAssignmentReview",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
     historical_links = relationship(
         "ProductHistoricalLink",
         foreign_keys="ProductHistoricalLink.orderpro_product_id",

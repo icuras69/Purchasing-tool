@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   confirmProductSupplier,
+  confirmSupplierAssignmentReview,
   addPurchaseOrderLine,
   approvePurchaseOrder,
   cancelPurchaseOrder,
@@ -19,6 +20,8 @@ import {
   generateRecommendationLLMExplanation,
   getForecastReadinessRows,
   getForecastReadinessSummary,
+  getSupplierAssignmentReviewItems,
+  getSupplierAssignmentReviewSummary,
   getProductSeasonality,
   getPurchaseOrder,
   getRecommendation,
@@ -28,9 +31,11 @@ import {
   issuePurchaseOrder,
   listRecommendations,
   listPurchaseOrders,
+  listSuppliers,
   receivePurchaseOrder,
   rejectRecommendation,
   rejectProductSupplier,
+  rejectSupplierAssignmentReview,
   setPreferredProductSupplier,
   submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
@@ -54,7 +59,10 @@ import type {
   DraftFromProductsResponse,
   SeasonalProduct,
   SeasonalitySummary,
+  SupplierAssignmentReviewItem,
+  SupplierAssignmentReviewSummary,
   SupplierForecastResponse,
+  SupplierOption,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
@@ -67,6 +75,7 @@ type TabId =
   | "forecast"
   | "supplier-forecast"
   | "forecast-readiness"
+  | "supplier-assignment-review"
   | "seasonality"
   | "purchase-orders"
   | "recommendations";
@@ -93,6 +102,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "forecast", label: "Forecast" },
   { id: "supplier-forecast", label: "Supplier Forecast" },
   { id: "forecast-readiness", label: "Forecast Readiness" },
+  { id: "supplier-assignment-review", label: "Supplier Assignment Review" },
   { id: "seasonality", label: "Seasonality" },
   { id: "purchase-orders", label: "Purchase Orders" },
   { id: "recommendations", label: "Recommendations" },
@@ -677,6 +687,8 @@ function App() {
       )}
 
       {activeTab === "forecast-readiness" && <ForecastReadinessPanel />}
+
+      {activeTab === "supplier-assignment-review" && <SupplierAssignmentReviewPanel />}
 
       {activeTab === "seasonality" && <SeasonalityPanel />}
 
@@ -2542,6 +2554,320 @@ function sourceLabel(source: string | null | undefined): string {
     missing: "Missing",
   };
   return source ? labels[source] ?? source : "-";
+}
+
+type SupplierAssignmentFilter = "all" | "high" | "medium" | "low" | "none";
+type SupplierAssignmentStatusFilter = "all" | "suggested" | "no_evidence" | "confirmed" | "rejected";
+
+function SupplierAssignmentReviewPanel() {
+  const [summary, setSummary] = useState<SupplierAssignmentReviewSummary | null>(null);
+  const [rows, setRows] = useState<ResourceState<SupplierAssignmentReviewItem>>(initialResource);
+  const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
+  const [confidenceFilter, setConfidenceFilter] = useState<SupplierAssignmentFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<SupplierAssignmentStatusFilter>("all");
+  const [hasDemandOnly, setHasDemandOnly] = useState(false);
+  const [hasOpenDemandOnly, setHasOpenDemandOnly] = useState(false);
+  const [manualSupplierByProduct, setManualSupplierByProduct] = useState<Record<number, string>>({});
+  const [actionProductId, setActionProductId] = useState<number | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const loadReview = useCallback(
+    (active = true) => {
+      setRows((current) => ({ ...current, loading: true, error: null }));
+      setActionError(null);
+      Promise.all([
+        getSupplierAssignmentReviewSummary(),
+        getSupplierAssignmentReviewItems({
+          confidence: confidenceFilter === "all" ? undefined : confidenceFilter,
+          status: statusFilter === "all" ? undefined : statusFilter,
+          has_demand: hasDemandOnly ? true : undefined,
+          has_open_demand: hasOpenDemandOnly ? true : undefined,
+        }),
+        listSuppliers(),
+      ])
+        .then(([loadedSummary, loadedRows, loadedSuppliers]) => {
+          if (active) {
+            setSummary(loadedSummary);
+            setRows({ data: loadedRows, loading: false, error: null });
+            setSuppliers(loadedSuppliers);
+          }
+        })
+        .catch((error: Error) => {
+          if (active) {
+            setRows({ data: [], loading: false, error: error.message });
+          }
+        });
+    },
+    [confidenceFilter, hasDemandOnly, hasOpenDemandOnly, statusFilter],
+  );
+
+  useEffect(() => {
+    let active = true;
+    loadReview(active);
+    return () => {
+      active = false;
+    };
+  }, [loadReview]);
+
+  async function runReviewAction(
+    productId: number,
+    action: () => Promise<unknown>,
+    message: string,
+  ) {
+    setActionProductId(productId);
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      await action();
+      setActionMessage(message);
+      loadReview();
+    } catch (error) {
+      setActionError((error as Error).message);
+    } finally {
+      setActionProductId(null);
+    }
+  }
+
+  function confirmSuggestion(row: SupplierAssignmentReviewItem) {
+    if (!row.suggested_supplier_id) {
+      setActionError("No suggested supplier is available for this product.");
+      return;
+    }
+    void runReviewAction(
+      row.product_id,
+      () =>
+        confirmSupplierAssignmentReview(row.product_id, {
+          supplier_id: row.suggested_supplier_id as number,
+          reviewed_by: "manual",
+          note: "Confirmed from supplier assignment review.",
+        }),
+      "Supplier assignment confirmed locally.",
+    );
+  }
+
+  function rejectSuggestion(row: SupplierAssignmentReviewItem) {
+    if (!window.confirm("Reject this supplier assignment suggestion?")) {
+      return;
+    }
+    void runReviewAction(
+      row.product_id,
+      () =>
+        rejectSupplierAssignmentReview(row.product_id, {
+          reviewed_by: "manual",
+          reason: "Rejected from supplier assignment review.",
+        }),
+      "Supplier assignment suggestion rejected.",
+    );
+  }
+
+  function confirmManualSupplier(row: SupplierAssignmentReviewItem) {
+    const selectedSupplierId = Number(manualSupplierByProduct[row.product_id] || 0);
+    if (!selectedSupplierId) {
+      setActionError("Choose a supplier before confirming manually.");
+      return;
+    }
+    void runReviewAction(
+      row.product_id,
+      () =>
+        confirmSupplierAssignmentReview(row.product_id, {
+          supplier_id: selectedSupplierId,
+          reviewed_by: "manual",
+          note: "Manually selected supplier from review workflow.",
+        }),
+      "Manual supplier assignment confirmed locally.",
+    );
+  }
+
+  return (
+    <div className="review-stack" aria-label="Supplier assignment review workspace">
+      <section className="panel-heading">
+        <div>
+          <h2>Supplier Assignment Review</h2>
+          <p>
+            Review missing product suppliers using deterministic evidence. Confirmations are local only and are not pushed to OrderPro.
+          </p>
+        </div>
+        <button className="secondary-button" type="button" onClick={() => loadReview()}>
+          Refresh
+        </button>
+      </section>
+
+      {summary && (
+        <section className="summary-grid" aria-label="Supplier assignment summary">
+          <SummaryCard label="Missing supplier" value={summary.missing_supplier_products} />
+          <SummaryCard label="With stock" value={summary.missing_supplier_products_with_stock} />
+          <SummaryCard label="With demand" value={summary.missing_supplier_products_with_demand_history} />
+          <SummaryCard label="With open demand" value={summary.missing_supplier_products_with_open_customer_demand} />
+          <SummaryCard label="PO evidence" value={summary.missing_supplier_products_with_po_supplier_evidence} />
+          <SummaryCard label="No evidence" value={summary.missing_supplier_products_with_no_evidence} />
+          <SummaryCard label="High confidence" value={summary.suggested_supplier_count_by_confidence.high ?? 0} />
+          <SummaryCard label="Medium confidence" value={summary.suggested_supplier_count_by_confidence.medium ?? 0} />
+        </section>
+      )}
+
+      <section className="detail-panel" aria-label="Supplier assignment filters">
+        <div className="filter-grid">
+          <label>
+            Confidence
+            <select
+              value={confidenceFilter}
+              onChange={(event) => setConfidenceFilter(event.target.value as SupplierAssignmentFilter)}
+            >
+              <option value="all">All</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+              <option value="none">No evidence</option>
+            </select>
+          </label>
+          <label>
+            Status
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as SupplierAssignmentStatusFilter)}
+            >
+              <option value="all">All</option>
+              <option value="suggested">Suggested</option>
+              <option value="no_evidence">No evidence</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </label>
+          <label className="checkbox-label">
+            <input
+              checked={hasDemandOnly}
+              onChange={(event) => setHasDemandOnly(event.target.checked)}
+              type="checkbox"
+            />
+            Has demand
+          </label>
+          <label className="checkbox-label">
+            <input
+              checked={hasOpenDemandOnly}
+              onChange={(event) => setHasOpenDemandOnly(event.target.checked)}
+              type="checkbox"
+            />
+            Has open demand
+          </label>
+        </div>
+      </section>
+
+      {actionMessage && <p className="success-state">{actionMessage}</p>}
+      {actionError && <p className="error-state">{actionError}</p>}
+
+      <section className="table-wrap" aria-label="Supplier assignment review rows">
+        {rows.loading && <p className="empty-state">Loading supplier assignment review...</p>}
+        {rows.error && <p className="error-state">{rows.error}</p>}
+        {!rows.loading && !rows.error && rows.data.length === 0 && (
+          <p className="empty-state">No missing-supplier products match these filters.</p>
+        )}
+        {!rows.loading && !rows.error && rows.data.length > 0 && (
+          <table>
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>SKU</th>
+                <th>Stock</th>
+                <th>Demand</th>
+                <th>Suggested supplier</th>
+                <th>Confidence</th>
+                <th>Evidence</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.data.map((row) => (
+                <tr key={row.product_id}>
+                  <td>
+                    <strong>{row.name}</strong>
+                    <div className="muted">
+                      ID {row.product_id} | {formatValue(row.brand)} | {formatValue(row.category)}
+                    </div>
+                  </td>
+                  <td>{formatValue(row.orderpro_sku)}</td>
+                  <td>{formatValue(row.current_stock)}</td>
+                  <td>
+                    <div>{row.demand_history_available ? "Has demand" : "No demand history"}</div>
+                    <div className="muted">Open: {formatValue(row.open_customer_demand)}</div>
+                  </td>
+                  <td>{formatValue(row.suggested_supplier_name)}</td>
+                  <td>
+                    <span className={statusClassName(row.confidence_label)}>
+                      {row.confidence_label}
+                    </span>
+                    <div className="muted">{formatValue(row.confidence_score)}</div>
+                  </td>
+                  <td>
+                    <div>{formatValue(row.suggestion_source)}</div>
+                    <div className="muted">
+                      {formatValue(
+                        typeof row.evidence_summary?.message === "string"
+                          ? row.evidence_summary.message
+                          : row.evidence_date,
+                      )}
+                    </div>
+                    {row.warnings.map((warning) => (
+                      <div className="muted" key={warning}>{warning}</div>
+                    ))}
+                  </td>
+                  <td>
+                    <span className={statusClassName(row.status)}>{row.status}</span>
+                  </td>
+                  <td>
+                    <div className="action-stack">
+                      <button
+                        disabled={!row.suggested_supplier_id || actionProductId === row.product_id}
+                        onClick={() => confirmSuggestion(row)}
+                        type="button"
+                      >
+                        Confirm suggestion
+                      </button>
+                      <button
+                        disabled={actionProductId === row.product_id}
+                        onClick={() => rejectSuggestion(row)}
+                        type="button"
+                      >
+                        Reject suggestion
+                      </button>
+                      <label>
+                        Choose supplier manually
+                        <select
+                          aria-label={`Manual supplier for ${row.name}`}
+                          value={manualSupplierByProduct[row.product_id] ?? ""}
+                          onChange={(event) =>
+                            setManualSupplierByProduct((current) => ({
+                              ...current,
+                              [row.product_id]: event.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">Select supplier</option>
+                          {suppliers.map((supplier) => (
+                            <option key={supplier.id} value={supplier.id}>
+                              {supplier.name} {supplier.orderpro_code ? `(${supplier.orderpro_code})` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        disabled={actionProductId === row.product_id}
+                        onClick={() => confirmManualSupplier(row)}
+                        type="button"
+                      >
+                        Confirm manual supplier
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </div>
+  );
 }
 
 function ForecastReadinessPanel() {
