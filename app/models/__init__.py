@@ -15,6 +15,7 @@ from app.models.orderpro_purchase_order import OrderProPurchaseOrder, OrderProPu
 from app.models.product_seasonality_profile import ProductSeasonalityProfile
 from app.models.product_historical_link import ProductHistoricalLink
 from app.models.product_seasonality_backtest import ProductSeasonalityBacktest
+from app.models.product_forecast_input_profile import ProductForecastInputProfile
 
 __all__ = [
     "Product",
@@ -37,4 +38,5 @@ __all__ = [
     "ProductSeasonalityProfile",
     "ProductHistoricalLink",
     "ProductSeasonalityBacktest",
+    "ProductForecastInputProfile",
 ]

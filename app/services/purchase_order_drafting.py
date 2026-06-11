@@ -2,12 +2,13 @@ from dataclasses import dataclass
 from math import ceil
 from datetime import datetime
 
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, object_session, selectinload
 
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.supplier import Supplier
+from app.services.forecast_input_reconciliation import profile_or_effective_inputs
 from app.services.forecasting import build_forecast
 
 
@@ -177,11 +178,16 @@ def snapshot_purchase_order_line_from_product(
     *,
     notes: str | None = "Drafted from OrderPro product supplier.",
 ) -> PurchaseOrderLine:
-    unit_cost = product.cost_price
+    db = object_session(po)
+    effective_inputs = profile_or_effective_inputs(db, product) if db is not None else {
+        "cost_price": product.cost_price,
+        "lead_time_days": product.lead_time_days or (product.supplier_record.lead_time_days if product.supplier_record else None),
+        "min_order_qty": product.min_order_qty,
+        "pack_size": getattr(product, "pack_size", None),
+    }
+    unit_cost = effective_inputs["cost_price"]
     line_total = round(quantity * unit_cost, 2) if unit_cost is not None else None
-    lead_time_days = product.lead_time_days or None
-    if lead_time_days is None and product.supplier_record:
-        lead_time_days = product.supplier_record.lead_time_days
+    lead_time_days = effective_inputs["lead_time_days"]
 
     return PurchaseOrderLine(
         purchase_order_id=po.id,
@@ -193,8 +199,8 @@ def snapshot_purchase_order_line_from_product(
         unit_cost=unit_cost,
         currency=None,
         line_total=line_total,
-        minimum_order_quantity=product.min_order_qty,
-        pack_size=None,
+        minimum_order_quantity=effective_inputs["min_order_qty"],
+        pack_size=effective_inputs["pack_size"],
         lead_time_days=lead_time_days,
         notes=notes,
     )
@@ -255,9 +261,9 @@ def build_supplier_forecast(db: Session, supplier_id: int) -> dict:
         2,
     )
     estimated_costs = [
-        float(forecast.get("recommended_qty") or 0) * float(product.cost_price)
-        for forecast, product in zip(forecasts, products)
-        if product.cost_price is not None and float(forecast.get("recommended_qty") or 0) > 0
+        float(forecast.get("recommended_qty") or 0) * float(forecast.get("estimated_unit_cost"))
+        for forecast in forecasts
+        if forecast.get("estimated_unit_cost") is not None and float(forecast.get("recommended_qty") or 0) > 0
     ]
 
     return {

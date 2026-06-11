@@ -20,6 +20,8 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   generateRecommendationLLMExplanation,
+  getForecastReadinessRows,
+  getForecastReadinessSummary,
   getProductSeasonality,
   getSeasonalProducts,
   getSeasonalitySummary,
@@ -38,6 +40,8 @@ import {
 } from "./api";
 import type {
   ForecastResponse,
+  ForecastInputAudit,
+  ForecastReadinessSummary,
   ProductSeasonalityDetail,
   Product,
   ProductSupplierMapping,
@@ -57,6 +61,8 @@ vi.mock("./api", () => ({
   fetchProductSuppliers: vi.fn(),
   fetchProductForecast: vi.fn(),
   generateRecommendationLLMExplanation: vi.fn(),
+  getForecastReadinessSummary: vi.fn(),
+  getForecastReadinessRows: vi.fn(),
   getSeasonalitySummary: vi.fn(),
   getSeasonalProducts: vi.fn(),
   getProductSeasonality: vi.fn(),
@@ -226,6 +232,38 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
       supplier_ids: [],
       warnings: [],
     },
+    forecast_input_context: {
+      product_id: 1,
+      cost_price: 9.5,
+      cost_source: "orderpro_product_cost",
+      cost_confidence: "high",
+      lead_time_days: 4,
+      lead_time_source: "product_record",
+      lead_time_confidence: "high",
+      min_order_qty: 6,
+      moq_source: "product_record",
+      pack_size: null,
+      pack_size_source: "missing",
+      safety_stock: 0,
+      safety_stock_source: "product_record",
+      blocking_issues: [],
+      warning_issues: ["missing_pack_size"],
+      readiness_score: 87.5,
+    },
+    cost_price: 9.5,
+    cost_source: "orderpro_product_cost",
+    cost_confidence: "high",
+    estimated_unit_cost: 9.5,
+    estimated_cost_source: "orderpro_product_cost",
+    estimated_purchase_value: null,
+    moq_source: "product_record",
+    pack_size: null,
+    pack_size_source: "missing",
+    safety_stock_used: 0,
+    safety_stock_source: "product_record",
+    input_blocking_issues: [],
+    input_warning_issues: ["missing_pack_size"],
+    forecast_readiness_score: 87.5,
     reorder_point: 6,
     recommended_action: "monitor",
     recommended_qty: 0,
@@ -241,6 +279,64 @@ function mockForecast(overrides: Partial<ForecastResponse> = {}): ForecastRespon
       confidence_label: "high",
       advisory_message: "June is part of this product's elevated demand period.",
     },
+    ...overrides,
+  };
+}
+
+function mockForecastReadinessSummary(
+  overrides: Partial<ForecastReadinessSummary> = {},
+): ForecastReadinessSummary {
+  return {
+    product_count: 3,
+    products_with_complete_critical_inputs: 1,
+    products_missing_supplier: 1,
+    products_missing_lead_time: 1,
+    products_missing_cost: 1,
+    products_missing_moq: 0,
+    products_missing_pack_size: 2,
+    products_using_fallback_moq: 1,
+    products_using_po_derived_cost: 1,
+    products_using_orderpro_cost: 1,
+    suppliers_missing_lead_time: 1,
+    products_blocked_by_missing_supplier: 1,
+    products_blocked_by_missing_demand: 0,
+    products_complete_before_reconciliation: 1,
+    products_complete_after_reconciliation: 2,
+    products_missing_demand_history: 0,
+    products_missing_seasonality: 2,
+    products_with_validated_seasonality: 0,
+    products_with_harmful_seasonality: 0,
+    ...overrides,
+  };
+}
+
+function mockForecastInputAudit(overrides: Partial<ForecastInputAudit> = {}): ForecastInputAudit {
+  return {
+    product_id: 77,
+    orderpro_sku: "READY-77",
+    product_name: "Ready Product",
+    available_inputs: ["supplier_id", "cost_price", "lead_time"],
+    missing_inputs: ["pack_size"],
+    inputs_currently_used: ["supplier_id", "current_stock"],
+    advisory_inputs: [],
+    blocking_issues: [],
+    warning_issues: ["missing_pack_size", "fallback_moq"],
+    forecast_readiness_score: 87.5,
+    cost_price: 6.5,
+    cost_source: "orderpro_purchase_order_line",
+    cost_confidence: "medium",
+    lead_time_days: 5,
+    lead_time_source: "supplier_record",
+    lead_time_confidence: "medium",
+    min_order_qty: 1,
+    moq_source: "business_default",
+    pack_size: null,
+    pack_size_source: "missing",
+    safety_stock: 0,
+    safety_stock_source: "product_record",
+    seasonality_activation_recommendation: "safe_for_advisory_only",
+    seasonality_readiness_status: null,
+    forecast_recommended_qty: 0,
     ...overrides,
   };
 }
@@ -488,6 +584,8 @@ beforeEach(() => {
   vi.mocked(fetchWeakMappings).mockResolvedValue([]);
   vi.mocked(fetchProductSuppliers).mockResolvedValue([]);
   vi.mocked(fetchProductForecast).mockResolvedValue(mockForecast());
+  vi.mocked(getForecastReadinessSummary).mockResolvedValue(mockForecastReadinessSummary());
+  vi.mocked(getForecastReadinessRows).mockResolvedValue([mockForecastInputAudit()]);
   vi.mocked(getSeasonalitySummary).mockResolvedValue(mockSeasonalitySummary());
   vi.mocked(getSeasonalProducts).mockResolvedValue([]);
   vi.mocked(getProductSeasonality).mockResolvedValue(mockProductSeasonalityDetail());
@@ -551,10 +649,49 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Supplier Mappings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Forecast" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Forecast Readiness" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Seasonality" })).toBeInTheDocument();
     expect(await screen.findByText("No products found.")).toBeInTheDocument();
+  });
+
+  it("forecast readiness summary and source labels render", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Forecast Readiness" }));
+
+    const summary = await screen.findByLabelText("Forecast readiness summary");
+    expect(within(summary).getByText("OrderPro products")).toBeInTheDocument();
+    expect(within(summary).getByText("PO-derived cost")).toBeInTheDocument();
+
+    const table = await screen.findByLabelText("Forecast readiness rows");
+    expect(within(table).getByText("Ready Product")).toBeInTheDocument();
+    expect(within(table).getByText("READY-77")).toBeInTheDocument();
+    expect(within(table).getByText("OrderPro PO line")).toBeInTheDocument();
+    expect(within(table).getByText("Supplier record")).toBeInTheDocument();
+    expect(within(table).getByText("fallback_moq")).toBeInTheDocument();
+  });
+
+  it("forecast readiness filters call the matching endpoint", async () => {
+    vi.mocked(getForecastReadinessRows).mockResolvedValueOnce([mockForecastInputAudit()]).mockResolvedValueOnce([
+      mockForecastInputAudit({
+        product_id: 88,
+        orderpro_sku: "MISS-COST",
+        product_name: "Missing Cost Product",
+        cost_price: null,
+        cost_source: "missing",
+        cost_confidence: "missing",
+        warning_issues: ["missing_cost"],
+      }),
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Forecast Readiness" }));
+    await screen.findByLabelText("Forecast readiness rows");
+    await userEvent.click(screen.getByRole("button", { name: "Missing cost" }));
+
+    expect(getForecastReadinessRows).toHaveBeenLastCalledWith("missing_cost");
+    expect(await screen.findByText("Missing Cost Product")).toBeInTheDocument();
   });
 
   it("seasonality summary cards display backend counts", async () => {

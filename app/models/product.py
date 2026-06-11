@@ -65,6 +65,12 @@ class Product(Base):
         back_populates="product",
         cascade="all, delete-orphan",
     )
+    forecast_input_profile = relationship(
+        "ProductForecastInputProfile",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
     historical_links = relationship(
         "ProductHistoricalLink",
         foreign_keys="ProductHistoricalLink.orderpro_product_id",

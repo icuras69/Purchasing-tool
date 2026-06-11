@@ -12,6 +12,7 @@ from app.services.orderpro_demand import (
 )
 from app.services.inbound_stock import get_product_inbound_stock
 from app.services.seasonality import seasonality_context_for_product
+from app.services.forecast_input_reconciliation import profile_or_effective_inputs
 
 
 def calculate_reorder_point(avg_daily_usage: float, lead_time_days: int, safety_stock: float) -> float:
@@ -257,6 +258,21 @@ def build_forecast(db: Session, product: Product) -> dict:
             },
             "seasonality_context": None,
             "incoming_stock_context": None,
+            "forecast_input_context": None,
+            "cost_price": None,
+            "cost_source": "not_applicable",
+            "cost_confidence": "not_applicable",
+            "estimated_unit_cost": None,
+            "estimated_cost_source": "not_applicable",
+            "estimated_purchase_value": None,
+            "moq_source": "not_applicable",
+            "pack_size": None,
+            "pack_size_source": "not_applicable",
+            "safety_stock_used": 0.0,
+            "safety_stock_source": "not_applicable",
+            "input_blocking_issues": [],
+            "input_warning_issues": [],
+            "forecast_readiness_score": 0.0,
             "reorder_point": 0.0,
             "recommended_action": "ignore",
             "recommended_qty": 0.0,
@@ -270,6 +286,14 @@ def build_forecast(db: Session, product: Product) -> dict:
     inventory_ctx = resolve_inventory_context(product)
     seasonality_context = seasonality_context_for_product(db, product.id)
     incoming_stock_context = get_product_inbound_stock(db, product.id)
+    forecast_input_ctx = profile_or_effective_inputs(db, product)
+
+    if supplier_ctx["mapping_source"] != "missing":
+        supplier_ctx["purchase_price"] = forecast_input_ctx["cost_price"]
+        supplier_ctx["minimum_order_quantity_used"] = forecast_input_ctx["min_order_qty"] or 0
+        supplier_ctx["moq_source"] = forecast_input_ctx["moq_source"]
+        supplier_ctx["lead_time_days_used"] = forecast_input_ctx["lead_time_days"] or 0
+        supplier_ctx["lead_time_source"] = forecast_input_ctx["lead_time_source"]
 
     current_stock = inventory_ctx["current_stock"]
     incoming_qty = round(float(incoming_stock_context.get("incoming_qty") or 0), 2)
@@ -278,18 +302,21 @@ def build_forecast(db: Session, product: Product) -> dict:
     effective_available_stock_for_reorder = round(current_stock + incoming_qty - demand_ctx.total_open_demand, 2)
     lead_time_days_used = supplier_ctx["lead_time_days_used"]
     minimum_order_quantity_used = supplier_ctx["minimum_order_quantity_used"]
+    pack_size_used = forecast_input_ctx["pack_size"]
+    safety_stock_used = float(forecast_input_ctx["safety_stock"] or 0)
 
     projected_lead_time_demand = round(avg_daily_usage * lead_time_days_used, 2)
     reorder_point = round(
-        projected_lead_time_demand + float(product.safety_stock or 0),
+        projected_lead_time_demand + safety_stock_used,
         2,
     )
-    total_required_stock = round(projected_lead_time_demand + demand_ctx.total_open_demand + float(product.safety_stock or 0), 2)
+    total_required_stock = round(projected_lead_time_demand + demand_ctx.total_open_demand + safety_stock_used, 2)
     raw_recommended_qty_before_inbound = max(total_required_stock - current_stock, 0)
     raw_recommended_qty = max(total_required_stock - current_stock - incoming_qty, 0)
     recommended_qty_before_inbound = round_order_quantity(
         max(raw_recommended_qty_before_inbound, minimum_order_quantity_used if raw_recommended_qty_before_inbound > 0 else 0),
         product,
+        pack_size=pack_size_used,
     )
     has_open_demand_shortage = demand_ctx.total_open_demand > (current_stock + incoming_qty)
 
@@ -351,9 +378,15 @@ def build_forecast(db: Session, product: Product) -> dict:
         risk_level = "low"
         explanation = "Current stock is sufficient based on recent average daily usage."
 
-    recommended_qty = round_order_quantity(recommended_qty, product)
+    recommended_qty = round_order_quantity(recommended_qty, product, pack_size=pack_size_used)
     recommended_qty_after_inbound = recommended_qty
     inbound_adjustment_qty = round(max(recommended_qty_before_inbound - recommended_qty_after_inbound, 0), 2)
+    estimated_unit_cost = forecast_input_ctx["cost_price"]
+    estimated_purchase_value = (
+        round(recommended_qty * estimated_unit_cost, 2)
+        if estimated_unit_cost is not None and recommended_qty > 0
+        else None
+    )
 
     return {
         "product_id": product.id,
@@ -393,6 +426,21 @@ def build_forecast(db: Session, product: Product) -> dict:
         "supplier_context": build_supplier_context_response(supplier_ctx),
         "seasonality_context": seasonality_context,
         "incoming_stock_context": incoming_stock_context,
+        "forecast_input_context": forecast_input_ctx,
+        "cost_price": estimated_unit_cost,
+        "cost_source": forecast_input_ctx["cost_source"],
+        "cost_confidence": forecast_input_ctx["cost_confidence"],
+        "estimated_unit_cost": estimated_unit_cost,
+        "estimated_cost_source": forecast_input_ctx["cost_source"],
+        "estimated_purchase_value": estimated_purchase_value,
+        "moq_source": forecast_input_ctx["moq_source"],
+        "pack_size": pack_size_used,
+        "pack_size_source": forecast_input_ctx["pack_size_source"],
+        "safety_stock_used": safety_stock_used,
+        "safety_stock_source": forecast_input_ctx["safety_stock_source"],
+        "input_blocking_issues": forecast_input_ctx["blocking_issues"],
+        "input_warning_issues": forecast_input_ctx["warning_issues"],
+        "forecast_readiness_score": forecast_input_ctx["readiness_score"],
         "reorder_point": reorder_point,
         "recommended_action": recommended_action,
         "recommended_qty": recommended_qty,
@@ -401,11 +449,11 @@ def build_forecast(db: Session, product: Product) -> dict:
     }
 
 
-def round_order_quantity(quantity: float, product: Product) -> float:
+def round_order_quantity(quantity: float, product: Product, *, pack_size: float | None = None) -> float:
     if quantity <= 0:
         return 0.0
     rounded = float(ceil(quantity))
-    pack_size = getattr(product, "pack_size", None)
-    if pack_size and pack_size > 0:
-        rounded = float(ceil(rounded / pack_size) * pack_size)
+    effective_pack_size = pack_size if pack_size is not None else getattr(product, "pack_size", None)
+    if effective_pack_size and effective_pack_size > 0:
+        rounded = float(ceil(rounded / effective_pack_size) * effective_pack_size)
     return rounded

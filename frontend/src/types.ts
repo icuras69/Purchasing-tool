@@ -157,12 +157,97 @@ export interface ForecastResponse {
   lead_time_source: string;
   supplier_context?: ForecastSupplierContext | null;
   incoming_stock_context?: IncomingStockContext | null;
+  forecast_input_context?: ForecastInputContext | null;
+  cost_price?: number | null;
+  cost_source?: string | null;
+  cost_confidence?: string | null;
+  estimated_unit_cost?: number | null;
+  estimated_cost_source?: string | null;
+  estimated_purchase_value?: number | null;
+  moq_source?: string | null;
+  pack_size?: number | null;
+  pack_size_source?: string | null;
+  safety_stock_used?: number | null;
+  safety_stock_source?: string | null;
+  input_blocking_issues?: string[];
+  input_warning_issues?: string[];
+  forecast_readiness_score?: number | null;
   reorder_point: number;
   recommended_action: string;
   recommended_qty: number;
   risk_level: string;
   explanation: string;
   seasonality_context?: ForecastSeasonalityContext | null;
+}
+
+export interface ForecastReadinessSummary {
+  product_count: number;
+  products_with_complete_critical_inputs: number;
+  products_missing_supplier: number;
+  products_missing_lead_time: number;
+  products_missing_cost: number;
+  products_missing_moq?: number;
+  products_missing_pack_size?: number;
+  products_using_fallback_moq?: number;
+  products_using_po_derived_cost?: number;
+  products_using_orderpro_cost?: number;
+  suppliers_missing_lead_time?: number;
+  products_blocked_by_missing_supplier?: number;
+  products_blocked_by_missing_demand?: number;
+  products_complete_before_reconciliation?: number;
+  products_complete_after_reconciliation?: number;
+  products_missing_demand_history: number;
+  products_missing_seasonality: number;
+  products_with_validated_seasonality: number;
+  products_with_harmful_seasonality: number;
+}
+
+export interface ForecastInputContext {
+  product_id: number;
+  cost_price: number | null;
+  cost_source: string;
+  cost_confidence: string;
+  lead_time_days: number | null;
+  lead_time_source: string;
+  lead_time_confidence: string;
+  min_order_qty: number | null;
+  moq_source: string;
+  pack_size: number | null;
+  pack_size_source: string;
+  safety_stock: number | null;
+  safety_stock_source: string;
+  blocking_issues: string[];
+  warning_issues: string[];
+  readiness_score: number;
+}
+
+export interface ForecastInputAudit {
+  product_id: number;
+  orderpro_sku: string | null;
+  product_name: string;
+  available_inputs?: string[];
+  missing_inputs?: string[];
+  inputs_currently_used?: string[];
+  advisory_inputs?: string[];
+  blocking_issues: string[];
+  warning_issues: string[];
+  forecast_readiness_score?: number;
+  readiness_score?: number;
+  cost_price: number | null;
+  cost_source: string;
+  cost_confidence: string;
+  lead_time_days: number | null;
+  lead_time_source: string;
+  lead_time_confidence: string;
+  min_order_qty: number | null;
+  moq_source: string;
+  pack_size: number | null;
+  pack_size_source: string;
+  safety_stock: number | null;
+  safety_stock_source: string;
+  seasonality_activation_recommendation?: string;
+  seasonality_readiness_status?: string | null;
+  forecast_recommended_qty?: number;
 }
 
 export type SeasonalityStatus =

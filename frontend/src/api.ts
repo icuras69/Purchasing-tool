@@ -1,5 +1,7 @@
 import type {
   ForecastResponse,
+  ForecastInputAudit,
+  ForecastReadinessSummary,
   AddPurchaseOrderLineRequest,
   ApprovePurchaseOrderRequest,
   CreatePurchaseOrderRequest,
@@ -97,6 +99,15 @@ export function fetchProductSuppliers(): Promise<ProductSupplierMapping[]> {
 
 export function fetchProductForecast(productId: number): Promise<ForecastResponse> {
   return fetchJson<ForecastResponse>(`/products/${productId}/forecast`, "product forecast");
+}
+
+export function getForecastReadinessSummary(): Promise<ForecastReadinessSummary> {
+  return fetchJson<ForecastReadinessSummary>("/forecast-readiness/summary", "forecast readiness summary");
+}
+
+export function getForecastReadinessRows(filter?: string): Promise<ForecastInputAudit[]> {
+  const query = filter && filter !== "all" ? `?filter=${encodeURIComponent(filter)}` : "";
+  return fetchJson<ForecastInputAudit[]>(`/products/forecast-readiness${query}`, "forecast readiness");
 }
 
 export function getSeasonalitySummary(month?: number): Promise<SeasonalitySummary> {

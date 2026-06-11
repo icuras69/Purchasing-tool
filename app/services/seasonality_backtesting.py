@@ -11,6 +11,7 @@ from app.models.product import Product
 from app.models.product_seasonality_backtest import ProductSeasonalityBacktest
 from app.models.usage_history import UsageHistory
 from app.services.forecasting import build_forecast
+from app.services.forecast_input_reconciliation import effective_forecast_inputs, forecast_input_audit
 from app.services.historical_product_reconciliation import confirmed_links_for_products
 from app.services.seasonality import collect_contributing_usage_rows, is_orderpro_catalog_product, utc_now
 
@@ -442,6 +443,7 @@ ADVISORY_INPUTS = {"usable_seasonality_profile", "seasonality_backtest_result"}
 
 def audit_product_forecast_inputs(db: Session, product: Product) -> dict[str, Any]:
     forecast_before = build_forecast(db, product)
+    effective_inputs = effective_forecast_inputs(db, product)
     has_inventory_positions = bool(product.inventory_positions)
     has_orderpro_demand = bool(product.orderpro_order_items)
     links = confirmed_links_for_products(db, [product.id])
@@ -460,12 +462,11 @@ def audit_product_forecast_inputs(db: Session, product: Product) -> dict[str, An
         "reconciled_historical_demand": has_reconciled_history,
         "usable_seasonality_profile": bool(profile and profile.seasonality_tag != "insufficient_data"),
         "seasonality_backtest_result": latest_backtest is not None,
-        "lead_time": bool(product.lead_time_days and product.lead_time_days > 0)
-        or bool(product.supplier_record and product.supplier_record.lead_time_days),
-        "moq": product.min_order_qty is not None,
-        "pack_size": hasattr(product, "pack_size") and getattr(product, "pack_size", None) is not None,
-        "safety_stock": product.safety_stock is not None,
-        "cost_price": product.cost_price is not None,
+        "lead_time": effective_inputs["lead_time_days"] is not None,
+        "moq": effective_inputs["min_order_qty"] is not None,
+        "pack_size": effective_inputs["pack_size"] is not None,
+        "safety_stock": effective_inputs["safety_stock"] is not None,
+        "cost_price": effective_inputs["cost_price"] is not None,
         "active_status": bool(product.is_active),
     }
 
@@ -489,6 +490,10 @@ def audit_product_forecast_inputs(db: Session, product: Product) -> dict[str, An
         warnings.append("missing_lead_time")
     if not input_flags["cost_price"]:
         warnings.append("missing_cost")
+    if effective_inputs["moq_source"] == "business_default":
+        warnings.append("fallback_moq")
+    if not input_flags["pack_size"]:
+        warnings.append("missing_pack_size")
     if not (input_flags["shipped_orderpro_demand"] or input_flags["reconciled_historical_demand"]):
         warnings.append("missing_demand_history")
     if latest_backtest and latest_backtest.readiness_status == "harmful":
@@ -506,6 +511,18 @@ def audit_product_forecast_inputs(db: Session, product: Product) -> dict[str, An
         "blocking_issues": blocking,
         "warning_issues": warnings,
         "forecast_readiness_score": score,
+        "cost_price": effective_inputs["cost_price"],
+        "cost_source": effective_inputs["cost_source"],
+        "cost_confidence": effective_inputs["cost_confidence"],
+        "lead_time_days": effective_inputs["lead_time_days"],
+        "lead_time_source": effective_inputs["lead_time_source"],
+        "lead_time_confidence": effective_inputs["lead_time_confidence"],
+        "min_order_qty": effective_inputs["min_order_qty"],
+        "moq_source": effective_inputs["moq_source"],
+        "pack_size": effective_inputs["pack_size"],
+        "pack_size_source": effective_inputs["pack_size_source"],
+        "safety_stock": effective_inputs["safety_stock"],
+        "safety_stock_source": effective_inputs["safety_stock_source"],
         "seasonality_activation_recommendation": (
             latest_backtest.activation_recommendation if latest_backtest else "insufficient_evidence"
         ),
@@ -538,6 +555,7 @@ def forecast_readiness_summary(db: Session) -> dict[str, Any]:
         .all()
     )
     audits = [audit_product_forecast_inputs(db, product) for product in products]
+    input_audit = forecast_input_audit(db, products=products)
     return {
         "product_count": len(products),
         "products_with_complete_critical_inputs": sum(
@@ -546,6 +564,37 @@ def forecast_readiness_summary(db: Session) -> dict[str, Any]:
         "products_missing_supplier": sum(1 for audit in audits if "missing_supplier" in audit["blocking_issues"]),
         "products_missing_lead_time": sum(1 for audit in audits if "missing_lead_time" in audit["warning_issues"]),
         "products_missing_cost": sum(1 for audit in audits if "missing_cost" in audit["warning_issues"]),
+        "products_missing_moq": sum(1 for audit in audits if audit["moq_source"] == "missing"),
+        "products_missing_pack_size": sum(1 for audit in audits if "missing_pack_size" in audit["warning_issues"]),
+        "products_using_fallback_moq": sum(1 for audit in audits if audit["moq_source"] == "business_default"),
+        "products_using_po_derived_cost": sum(
+            1
+            for audit in audits
+            if audit["cost_source"] in {"orderpro_purchase_order_line", "local_purchase_order_line"}
+        ),
+        "products_using_orderpro_cost": sum(1 for audit in audits if audit["cost_source"] == "orderpro_product_cost"),
+        "suppliers_missing_lead_time": input_audit["suppliers_missing_lead_time"],
+        "products_blocked_by_missing_supplier": sum(1 for audit in audits if "missing_supplier" in audit["blocking_issues"]),
+        "products_blocked_by_missing_demand": sum(
+            1 for audit in audits if "missing_demand_history" in audit["warning_issues"]
+        ),
+        "products_complete_before_reconciliation": sum(
+            1
+            for product in products
+            if product.supplier_id is not None
+            and product.cost_price is not None
+            and (
+                (product.lead_time_days and product.lead_time_days > 0)
+                or (product.supplier_record and product.supplier_record.lead_time_days)
+            )
+        ),
+        "products_complete_after_reconciliation": sum(
+            1
+            for audit in audits
+            if "missing_supplier" not in audit["blocking_issues"]
+            and "missing_cost" not in audit["warning_issues"]
+            and "missing_lead_time" not in audit["warning_issues"]
+        ),
         "products_missing_demand_history": sum(
             1 for audit in audits if "missing_demand_history" in audit["warning_issues"]
         ),
@@ -586,6 +635,34 @@ def list_forecast_readiness(db: Session, *, filter_name: str | None = None) -> l
         audits = [audit for audit in audits if "missing_lead_time" in audit["warning_issues"]]
     elif filter_name == "missing_cost":
         audits = [audit for audit in audits if "missing_cost" in audit["warning_issues"]]
+    elif filter_name == "missing_moq":
+        audits = [audit for audit in audits if audit["moq_source"] == "missing"]
+    elif filter_name == "missing_pack_size":
+        audits = [audit for audit in audits if "missing_pack_size" in audit["warning_issues"]]
+    elif filter_name == "fallback_moq":
+        audits = [audit for audit in audits if audit["moq_source"] == "business_default"]
+    elif filter_name == "po_derived_cost":
+        audits = [
+            audit
+            for audit in audits
+            if audit["cost_source"] in {"orderpro_purchase_order_line", "local_purchase_order_line"}
+        ]
+    elif filter_name == "ready_for_forecast":
+        audits = [
+            audit
+            for audit in audits
+            if "missing_supplier" not in audit["blocking_issues"]
+            and "missing_cost" not in audit["warning_issues"]
+            and "missing_lead_time" not in audit["warning_issues"]
+        ]
+    elif filter_name == "incomplete_critical_inputs":
+        audits = [
+            audit
+            for audit in audits
+            if "missing_supplier" in audit["blocking_issues"]
+            or "missing_cost" in audit["warning_issues"]
+            or "missing_lead_time" in audit["warning_issues"]
+        ]
     elif filter_name == "no_demand_history":
         audits = [audit for audit in audits if "missing_demand_history" in audit["warning_issues"]]
     elif filter_name == "seasonal_validated":

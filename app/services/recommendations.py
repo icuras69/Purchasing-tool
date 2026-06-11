@@ -9,6 +9,7 @@ from app.models.product_supplier import ProductSupplier
 from app.models.purchase_order import PurchaseOrder
 from app.models.recommendation import Recommendation
 from app.services.forecasting import build_forecast
+from app.services.forecast_input_reconciliation import profile_or_effective_inputs
 from app.services.purchase_order_drafting import (
     recalculate_purchase_order_total,
     snapshot_purchase_order_line,
@@ -58,7 +59,8 @@ def create_reorder_recommendation_for_product(
         raise RecommendationError("Product is missing an OrderPro supplier mapping.")
 
     quantity = recommended_quantity(forecast, product)
-    unit_cost = product.cost_price
+    effective_inputs = profile_or_effective_inputs(db, product)
+    unit_cost = effective_inputs["cost_price"]
     estimated_total_cost = round(quantity * unit_cost, 2) if unit_cost is not None else None
     now = datetime.utcnow()
     supplier = product.supplier_record
@@ -83,7 +85,7 @@ def create_reorder_recommendation_for_product(
         currency=None,
         reason=recommendation_reason(forecast, needs_mapping),
         confidence=None,
-        input_snapshot=input_snapshot(product, supplier_context, forecast),
+        input_snapshot=input_snapshot(product, supplier_context, forecast, effective_inputs),
         forecast_snapshot=json_safe_snapshot(forecast),
         supplier_context_snapshot=json_safe_snapshot(supplier_context),
         model_name=None,
@@ -117,8 +119,14 @@ def recommendation_reason(forecast: dict[str, Any], needs_mapping: bool) -> str 
     return explanation
 
 
-def input_snapshot(product: Product, supplier_context: dict[str, Any], forecast: dict[str, Any] | None = None) -> dict[str, Any]:
+def input_snapshot(
+    product: Product,
+    supplier_context: dict[str, Any],
+    forecast: dict[str, Any] | None = None,
+    effective_inputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     forecast = forecast or {}
+    effective_inputs = effective_inputs or {}
     return {
         "product": {
             "id": product.id,
@@ -133,6 +141,19 @@ def input_snapshot(product: Product, supplier_context: dict[str, Any], forecast:
             "min_order_qty": product.min_order_qty,
             "cost_price": product.cost_price,
             "source_system": product.source_system,
+        },
+        "effective_forecast_inputs": {
+            "cost_price": effective_inputs.get("cost_price", forecast.get("cost_price")),
+            "cost_source": effective_inputs.get("cost_source", forecast.get("cost_source")),
+            "cost_confidence": effective_inputs.get("cost_confidence", forecast.get("cost_confidence")),
+            "lead_time_days": effective_inputs.get("lead_time_days", forecast.get("lead_time_days_used")),
+            "lead_time_source": effective_inputs.get("lead_time_source", forecast.get("lead_time_source")),
+            "min_order_qty": effective_inputs.get("min_order_qty"),
+            "moq_source": effective_inputs.get("moq_source", forecast.get("moq_source")),
+            "pack_size": effective_inputs.get("pack_size", forecast.get("pack_size")),
+            "pack_size_source": effective_inputs.get("pack_size_source", forecast.get("pack_size_source")),
+            "safety_stock": effective_inputs.get("safety_stock", forecast.get("safety_stock_used")),
+            "safety_stock_source": effective_inputs.get("safety_stock_source", forecast.get("safety_stock_source")),
         },
         "orderpro_product_supplier": {
             "supplier_id": product.supplier_id,

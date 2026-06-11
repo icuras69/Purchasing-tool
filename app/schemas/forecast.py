@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel
 
@@ -38,6 +38,26 @@ class IncomingStockContext(BaseModel):
     latest_expected_date: date | None
     supplier_ids: list[int]
     warnings: list[str]
+
+
+class ForecastInputContext(BaseModel):
+    product_id: int
+    cost_price: float | None = None
+    cost_source: str
+    cost_confidence: str
+    cost_updated_at: datetime | None = None
+    lead_time_days: int | None = None
+    lead_time_source: str
+    lead_time_confidence: str
+    min_order_qty: float | None = None
+    moq_source: str
+    pack_size: float | None = None
+    pack_size_source: str
+    safety_stock: float | None = None
+    safety_stock_source: str
+    blocking_issues: list[str]
+    warning_issues: list[str]
+    readiness_score: float
 
 
 class ForecastResponse(BaseModel):
@@ -81,6 +101,22 @@ class ForecastResponse(BaseModel):
     supplier_context: ForecastSupplierContext | None = None
     seasonality_context: ForecastSeasonalityContext | None = None
     incoming_stock_context: IncomingStockContext | None = None
+    forecast_input_context: ForecastInputContext | None = None
+
+    cost_price: float | None = None
+    cost_source: str | None = None
+    cost_confidence: str | None = None
+    estimated_unit_cost: float | None = None
+    estimated_cost_source: str | None = None
+    estimated_purchase_value: float | None = None
+    moq_source: str | None = None
+    pack_size: float | None = None
+    pack_size_source: str | None = None
+    safety_stock_used: float | None = None
+    safety_stock_source: str | None = None
+    input_blocking_issues: list[str] = []
+    input_warning_issues: list[str] = []
+    forecast_readiness_score: float | None = None
 
     reorder_point: float
     recommended_action: str

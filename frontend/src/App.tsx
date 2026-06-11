@@ -17,6 +17,8 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   generateRecommendationLLMExplanation,
+  getForecastReadinessRows,
+  getForecastReadinessSummary,
   getProductSeasonality,
   getPurchaseOrder,
   getRecommendation,
@@ -37,6 +39,8 @@ import {
 import { productMatchesQuery, supplierDisplayName } from "./productDisplay";
 import type {
   ForecastResponse,
+  ForecastInputAudit,
+  ForecastReadinessSummary,
   ForecastSupplierContext,
   RecommendationLLMExplanation,
   ProductSeasonalityDetail,
@@ -62,6 +66,7 @@ type TabId =
   | "mappings"
   | "forecast"
   | "supplier-forecast"
+  | "forecast-readiness"
   | "seasonality"
   | "purchase-orders"
   | "recommendations";
@@ -87,6 +92,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "mappings", label: "Supplier Mappings" },
   { id: "forecast", label: "Forecast" },
   { id: "supplier-forecast", label: "Supplier Forecast" },
+  { id: "forecast-readiness", label: "Forecast Readiness" },
   { id: "seasonality", label: "Seasonality" },
   { id: "purchase-orders", label: "Purchase Orders" },
   { id: "recommendations", label: "Recommendations" },
@@ -669,6 +675,8 @@ function App() {
       {activeTab === "supplier-forecast" && (
         <SupplierForecastPanel onViewPurchaseOrder={handleViewGeneratedPo} />
       )}
+
+      {activeTab === "forecast-readiness" && <ForecastReadinessPanel />}
 
       {activeTab === "seasonality" && <SeasonalityPanel />}
 
@@ -1547,8 +1555,47 @@ function ForecastDetails({ forecast }: { forecast: ForecastResponse }) {
       </section>
 
       <SupplierContextDetails context={forecast.supplier_context ?? null} />
+      <ForecastInputDetails forecast={forecast} />
       <IncomingStockDetails context={forecast.incoming_stock_context ?? null} />
     </div>
+  );
+}
+
+function ForecastInputDetails({ forecast }: { forecast: ForecastResponse }) {
+  return (
+    <section className="detail-panel" aria-label="Forecast input sources">
+      <h2>Forecast Inputs</h2>
+      <dl className="detail-list">
+        <div>
+          <dt>Estimated unit cost</dt>
+          <dd>{formatValue(forecast.estimated_unit_cost)}</dd>
+        </div>
+        <div>
+          <dt>Cost source</dt>
+          <dd>{sourceLabel(forecast.estimated_cost_source ?? forecast.cost_source)}</dd>
+        </div>
+        <div>
+          <dt>MOQ source</dt>
+          <dd>{sourceLabel(forecast.moq_source)}</dd>
+        </div>
+        <div>
+          <dt>Pack size</dt>
+          <dd>{formatValue(forecast.pack_size)}</dd>
+        </div>
+        <div>
+          <dt>Pack source</dt>
+          <dd>{sourceLabel(forecast.pack_size_source)}</dd>
+        </div>
+        <div>
+          <dt>Readiness score</dt>
+          <dd>{formatValue(forecast.forecast_readiness_score)}</dd>
+        </div>
+        <div>
+          <dt>Input warnings</dt>
+          <dd>{(forecast.input_warning_issues ?? []).join(", ") || "-"}</dd>
+        </div>
+      </dl>
+    </section>
   );
 }
 
@@ -2460,6 +2507,179 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
   );
 }
 
+type ForecastReadinessFilter =
+  | "all"
+  | "missing_supplier"
+  | "missing_cost"
+  | "missing_lead_time"
+  | "missing_moq"
+  | "missing_pack_size"
+  | "fallback_moq"
+  | "po_derived_cost"
+  | "ready_for_forecast";
+
+const forecastReadinessFilters: Array<{ value: ForecastReadinessFilter; label: string }> = [
+  { value: "all", label: "All products" },
+  { value: "missing_supplier", label: "Missing supplier" },
+  { value: "missing_cost", label: "Missing cost" },
+  { value: "missing_lead_time", label: "Missing lead time" },
+  { value: "missing_moq", label: "Missing MOQ" },
+  { value: "missing_pack_size", label: "Missing pack size" },
+  { value: "fallback_moq", label: "Fallback MOQ" },
+  { value: "po_derived_cost", label: "PO-derived cost" },
+  { value: "ready_for_forecast", label: "Ready for forecast" },
+];
+
+function sourceLabel(source: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    orderpro_product_cost: "OrderPro product cost",
+    orderpro_purchase_order_line: "OrderPro PO line",
+    local_purchase_order_line: "Local PO line",
+    product_record: "Product record",
+    supplier_record: "Supplier record",
+    legacy_product_supplier: "Legacy mapping",
+    business_default: "Business default",
+    missing: "Missing",
+  };
+  return source ? labels[source] ?? source : "-";
+}
+
+function ForecastReadinessPanel() {
+  const [summary, setSummary] = useState<ForecastReadinessSummary | null>(null);
+  const [rows, setRows] = useState<ResourceState<ForecastInputAudit>>(initialResource);
+  const [filter, setFilter] = useState<ForecastReadinessFilter>("all");
+
+  const loadReadiness = useCallback(
+    (active = true) => {
+      setRows((current) => ({ ...current, loading: true, error: null }));
+      Promise.all([
+        getForecastReadinessSummary(),
+        getForecastReadinessRows(filter),
+      ])
+        .then(([loadedSummary, loadedRows]) => {
+          if (active) {
+            setSummary(loadedSummary);
+            setRows({ data: loadedRows, loading: false, error: null });
+          }
+        })
+        .catch((error: Error) => {
+          if (active) {
+            setRows({ data: [], loading: false, error: error.message });
+          }
+        });
+    },
+    [filter],
+  );
+
+  useEffect(() => {
+    let active = true;
+    loadReadiness(active);
+    return () => {
+      active = false;
+    };
+  }, [loadReadiness]);
+
+  return (
+    <div className="review-stack" aria-label="Forecast readiness workspace">
+      <section className="panel-heading">
+        <div>
+          <h2>Forecast Readiness</h2>
+          <p>
+            Deterministic reconciliation only. These inputs explain forecast quality and do not activate seasonality.
+          </p>
+        </div>
+        <button className="secondary-button" type="button" onClick={() => loadReadiness()}>
+          Refresh
+        </button>
+      </section>
+
+      {summary && (
+        <section className="summary-grid" aria-label="Forecast readiness summary">
+          <SummaryCard label="OrderPro products" value={summary.product_count} />
+          <SummaryCard label="Complete before reconciliation" value={summary.products_complete_before_reconciliation ?? "-"} />
+          <SummaryCard label="Complete after reconciliation" value={summary.products_complete_after_reconciliation ?? summary.products_with_complete_critical_inputs} />
+          <SummaryCard label="Missing supplier" value={summary.products_missing_supplier} />
+          <SummaryCard label="Missing cost" value={summary.products_missing_cost} />
+          <SummaryCard label="Missing lead time" value={summary.products_missing_lead_time} />
+          <SummaryCard label="Fallback MOQ" value={summary.products_using_fallback_moq ?? "-"} />
+          <SummaryCard label="PO-derived cost" value={summary.products_using_po_derived_cost ?? "-"} />
+        </section>
+      )}
+
+      <section className="detail-panel" aria-label="Forecast readiness filters">
+        <div className="filter-row">
+          {forecastReadinessFilters.map((option) => (
+            <button
+              key={option.value}
+              className={filter === option.value ? "filter-chip active" : "filter-chip"}
+              type="button"
+              onClick={() => setFilter(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="table-wrap" aria-label="Forecast readiness rows">
+        {rows.loading && <p className="empty-state">Loading forecast readiness...</p>}
+        {rows.error && <p className="error-state">{rows.error}</p>}
+        {!rows.loading && !rows.error && rows.data.length === 0 && (
+          <p className="empty-state">No products match this readiness filter.</p>
+        )}
+        {!rows.loading && !rows.error && rows.data.length > 0 && (
+          <table>
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>SKU</th>
+                <th>Cost</th>
+                <th>Lead time</th>
+                <th>MOQ</th>
+                <th>Pack</th>
+                <th>Readiness</th>
+                <th>Issues</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.data.map((row) => (
+                <tr key={row.product_id}>
+                  <td>{row.product_name}</td>
+                  <td>{formatValue(row.orderpro_sku)}</td>
+                  <td>
+                    <strong>{formatValue(row.cost_price)}</strong>
+                    <span className="muted"> {sourceLabel(row.cost_source)}</span>
+                  </td>
+                  <td>
+                    <strong>{formatValue(row.lead_time_days)}</strong>
+                    <span className="muted"> {sourceLabel(row.lead_time_source)}</span>
+                  </td>
+                  <td>
+                    <strong>{formatValue(row.min_order_qty)}</strong>
+                    <span className="muted"> {sourceLabel(row.moq_source)}</span>
+                  </td>
+                  <td>
+                    <strong>{formatValue(row.pack_size)}</strong>
+                    <span className="muted"> {sourceLabel(row.pack_size_source)}</span>
+                  </td>
+                  <td>{formatValue(row.forecast_readiness_score ?? row.readiness_score)}</td>
+                  <td>
+                    {[...(row.blocking_issues ?? []), ...(row.warning_issues ?? [])].map((issue) => (
+                      <span key={issue} className={issue.startsWith("missing_supplier") ? "status rejected" : "status needs-review"}>
+                        {issue}
+                      </span>
+                    ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function SeasonalityPanel() {
   const currentMonth = new Date().getMonth() + 1;
   const [month, setMonth] = useState(currentMonth);
@@ -2767,7 +2987,7 @@ function SeasonalityPanel() {
   );
 }
 
-function SummaryCard({ label, value }: { label: string; value: number }) {
+function SummaryCard({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="summary-card">
       <dt>{label}</dt>
