@@ -92,7 +92,17 @@ Render backend pre-deploy command:
 python -m alembic upgrade head
 ```
 
+The baseline Alembic migration creates the pre-Alembic core schema on a clean database before later migrations add product suppliers, purchase order workflow tables, OrderPro fields, seasonality tables, and review tables.
+
 `Base.metadata.create_all()` remains gated behind `DATABASE_AUTO_CREATE_TABLES`; staging must keep this `false`.
+
+Optional disposable database check:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\check_clean_database_migrations.py --database-url "postgresql://USER:PASSWORD@HOST:PORT/DISPOSABLE_DB"
+```
+
+The check refuses the normal local development database and non-empty databases unless `--allow-non-empty` is passed.
 
 ### Sensitive Data Risks
 
