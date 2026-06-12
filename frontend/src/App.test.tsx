@@ -1073,6 +1073,9 @@ describe("App mapping review workflow", () => {
         id: 2,
         name: "Unmapped Product",
         current_stock: 3,
+        supplier_id: null,
+        supplier_name: null,
+        supplier_code: null,
         supplier_count: 0,
         preferred_supplier: null,
         preferred_supplier_id: null,
@@ -1087,6 +1090,57 @@ describe("App mapping review workflow", () => {
     expect(await screen.findByText("Unmapped Product")).toBeInTheDocument();
     expect(screen.getByText("Needs supplier mapping")).toBeInTheDocument();
     expect(screen.getByText("unmapped")).toBeInTheDocument();
+  });
+
+  it("displays a direct supplier as mapped even when legacy mappings are empty", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([
+      mockProduct({
+        id: 12,
+        name: "Direct Supplier Product",
+        supplier_id: 34,
+        supplier_name: "Direct OrderPro Supplier",
+        supplier_code: "DOP",
+        supplier_count: 0,
+        preferred_supplier: null,
+        preferred_supplier_id: null,
+        supplier_mappings: [],
+        mapping_status: "unmapped",
+      }),
+    ]);
+
+    render(<App />);
+
+    const row = (await screen.findByText("Direct Supplier Product")).closest("tr");
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("Direct OrderPro Supplier")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByText("mapped")).toBeInTheDocument();
+    expect(screen.getByLabelText("Select Direct Supplier Product for draft PO")).not.toBeDisabled();
+  });
+
+  it("filters products by direct supplier name and code", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([
+      mockProduct({
+        id: 12,
+        name: "Direct Supplier Product",
+        supplier_id: 34,
+        supplier_name: "Direct OrderPro Supplier",
+        supplier_code: "DOP",
+      }),
+      mockProduct({
+        id: 13,
+        name: "Other Product",
+        supplier_id: 35,
+        supplier_name: "Other Supplier",
+        supplier_code: "OTH",
+      }),
+    ]);
+
+    render(<App />);
+    await screen.findByText("Direct Supplier Product");
+    await userEvent.type(screen.getByLabelText("Search"), "DOP");
+
+    expect(screen.getByText("Direct Supplier Product")).toBeInTheDocument();
+    expect(screen.queryByText("Other Product")).not.toBeInTheDocument();
   });
 
   it("selects OrderPro-supplied products for draft PO generation", async () => {
@@ -1133,6 +1187,7 @@ describe("App mapping review workflow", () => {
         preferred_supplier_id: null,
         supplier_id: null,
         supplier_name: null,
+        supplier_code: null,
       }),
     ]);
 
@@ -1371,6 +1426,43 @@ describe("App mapping review workflow", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByText("Missing supplier mapping")).toBeInTheDocument();
+  });
+
+  it("does not show a missing-supplier warning when forecast context has a direct supplier", async () => {
+    vi.mocked(fetchProductForecast).mockResolvedValue(
+      mockForecast({
+        supplier_context: {
+          supplier_id: 10,
+          supplier_name: "Direct Forecast Supplier",
+          supplier_code: "DFS",
+          supplier_sku: "DFS-1",
+          supplier_product_name: null,
+          purchase_price: null,
+          currency: null,
+          lead_time_days: 4,
+          lead_time_source: "product_record",
+          minimum_order_quantity: 1,
+          moq_source: "product_record",
+          match_status: "mapped",
+          match_method: "orderpro_product_supplier",
+          mapping_source: "orderpro_product_supplier",
+          has_supplier_mapping: true,
+          needs_supplier_mapping: true,
+        },
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Forecast" }));
+    await userEvent.type(screen.getByLabelText("Product ID"), "1");
+    await userEvent.click(screen.getByRole("button", { name: "Fetch Forecast" }));
+
+    expect(await screen.findByText("Direct Forecast Supplier")).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "This product needs supplier mapping before purchasing recommendations can be trusted.",
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it("labels fallback supplier mapping sources clearly", async () => {

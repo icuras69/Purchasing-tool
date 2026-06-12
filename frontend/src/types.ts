@@ -21,19 +21,19 @@ export interface SupplierMapping {
 export interface Product {
   id: number;
   name: string;
-  supplier: string | null;
+  supplier: string | { name?: string | null } | null;
   orderpro_sku?: string | null;
-  supplier_id?: number | null;
-  supplier_name?: string | null;
-  supplier_code?: string | null;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  supplier_code: string | null;
   supplier_sku?: string | null;
   current_stock: number | null;
-  supplier_count: number;
-  preferred_supplier: string | null;
-  preferred_supplier_id: number | null;
-  preferred_supplier_sku: string | null;
-  supplier_mappings: SupplierMapping[];
-  mapping_status: MappingStatus;
+  supplier_count?: number;
+  preferred_supplier?: string | null;
+  preferred_supplier_id?: number | null;
+  preferred_supplier_sku?: string | null;
+  supplier_mappings?: SupplierMapping[];
+  mapping_status?: MappingStatus | null;
 }
 
 export interface ProductSupplierMapping {

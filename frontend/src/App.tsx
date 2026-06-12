@@ -41,7 +41,7 @@ import {
   unsetPreferredProductSupplier,
   updatePurchaseOrderLine,
 } from "./api";
-import { productMatchesQuery, supplierDisplayName } from "./productDisplay";
+import { isProductMapped, productMatchesQuery, supplierDisplayName } from "./productDisplay";
 import type {
   ForecastResponse,
   ForecastInputAudit,
@@ -302,6 +302,13 @@ function stockStatus(product: Pick<SeasonalProduct, "current_stock">): string {
   if (Number(product.current_stock || 0) <= 0) return "out_of_stock";
   if (Number(product.current_stock || 0) <= 5) return "low_stock";
   return "in_stock";
+}
+
+function seasonalProductHasSupplier(product: Pick<SeasonalProduct, "supplier_id" | "supplier_name">): boolean {
+  return (
+    (product.supplier_id !== null && product.supplier_id !== undefined) ||
+    Boolean(product.supplier_name)
+  );
 }
 
 function formatMonth(month: number): string {
@@ -744,8 +751,10 @@ function ProductTable({
         <tbody>
           {products.map((product) => {
             const isExpanded = expandedProductId === product.id;
-            const statusClass = product.supplier_id ? "status mapped" : "status unmapped";
-            const displayStatus = product.supplier_id ? "mapped" : "missing supplier";
+            const mapped = isProductMapped(product);
+            const legacyMappings = product.supplier_mappings ?? [];
+            const statusClass = mapped ? "status mapped" : "status unmapped";
+            const displayStatus = mapped ? "mapped" : "missing supplier";
 
             return (
               <Fragment key={product.id}>
@@ -754,7 +763,7 @@ function ProductTable({
                     <input
                       aria-label={`Select ${product.name} for draft PO`}
                       checked={selectedProductIds.includes(product.id)}
-                      disabled={!product.supplier_id}
+                      disabled={!mapped}
                       onChange={() => onToggleDraftSelection(product.id)}
                       type="checkbox"
                     />
@@ -765,14 +774,14 @@ function ProductTable({
                   <td>{formatValue(product.current_stock)}</td>
                   <td>{supplierDisplayName(product)}</td>
                   <td>{formatValue(product.supplier_id)}</td>
-                  <td>{product.supplier_count}</td>
+                  <td>{formatValue(product.supplier_count)}</td>
                   <td>
                     <span className={statusClass}>{displayStatus}</span>
                   </td>
                   <td>{formatValue(product.supplier_sku ?? product.preferred_supplier_sku)}</td>
                   <td>
                     <button
-                      disabled={product.supplier_mappings.length === 0}
+                      disabled={legacyMappings.length === 0}
                       onClick={() => onExpandedProductIdChange(isExpanded ? null : product.id)}
                       type="button"
                     >
@@ -797,7 +806,7 @@ function ProductTable({
                             </tr>
                           </thead>
                           <tbody>
-                            {product.supplier_mappings.map((mapping) => (
+                            {legacyMappings.map((mapping) => (
                               <tr key={mapping.id}>
                                 <td>{formatValue(mapping.supplier_name)}</td>
                                 <td>{formatValue(mapping.supplier_sku)}</td>
@@ -845,7 +854,7 @@ function DraftPoFromProductsPanel({
   const selectedSupplierIds = Array.from(
     new Set(
       selectedProducts
-        .map((product) => product.supplier_id)
+        .map((product) => product.supplier_id ?? product.preferred_supplier_id)
         .filter((value): value is number => value !== null && value !== undefined),
     ),
   );
@@ -1681,10 +1690,15 @@ function SupplierContextDetails({ context }: { context: ForecastSupplierContext 
     );
   }
 
+  const hasSupplierMapping =
+    context.has_supplier_mapping ||
+    (context.supplier_id !== null && context.supplier_id !== undefined) ||
+    Boolean(context.supplier_name);
+
   return (
     <section className="detail-panel" aria-label="Supplier context">
       <h2>Supplier Context</h2>
-      {context.needs_supplier_mapping && (
+      {!hasSupplierMapping && context.needs_supplier_mapping && (
         <div className="state warning">
           This product needs supplier mapping before purchasing recommendations can be trusted.
         </div>
@@ -3076,8 +3090,8 @@ function SeasonalityPanel() {
       if (stockFilter === "out_of_stock" && stockStatus(product) !== "out_of_stock") return false;
       if (stockFilter === "low_stock" && stockStatus(product) !== "low_stock") return false;
       if (stockFilter === "in_stock" && stockStatus(product) !== "in_stock") return false;
-      if (supplierAssignmentFilter === "assigned" && !product.supplier_id) return false;
-      if (supplierAssignmentFilter === "missing" && product.supplier_id) return false;
+      if (supplierAssignmentFilter === "assigned" && !seasonalProductHasSupplier(product)) return false;
+      if (supplierAssignmentFilter === "missing" && seasonalProductHasSupplier(product)) return false;
       if (quickFilter === "in_season_out_of_stock") {
         return product.current_seasonality_status === "in_season" && stockStatus(product) === "out_of_stock";
       }
@@ -3091,7 +3105,10 @@ function SeasonalityPanel() {
         return product.confidence_label === "high" && !["year_round", "insufficient_data"].includes(product.seasonality_tag ?? "");
       }
       if (quickFilter === "seasonal_missing_supplier") {
-        return !product.supplier_id && !["year_round", "insufficient_data"].includes(product.seasonality_tag ?? "");
+        return (
+          !seasonalProductHasSupplier(product) &&
+          !["year_round", "insufficient_data"].includes(product.seasonality_tag ?? "")
+        );
       }
       if (quickFilter === "seasonal_missing_lead_time") {
         return !["year_round", "insufficient_data"].includes(product.seasonality_tag ?? "");
@@ -3371,7 +3388,7 @@ function SeasonalProductsTable({
               <td>{product.name}</td>
               <td>
                 {formatValue(product.supplier_name)}
-                {!product.supplier_id && <div className="review-need">Missing supplier</div>}
+                {!seasonalProductHasSupplier(product) && <div className="review-need">Missing supplier</div>}
               </td>
               <td>
                 {formatValue(product.current_stock)}
