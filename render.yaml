@@ -5,8 +5,7 @@ services:
     region: frankfurt
     plan: free
     autoDeployTrigger: 'off'
-    buildCommand: pip install -r requirements-deploy.txt
-    preDeployCommand: python -m alembic upgrade head
+    buildCommand: pip install -r requirements-deploy.txt && python -m alembic upgrade head
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
@@ -71,3 +70,4 @@ databases:
     databaseName: purchasing_ai_staging
     user: purchasing_ai
     postgresMajorVersion: "17"
+
