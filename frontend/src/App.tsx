@@ -18,8 +18,11 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   generateRecommendationLLMExplanation,
+  clearStoredAccessToken,
+  getCurrentAdmin,
   getForecastReadinessRows,
   getForecastReadinessSummary,
+  getStoredAccessToken,
   getSupplierAssignmentReviewItems,
   getSupplierAssignmentReviewSummary,
   getProductSeasonality,
@@ -28,6 +31,7 @@ import {
   getSeasonalProducts,
   getSeasonalitySummary,
   getSupplierForecast,
+  loginAdmin,
   issuePurchaseOrder,
   listRecommendations,
   listPurchaseOrders,
@@ -36,6 +40,7 @@ import {
   rejectRecommendation,
   rejectProductSupplier,
   rejectSupplierAssignmentReview,
+  setUnauthorizedHandler,
   setPreferredProductSupplier,
   submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
@@ -47,6 +52,7 @@ import type {
   ForecastInputAudit,
   ForecastReadinessSummary,
   ForecastSupplierContext,
+  CurrentAdmin,
   RecommendationLLMExplanation,
   ProductSeasonalityDetail,
   Product,
@@ -406,6 +412,130 @@ function matchesText(values: Array<string | number | null | undefined>, query: s
 }
 
 function App() {
+  const [admin, setAdmin] = useState<CurrentAdmin | null>(() =>
+    getStoredAccessToken() ? { email: "", role: "admin" } : null,
+  );
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setAdmin(null);
+      setAuthMessage("Your session expired. Please sign in again.");
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  useEffect(() => {
+    if (!getStoredAccessToken()) {
+      return;
+    }
+    let active = true;
+    getCurrentAdmin()
+      .then((currentAdmin) => {
+        if (active) {
+          setAdmin(currentAdmin);
+          setAuthMessage(null);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          clearStoredAccessToken();
+          setAdmin(null);
+          setAuthMessage("Please sign in.");
+        }
+      })
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function handleLogin(email: string, password: string) {
+    setAuthMessage(null);
+    await loginAdmin({ email, password });
+    const currentAdmin = await getCurrentAdmin();
+    setAdmin(currentAdmin);
+  }
+
+  function handleLogout() {
+    clearStoredAccessToken();
+    setAdmin(null);
+    setAuthMessage("Signed out.");
+  }
+
+  if (!admin) {
+    return <LoginScreen message={authMessage} onLogin={handleLogin} />;
+  }
+
+  return <PurchasingApp admin={admin} onLogout={handleLogout} />;
+}
+
+function LoginScreen({
+  message,
+  onLogin,
+}: {
+  message: string | null;
+  onLogin: (email: string, password: string) => Promise<void>;
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      await onLogin(email, password);
+    } catch {
+      setError("Invalid email or password.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main className="app-shell auth-shell">
+      <section className="detail-panel auth-panel" aria-label="Admin login">
+        <h1>Purchasing AI</h1>
+        <p className="muted-text">Sign in with the staging administrator account.</p>
+        {message && <div className="state">{message}</div>}
+        <form className="mapping-form" onSubmit={handleSubmit}>
+          <label>
+            <span>Email</span>
+            <input
+              autoComplete="username"
+              onChange={(event) => setEmail(event.target.value)}
+              type="email"
+              value={email}
+            />
+          </label>
+          <label>
+            <span>Password</span>
+            <input
+              autoComplete="current-password"
+              onChange={(event) => setPassword(event.target.value)}
+              type="password"
+              value={password}
+            />
+          </label>
+          <button disabled={loading} type="submit">
+            {loading ? "Signing in..." : "Sign in"}
+          </button>
+        </form>
+        {error && <div className="state error">{error}</div>}
+      </section>
+    </main>
+  );
+}
+
+function PurchasingApp({
+  admin,
+  onLogout,
+}: {
+  admin: CurrentAdmin;
+  onLogout: () => void;
+}) {
   const [activeTab, setActiveTab] = useState<TabId>("products");
   const [products, setProducts] = useState<ResourceState<Product>>(initialResource);
   const [unmappedProducts, setUnmappedProducts] = useState<ResourceState<Product>>(initialResource);
@@ -602,6 +732,12 @@ function App() {
         <div>
           <h1>Purchasing AI</h1>
           <p>Product supplier mapping review</p>
+        </div>
+        <div className="auth-status">
+          <span>{admin.email || "Admin"}</span>
+          <button onClick={onLogout} type="button">
+            Logout
+          </button>
         </div>
         <label className="search-label">
           <span>Search</span>

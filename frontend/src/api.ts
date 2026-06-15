@@ -4,9 +4,12 @@ import type {
   ForecastReadinessSummary,
   AddPurchaseOrderLineRequest,
   ApprovePurchaseOrderRequest,
+  AuthTokenResponse,
+  CurrentAdmin,
   CreatePurchaseOrderRequest,
   DraftFromProductsRequest,
   DraftFromProductsResponse,
+  LoginRequest,
   Product,
   ProductSupplierInput,
   ProductSupplierMapping,
@@ -30,6 +33,9 @@ import type {
   WeakMapping,
 } from "./types";
 
+const AUTH_TOKEN_STORAGE_KEY = "purchasing_ai_access_token";
+let unauthorizedHandler: (() => void) | null = null;
+
 export function getApiBaseUrl(): string {
   return import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 }
@@ -38,28 +44,63 @@ export function apiUrl(path: string, baseUrl = getApiBaseUrl()): string {
   return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }
 
-async function fetchJson<T>(path: string, label: string): Promise<T> {
-  const response = await fetch(apiUrl(path));
-  return parseJsonResponse<T>(response, label);
+export function getStoredAccessToken(): string | null {
+  return sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+}
+
+export function storeAccessToken(token: string): void {
+  sessionStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+}
+
+export function clearStoredAccessToken(): void {
+  sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+}
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+function authorizationHeaders(): Record<string, string> {
+  const token = getStoredAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function fetchJson<T>(path: string, label: string, handleUnauthorized = true): Promise<T> {
+  const response = await fetch(apiUrl(path), {
+    headers: {
+      ...authorizationHeaders(),
+    },
+  });
+  return parseJsonResponse<T>(response, label, handleUnauthorized);
 }
 
 async function sendJson<T>(
   path: string,
   label: string,
   init: RequestInit,
+  handleUnauthorized = true,
 ): Promise<T> {
   const response = await fetch(apiUrl(path), {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...authorizationHeaders(),
       ...(init.headers ?? {}),
     },
   });
-  return parseJsonResponse<T>(response, label);
+  return parseJsonResponse<T>(response, label, handleUnauthorized);
 }
 
-async function parseJsonResponse<T>(response: Response, label: string): Promise<T> {
+async function parseJsonResponse<T>(
+  response: Response,
+  label: string,
+  handleUnauthorized = true,
+): Promise<T> {
   if (!response.ok) {
+    if (response.status === 401 && handleUnauthorized) {
+      clearStoredAccessToken();
+      unauthorizedHandler?.();
+    }
     let detail: string | null = null;
     try {
       const errorBody = await response.json();
@@ -84,6 +125,25 @@ async function parseJsonResponse<T>(response: Response, label: string): Promise<
   }
 
   return response.json();
+}
+
+export async function loginAdmin(payload: LoginRequest): Promise<AuthTokenResponse> {
+  const tokenResponse = await sendJson<AuthTokenResponse>(
+    "/auth/login",
+    "login",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: {},
+    },
+    false,
+  );
+  storeAccessToken(tokenResponse.access_token);
+  return tokenResponse;
+}
+
+export function getCurrentAdmin(): Promise<CurrentAdmin> {
+  return fetchJson<CurrentAdmin>("/auth/me", "current admin");
 }
 
 export function fetchProducts(): Promise<Product[]> {

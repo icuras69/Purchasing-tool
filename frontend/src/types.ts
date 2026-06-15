@@ -1,5 +1,21 @@
 export type MappingStatus = "mapped" | "unmapped" | string;
 
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface AuthTokenResponse {
+  access_token: string;
+  token_type: "bearer" | string;
+  expires_in: number;
+}
+
+export interface CurrentAdmin {
+  email: string;
+  role: "admin" | string;
+}
+
 export interface SupplierMapping {
   id: number;
   supplier_id: number;

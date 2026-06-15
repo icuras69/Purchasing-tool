@@ -33,6 +33,11 @@ def test_render_blueprint_is_valid_yaml_with_safe_staging_defaults():
     assert "healthCheckPath: /health" in blueprint
     assert "key: ORDERPRO_SYNC_ENABLED" in blueprint
     assert "value: false" in blueprint
+    assert "key: ADMIN_EMAIL" in blueprint
+    assert "key: ADMIN_PASSWORD_HASH" in blueprint
+    assert "key: JWT_SECRET_KEY" in blueprint
+    assert "key: JWT_ALGORITHM" in blueprint
+    assert "key: ACCESS_TOKEN_EXPIRE_MINUTES" in blueprint
     assert "key: LLM_PROVIDER" in blueprint
     assert "value: mock" in blueprint
     assert "key: ENABLE_REAL_LLM" in blueprint
@@ -57,6 +62,8 @@ def test_requirements_deploy_is_utf8_and_excludes_dev_or_gpu_dependencies():
     assert "psycopg2-binary==" in normalized
     assert "uvicorn==" in normalized
     assert "httpx==" in normalized
+    assert "pyjwt==" in normalized
+    assert "pwdlib" in normalized
     assert "pytest" not in normalized
     assert "jupyter" not in normalized
     assert "torch" not in normalized

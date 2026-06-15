@@ -10,11 +10,18 @@ from starlette.testclient import TestClient
 
 os.environ["DEBUG"] = "false"
 os.environ["DATABASE_AUTO_CREATE_TABLES"] = "false"
+os.environ.setdefault("ADMIN_EMAIL", "admin@example.com")
+os.environ.setdefault(
+    "ADMIN_PASSWORD_HASH",
+    "$argon2id$v=19$m=65536,t=3,p=4$4iz3vbfHvFa9Dc9DDnZYZQ$bBpIXZ46lETri3hsUtsECx3PsAudYlu4Fu4GB50YRHc",
+)
+os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-key-with-enough-entropy")
 
 import app.models  # noqa: E402,F401
 from app.db.base import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.main import app  # noqa: E402
+from app.core.security import create_access_token  # noqa: E402
 
 
 def _test_database_url() -> str:
@@ -84,7 +91,7 @@ def session_factory():
 
 
 @pytest.fixture
-def client(session_factory) -> Generator[TestClient, None, None]:
+def unauthenticated_client(session_factory) -> Generator[TestClient, None, None]:
     def override_get_db() -> Generator[Session, None, None]:
         db = session_factory()
         try:
@@ -96,3 +103,18 @@ def client(session_factory) -> Generator[TestClient, None, None]:
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def admin_auth_headers() -> dict[str, str]:
+    token, _expires_in = create_access_token(os.environ["ADMIN_EMAIL"])
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def client(
+    unauthenticated_client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> Generator[TestClient, None, None]:
+    unauthenticated_client.headers.update(admin_auth_headers)
+    yield unauthenticated_client

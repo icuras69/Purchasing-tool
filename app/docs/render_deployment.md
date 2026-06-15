@@ -20,7 +20,7 @@ Python 3.12 is a stable deployment target with broad package support for FastAPI
 
 `requirements.txt` is a development/local environment file and includes notebooks, test tools, data import tools, and GPU/PyTorch packages.
 
-`requirements-deploy.txt` is the backend deployment file. It includes only the FastAPI runtime stack, SQLAlchemy/Alembic, PostgreSQL driver, Pydantic settings, Uvicorn, and `httpx`.
+`requirements-deploy.txt` is the backend deployment file. It includes only the FastAPI runtime stack, SQLAlchemy/Alembic, PostgreSQL driver, Pydantic settings, Uvicorn, `httpx`, JWT validation, and Argon2 password verification.
 
 Excluded from deployment:
 
@@ -44,6 +44,11 @@ Required environment variables for staging:
 - `DEBUG=false`
 - `DATABASE_AUTO_CREATE_TABLES=false`
 - `FRONTEND_ORIGIN`
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD_HASH`
+- `JWT_SECRET_KEY`
+- `JWT_ALGORITHM=HS256`
+- `ACCESS_TOKEN_EXPIRE_MINUTES=60`
 - `ORDERPRO_API_BASE_URL`
 - `ORDERPRO_SYNC_ENABLED=false`
 - `LLM_PROVIDER=mock`
@@ -71,6 +76,43 @@ Local development origins remain enabled:
 Deployment origins are added through `FRONTEND_ORIGIN` or comma-separated `CORS_ORIGINS`.
 
 The backend does not use wildcard CORS with credentials.
+
+### Authentication
+
+The staging backend uses single-admin authentication.
+
+Public endpoints:
+
+- `GET /health`
+- `POST /auth/login`
+
+All business data and mutation endpoints require:
+
+```text
+Authorization: Bearer <access_token>
+```
+
+When `DEBUG=false`, `/docs`, `/redoc`, and `/openapi.json` are disabled so API documentation is not publicly exposed.
+
+Generate a JWT secret locally:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Generate an admin password hash without placing the password in shell history:
+
+```powershell
+@'
+from getpass import getpass
+from pwdlib import PasswordHash
+print(PasswordHash.recommended().hash(getpass("Admin password: ")))
+'@ | .\.venv\Scripts\python.exe
+```
+
+Enter only the generated hash in `ADMIN_PASSWORD_HASH`. Do not enter or commit the plaintext password.
+
+To rotate the admin password, generate a new hash and replace `ADMIN_PASSWORD_HASH` in Render. To invalidate existing sessions, rotate `JWT_SECRET_KEY` and redeploy/restart the backend.
 
 ### Frontend API URL
 
@@ -173,6 +215,9 @@ Render supplies `DATABASE_URL` from `purchasing-ai-staging-db`.
 Manually enter:
 
 - `FRONTEND_ORIGIN`: the frontend Render URL, for example `https://purchasing-ai-frontend.onrender.com`.
+- `ADMIN_EMAIL`: the single staging administrator email.
+- `ADMIN_PASSWORD_HASH`: Argon2 hash generated locally with `pwdlib`.
+- `JWT_SECRET_KEY`: high-entropy random secret generated locally.
 - `ORDERPRO_API_TOKEN`: leave blank for the initial demo unless a staging read-only token is intentionally configured.
 - `OPENAI_API_KEY`: leave blank for the initial demo.
 - `OPENAI_MODEL`: leave blank unless real LLM is explicitly enabled in a later task.
@@ -209,7 +254,20 @@ Backend:
 
 ```powershell
 Invoke-RestMethod https://<backend-service>.onrender.com/health
-Invoke-RestMethod https://<backend-service>.onrender.com/
+```
+
+Login:
+
+```powershell
+$login = Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://<backend-service>.onrender.com/auth/login" `
+  -ContentType "application/json" `
+  -Body (@{ email = "<admin-email>"; password = "<admin-password>" } | ConvertTo-Json)
+
+Invoke-RestMethod `
+  -Uri "https://<backend-service>.onrender.com/auth/me" `
+  -Headers @{ Authorization = "Bearer $($login.access_token)" }
 ```
 
 Frontend:
@@ -248,7 +306,6 @@ If the demo needs to be disabled:
 
 ## Remaining Blockers Before Public Demo
 
-- No authentication or access control exists yet.
 - Staging data may include customer personal information.
 - OrderPro sync should use a staging/read-only token only.
 - OpenAI provider should remain disabled until a separate security review.

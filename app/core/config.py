@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,7 +36,33 @@ class Settings(BaseSettings):
     orderpro_open_demand_statuses: str = "confirmed,packed,backorder"
     orderpro_excluded_demand_statuses: str = "cancelled"
     orderpro_demand_included_statuses: str = "shipped"
+    admin_email: str = ""
+    admin_password_hash: str = ""
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+    login_rate_limit_attempts: int = 5
+    login_rate_limit_window_seconds: int = 300
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    @model_validator(mode="after")
+    def validate_security_settings(self) -> "Settings":
+        if not self.debug:
+            missing = [
+                name
+                for name, value in (
+                    ("ADMIN_EMAIL", self.admin_email),
+                    ("ADMIN_PASSWORD_HASH", self.admin_password_hash),
+                    ("JWT_SECRET_KEY", self.jwt_secret_key),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "Missing required security environment variables when DEBUG=false: "
+                    + ", ".join(missing)
+                )
+        return self
 
     def allowed_cors_origins(self) -> list[str]:
         origins = list(LOCAL_FRONTEND_ORIGINS)

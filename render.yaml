@@ -18,6 +18,16 @@ services:
         value: false
       - key: DATABASE_AUTO_CREATE_TABLES
         value: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 60
       - key: FRONTEND_ORIGIN
         sync: false
       - key: CORS_ORIGINS

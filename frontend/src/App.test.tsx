@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -21,8 +21,11 @@ import {
   fetchUnmappedProducts,
   fetchWeakMappings,
   generateRecommendationLLMExplanation,
+  clearStoredAccessToken,
+  getCurrentAdmin,
   getForecastReadinessRows,
   getForecastReadinessSummary,
+  getStoredAccessToken,
   getSupplierAssignmentReviewItems,
   getSupplierAssignmentReviewSummary,
   getProductSeasonality,
@@ -32,6 +35,7 @@ import {
   getPurchaseOrder,
   getRecommendation,
   issuePurchaseOrder,
+  loginAdmin,
   listRecommendations,
   listPurchaseOrders,
   listSuppliers,
@@ -40,6 +44,7 @@ import {
   rejectProductSupplier,
   rejectSupplierAssignmentReview,
   setPreferredProductSupplier,
+  setUnauthorizedHandler,
   submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
 } from "./api";
@@ -68,6 +73,11 @@ vi.mock("./api", () => ({
   fetchWeakMappings: vi.fn(),
   fetchProductSuppliers: vi.fn(),
   fetchProductForecast: vi.fn(),
+  getStoredAccessToken: vi.fn(),
+  clearStoredAccessToken: vi.fn(),
+  setUnauthorizedHandler: vi.fn(),
+  loginAdmin: vi.fn(),
+  getCurrentAdmin: vi.fn(),
   generateRecommendationLLMExplanation: vi.fn(),
   getForecastReadinessSummary: vi.fn(),
   getForecastReadinessRows: vi.fn(),
@@ -660,6 +670,13 @@ function mockSupplierForecast(overrides: Partial<SupplierForecastResponse> = {})
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getStoredAccessToken).mockReturnValue("test-token");
+  vi.mocked(getCurrentAdmin).mockResolvedValue({ email: "admin@example.com", role: "admin" });
+  vi.mocked(loginAdmin).mockResolvedValue({
+    access_token: "new-token",
+    token_type: "bearer",
+    expires_in: 3600,
+  });
   vi.mocked(fetchProducts).mockResolvedValue([]);
   vi.mocked(fetchUnmappedProducts).mockResolvedValue([]);
   vi.mocked(fetchWeakMappings).mockResolvedValue([]);
@@ -726,6 +743,72 @@ beforeEach(() => {
 });
 
 describe("App mapping review workflow", () => {
+  it("login screen appears when unauthenticated and hides business data", async () => {
+    vi.mocked(getStoredAccessToken).mockReturnValue(null);
+
+    render(<App />);
+
+    expect(screen.getByLabelText("Admin login")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Products" })).not.toBeInTheDocument();
+    expect(fetchProducts).not.toHaveBeenCalled();
+  });
+
+  it("valid login shows the protected application shell", async () => {
+    vi.mocked(getStoredAccessToken).mockReturnValue(null);
+
+    render(<App />);
+    await userEvent.type(screen.getByLabelText("Email"), "admin@example.com");
+    await userEvent.type(screen.getByLabelText("Password"), "test-admin-password");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(loginAdmin).toHaveBeenCalledWith({
+      email: "admin@example.com",
+      password: "test-admin-password",
+    });
+    expect(await screen.findByRole("button", { name: "Products" })).toBeInTheDocument();
+  });
+
+  it("invalid login shows a generic error", async () => {
+    vi.mocked(getStoredAccessToken).mockReturnValue(null);
+    vi.mocked(loginAdmin).mockRejectedValue(new Error("Invalid email or password."));
+
+    render(<App />);
+    await userEvent.type(screen.getByLabelText("Email"), "wrong@example.com");
+    await userEvent.type(screen.getByLabelText("Password"), "bad-password");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText("Invalid email or password.")).toBeInTheDocument();
+    expect(screen.queryByText("bad-password")).not.toBeInTheDocument();
+  });
+
+  it("logout clears authentication and returns to login", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Products" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Logout" }));
+
+    expect(clearStoredAccessToken).toHaveBeenCalled();
+    expect(screen.getByLabelText("Admin login")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Products" })).not.toBeInTheDocument();
+  });
+
+  it("401 handler clears authentication and returns to login", async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "Products" });
+    const handler = vi.mocked(setUnauthorizedHandler).mock.calls.find(
+      ([candidate]) => typeof candidate === "function",
+    )?.[0] as (() => void) | undefined;
+
+    expect(handler).toBeDefined();
+    await act(async () => {
+      handler?.();
+    });
+
+    expect(screen.getByLabelText("Admin login")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Products" })).not.toBeInTheDocument();
+  });
+
   it("renders navigation tabs", async () => {
     render(<App />);
 

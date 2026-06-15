@@ -21,6 +21,14 @@ select {
   padding: 24px;
 }
 
+.auth-shell {
+  max-width: 480px;
+}
+
+.auth-panel {
+  margin-top: 64px;
+}
+
 .app-header {
   align-items: end;
   display: flex;
@@ -37,6 +45,17 @@ select {
 .app-header p {
   color: #5b6472;
   margin: 0;
+}
+
+.auth-status {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.auth-status span {
+  color: #5b6472;
+  font-size: 14px;
 }
 
 .search-label {
