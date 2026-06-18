@@ -1,10 +1,14 @@
+import csv
+import io
 from datetime import date, datetime, timezone
 
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
+from app.models.purchase_order import PurchaseOrder
 from app.models.supplier import Supplier
 from app.models.usage_history import UsageHistory
+from app.core.security import settings
 
 
 def seed_product_supplier(
@@ -156,6 +160,12 @@ def issue_po(client, po_id: int) -> dict:
     response = client.post(f"/purchase-orders/{po_id}/issue")
     assert response.status_code == 200
     return response.json()
+
+
+def parse_csv_response(response) -> list[dict[str, str]]:
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    text = response.content.decode("utf-8-sig")
+    return list(csv.DictReader(io.StringIO(text)))
 
 
 def test_create_draft_purchase_order(client, db_session):
@@ -442,6 +452,200 @@ def test_list_purchase_orders(client, db_session):
 
     assert response.status_code == 200
     assert [row["id"] for row in response.json()] == [po["id"]]
+
+
+def test_export_purchase_order_csv_success(client, db_session):
+    product, supplier, mapping = seed_product_supplier(
+        db_session,
+        supplier_name="CSV Supplier, Inc.",
+        product_name='CSV "Quoted", Product',
+    )
+    product.orderpro_id = "4120"
+    product.orderpro_sku = "CSV-SKU"
+    product.barcode = "123456789"
+    product.description = "Product description\nwith line break"
+    product.category = "Export Category"
+    product.current_stock = 12.5
+    supplier.orderpro_code = "CSV-SUP"
+    supplier.email = "orders@example.com"
+    supplier.phone = "+123456"
+    supplier.lead_time_days = 9
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    updated = add_line(client, po["id"], mapping.id, quantity=2.5)
+
+    response = client.get(f"/purchase-orders/{updated['id']}/export.csv")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "attachment;" in response.headers["content-disposition"]
+    assert f"purchase_order_{updated['id']}_CSV_Supplier_Inc_" in response.headers["content-disposition"]
+    rows = parse_csv_response(response)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["purchase_order_id"] == str(updated["id"])
+    assert row["status"] == "draft"
+    assert row["supplier_id"] == str(supplier.id)
+    assert row["supplier_code"] == "CSV-SUP"
+    assert row["supplier_name"] == "CSV Supplier, Inc."
+    assert row["supplier_email"] == "orders@example.com"
+    assert row["supplier_phone"] == "'+123456"
+    assert row["supplier_lead_time_days"] == "9"
+    assert row["product_id"] == str(product.id)
+    assert row["orderpro_product_id"] == "4120"
+    assert row["sku"] == "CSV-SKU"
+    assert row["barcode"] == "123456789"
+    assert row["product_name"] == 'CSV "Quoted", Product'
+    assert row["product_description"] == "Product description\nwith line break"
+    assert row["category"] == "Export Category"
+    assert row["current_stock"] == "12.5"
+    assert row["quantity"] == "2.5"
+    assert row["unit_cost"] == "12.50"
+    assert row["line_total"] == "31.25"
+    assert row["order_total"] == "31.25"
+    assert row["line_notes"] == "Line notes"
+    assert row["minimum_order_quantity"] == "5"
+    assert row["pack_size"] == "2"
+    assert row["lead_time_days"] == "7"
+
+
+def test_export_purchase_order_csv_multiple_lines_and_missing_optional_fields(client, db_session):
+    _first_product, supplier, first_mapping = seed_product_supplier(db_session, supplier_name="Optional Supplier")
+    second_product = Product(name="No Optional Fields", current_stock=0, supplier_id=supplier.id)
+    db_session.add(second_product)
+    db_session.flush()
+    second_mapping = ProductSupplier(
+        product_id=second_product.id,
+        supplier_id=supplier.id,
+        supplier_sku=None,
+        supplier_product_name=None,
+        purchase_price=None,
+        currency=None,
+        minimum_order_quantity=None,
+        pack_size=None,
+        lead_time_days=None,
+        match_status="confirmed",
+        match_method="manual",
+    )
+    db_session.add(second_mapping)
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], first_mapping.id, quantity=1)
+    add_line(client, po["id"], second_mapping.id, quantity=3)
+
+    response = client.get(f"/purchase-orders/{po['id']}/export.csv")
+
+    assert response.status_code == 200
+    rows = parse_csv_response(response)
+    assert len(rows) == 2
+    second_row = rows[1]
+    assert second_row["product_id"] == str(second_product.id)
+    assert second_row["unit_cost"] == ""
+    assert second_row["line_total"] == ""
+    assert second_row["supplier_sku"] == ""
+    assert second_row["supplier_product_name"] == ""
+    assert second_row["product_description"] == ""
+
+
+def test_export_purchase_order_csv_sanitizes_formula_injection(client, db_session):
+    product, supplier, mapping = seed_product_supplier(
+        db_session,
+        supplier_name="=Danger Supplier",
+        product_name="@Danger Product",
+    )
+    product.orderpro_sku = "+SKU"
+    product.description = "-Description"
+    mapping.supplier_sku = "=SUP-SKU"
+    mapping.supplier_product_name = "+Supplier Product"
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    updated = add_line(client, po["id"], mapping.id, quantity=1)
+
+    response = client.get(f"/purchase-orders/{updated['id']}/export.csv")
+
+    assert response.status_code == 200
+    row = parse_csv_response(response)[0]
+    assert row["supplier_name"] == "'=Danger Supplier"
+    assert row["product_name"] == "'@Danger Product"
+    assert row["sku"] == "'+SKU"
+    assert row["product_description"] == "'-Description"
+    assert row["supplier_sku"] == "'=SUP-SKU"
+    assert row["supplier_product_name"] == "'+Supplier Product"
+    assert row["quantity"] == "1"
+    assert row["unit_cost"] == "12.50"
+
+
+def test_export_purchase_order_csv_unknown_id_returns_404(client):
+    response = client.get("/purchase-orders/999999/export.csv")
+
+    assert response.status_code == 404
+
+
+def test_export_purchase_order_csv_empty_purchase_order_returns_400(client, db_session):
+    _product, supplier, _mapping = seed_product_supplier(db_session, supplier_name="Empty Export Supplier")
+    po = create_po(client, supplier.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/export.csv")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Purchase order has no line items to export."
+
+
+def test_export_purchase_order_csv_auth_enabled_requires_token(client, unauthenticated_client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Auth Export Supplier")
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id, quantity=2)
+    unauthenticated_client.headers.pop("authorization", None)
+    unauthenticated_client.headers.pop("Authorization", None)
+
+    response = unauthenticated_client.get(f"/purchase-orders/{po['id']}/export.csv")
+
+    assert response.status_code == 401
+
+
+def test_export_purchase_order_csv_auth_disabled_allows_no_token(unauthenticated_client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "auth_enabled", False)
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Disabled Auth Export Supplier")
+    po = create_po(unauthenticated_client, supplier.id)
+    add_line(unauthenticated_client, po["id"], mapping.id, quantity=2)
+
+    response = unauthenticated_client.get(f"/purchase-orders/{po['id']}/export.csv")
+
+    assert response.status_code == 200
+    assert len(parse_csv_response(response)) == 1
+
+
+def test_export_purchase_order_csv_valid_token_permits_export(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Token Export Supplier")
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id, quantity=2)
+
+    response = client.get(f"/purchase-orders/{po['id']}/export.csv")
+
+    assert response.status_code == 200
+
+
+def test_export_purchase_order_csv_does_not_modify_purchase_order(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Readonly Export Supplier")
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id, quantity=2)
+    before = db_session.get(PurchaseOrder, po["id"])
+    before_state = {
+        "status": before.status,
+        "updated_at": before.updated_at,
+        "total_amount": before.total_amount,
+        "line_count": len(before.lines),
+    }
+
+    response = client.get(f"/purchase-orders/{po['id']}/export.csv")
+
+    assert response.status_code == 200
+    after = db_session.get(PurchaseOrder, po["id"])
+    assert after.status == before_state["status"]
+    assert after.updated_at == before_state["updated_at"]
+    assert after.total_amount == before_state["total_amount"]
+    assert len(after.lines) == before_state["line_count"]
 
 
 def test_create_draft_po_from_one_valid_product(client, db_session):

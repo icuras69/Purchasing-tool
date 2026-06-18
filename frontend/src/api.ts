@@ -1,5 +1,8 @@
 import type {
   ForecastResponse,
+  ForecastReconciliationProduct,
+  ForecastReconciliationProductsResponse,
+  ForecastReconciliationSummary,
   ForecastInputAudit,
   ForecastReadinessSummary,
   AddPurchaseOrderLineRequest,
@@ -10,6 +13,12 @@ import type {
   DraftFromProductsRequest,
   DraftFromProductsResponse,
   LoginRequest,
+  ManualSupplierCleanupAssignRequest,
+  ManualSupplierCleanupCandidate,
+  ManualSupplierCleanupCandidatesResponse,
+  ManualSupplierCleanupReviewRequest,
+  ManualSupplierCleanupSummary,
+  ManualSupplierCleanupSuppliersResponse,
   Product,
   ProductSupplierInput,
   ProductSupplierMapping,
@@ -40,6 +49,10 @@ export function getApiBaseUrl(): string {
   return import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 }
 
+export function isAuthEnabled(): boolean {
+  return import.meta.env.VITE_AUTH_ENABLED !== "false";
+}
+
 export function apiUrl(path: string, baseUrl = getApiBaseUrl()): string {
   return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }
@@ -61,8 +74,23 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
 }
 
 function authorizationHeaders(): Record<string, string> {
+  if (!isAuthEnabled()) {
+    return {};
+  }
   const token = getStoredAccessToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function filenameFromContentDisposition(header: string | null): string | null {
+  if (!header) {
+    return null;
+  }
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    return decodeURIComponent(utf8Match[1].replace(/^"|"$/g, ""));
+  }
+  const filenameMatch = header.match(/filename="?([^";]+)"?/i);
+  return filenameMatch?.[1] ?? null;
 }
 
 async function fetchJson<T>(path: string, label: string, handleUnauthorized = true): Promise<T> {
@@ -97,7 +125,7 @@ async function parseJsonResponse<T>(
   handleUnauthorized = true,
 ): Promise<T> {
   if (!response.ok) {
-    if (response.status === 401 && handleUnauthorized) {
+    if (response.status === 401 && handleUnauthorized && isAuthEnabled()) {
       clearStoredAccessToken();
       unauthorizedHandler?.();
     }
@@ -125,6 +153,37 @@ async function parseJsonResponse<T>(
   }
 
   return response.json();
+}
+
+async function fetchBlob(
+  path: string,
+  label: string,
+): Promise<{ blob: Blob; filename: string | null }> {
+  const response = await fetch(apiUrl(path), {
+    headers: {
+      ...authorizationHeaders(),
+    },
+  });
+  if (!response.ok) {
+    if (response.status === 401 && isAuthEnabled()) {
+      clearStoredAccessToken();
+      unauthorizedHandler?.();
+    }
+    let detail: string | null = null;
+    try {
+      const errorBody = await response.json();
+      if (typeof errorBody.detail === "string") {
+        detail = errorBody.detail;
+      }
+    } catch {
+      detail = null;
+    }
+    throw new Error(detail ?? `Failed to load ${label} (${response.status})`);
+  }
+  return {
+    blob: await response.blob(),
+    filename: filenameFromContentDisposition(response.headers.get("Content-Disposition")),
+  };
 }
 
 export async function loginAdmin(payload: LoginRequest): Promise<AuthTokenResponse> {
@@ -177,6 +236,50 @@ export function getForecastReadinessSummary(): Promise<ForecastReadinessSummary>
 export function getForecastReadinessRows(filter?: string): Promise<ForecastInputAudit[]> {
   const query = filter && filter !== "all" ? `?filter=${encodeURIComponent(filter)}` : "";
   return fetchJson<ForecastInputAudit[]>(`/products/forecast-readiness${query}`, "forecast readiness");
+}
+
+export interface ForecastReconciliationQuery {
+  page?: number;
+  page_size?: number;
+  search?: string;
+  status?: string;
+  missing_input?: string;
+  supplier_id?: number;
+  has_open_demand?: boolean;
+  has_stock?: boolean;
+  sort_by?: string;
+  sort_direction?: string;
+}
+
+export function getForecastReconciliationSummary(): Promise<ForecastReconciliationSummary> {
+  return fetchJson<ForecastReconciliationSummary>(
+    "/api/forecast-reconciliation/summary",
+    "forecast reconciliation summary",
+  );
+}
+
+export function getForecastReconciliationProducts(
+  query: ForecastReconciliationQuery = {},
+): Promise<ForecastReconciliationProductsResponse> {
+  return fetchJson<ForecastReconciliationProductsResponse>(
+    `/api/forecast-reconciliation/products${queryString(query)}`,
+    "forecast reconciliation products",
+  );
+}
+
+export function getForecastReconciliationProduct(
+  productId: number,
+): Promise<ForecastReconciliationProduct> {
+  return fetchJson<ForecastReconciliationProduct>(
+    `/api/forecast-reconciliation/products/${productId}`,
+    "forecast reconciliation product",
+  );
+}
+
+export function exportForecastReconciliationCsv(
+  query: ForecastReconciliationQuery = {},
+): Promise<{ blob: Blob; filename: string | null }> {
+  return fetchBlob(`/api/forecast-reconciliation/export.csv${queryString(query)}`, "forecast readiness CSV");
 }
 
 export interface SupplierAssignmentReviewQuery {
@@ -235,6 +338,92 @@ export function rejectSupplierAssignmentReview(
   return sendJson<unknown>(
     `/products/${productId}/supplier-assignment-review/reject`,
     "supplier assignment review",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export interface ManualSupplierCleanupQuery {
+  page?: number;
+  page_size?: number;
+  search?: string;
+  priority_only?: boolean;
+  sort_by?: string;
+  sort_direction?: string;
+  has_open_demand?: boolean;
+  has_stock?: boolean;
+  has_demand_history?: boolean;
+  has_cost?: boolean;
+  has_existing_suggestion?: boolean;
+}
+
+function queryString(query: object): string {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "" && value !== "all") {
+      params.set(key, String(value));
+    }
+  });
+  return params.toString() ? `?${params.toString()}` : "";
+}
+
+export function getManualSupplierCleanupSummary(): Promise<ManualSupplierCleanupSummary> {
+  return fetchJson<ManualSupplierCleanupSummary>(
+    "/api/manual-supplier-cleanup/summary",
+    "manual supplier cleanup summary",
+  );
+}
+
+export function getManualSupplierCleanupCandidates(
+  query: ManualSupplierCleanupQuery = {},
+): Promise<ManualSupplierCleanupCandidatesResponse> {
+  return fetchJson<ManualSupplierCleanupCandidatesResponse>(
+    `/api/manual-supplier-cleanup/candidates${queryString(query)}`,
+    "manual supplier cleanup candidates",
+  );
+}
+
+export function getManualSupplierCleanupCandidate(
+  productId: number,
+): Promise<ManualSupplierCleanupCandidate> {
+  return fetchJson<ManualSupplierCleanupCandidate>(
+    `/api/manual-supplier-cleanup/candidates/${productId}`,
+    "manual supplier cleanup candidate",
+  );
+}
+
+export function searchManualSupplierCleanupSuppliers(
+  query: { search?: string; page?: number; page_size?: number } = {},
+): Promise<ManualSupplierCleanupSuppliersResponse> {
+  return fetchJson<ManualSupplierCleanupSuppliersResponse>(
+    `/api/manual-supplier-cleanup/suppliers${queryString(query)}`,
+    "manual supplier cleanup suppliers",
+  );
+}
+
+export function assignManualSupplierCleanupCandidate(
+  productId: number,
+  payload: ManualSupplierCleanupAssignRequest,
+): Promise<unknown> {
+  return sendJson<unknown>(
+    `/api/manual-supplier-cleanup/candidates/${productId}/assign`,
+    "manual supplier cleanup assignment",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function reviewManualSupplierCleanupCandidate(
+  productId: number,
+  payload: ManualSupplierCleanupReviewRequest,
+): Promise<unknown> {
+  return sendJson<unknown>(
+    `/api/manual-supplier-cleanup/candidates/${productId}/review`,
+    "manual supplier cleanup review",
     {
       method: "POST",
       body: JSON.stringify(payload),
@@ -338,6 +527,12 @@ export function listPurchaseOrders(): Promise<PurchaseOrder[]> {
 
 export function getPurchaseOrder(poId: number): Promise<PurchaseOrder> {
   return fetchJson<PurchaseOrder>(`/purchase-orders/${poId}`, "purchase order");
+}
+
+export function exportPurchaseOrderCsv(
+  purchaseOrderId: number,
+): Promise<{ blob: Blob; filename: string | null }> {
+  return fetchBlob(`/purchase-orders/${purchaseOrderId}/export.csv`, "purchase order CSV");
 }
 
 export function createPurchaseOrder(payload: CreatePurchaseOrderRequest): Promise<PurchaseOrder> {

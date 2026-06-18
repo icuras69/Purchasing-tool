@@ -12,16 +12,25 @@ import {
   createPurchaseOrder,
   createProductSupplier,
   createReorderRecommendation,
+  exportPurchaseOrderCsv,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
   fetchUnmappedProducts,
   fetchWeakMappings,
   generateRecommendationLLMExplanation,
+  assignManualSupplierCleanupCandidate,
   clearStoredAccessToken,
   getCurrentAdmin,
   getForecastReadinessRows,
   getForecastReadinessSummary,
+  getForecastReconciliationProduct,
+  getForecastReconciliationProducts,
+  getForecastReconciliationSummary,
+  exportForecastReconciliationCsv,
+  getManualSupplierCleanupCandidate,
+  getManualSupplierCleanupCandidates,
+  getManualSupplierCleanupSummary,
   getStoredAccessToken,
   getSupplierAssignmentReviewItems,
   getSupplierAssignmentReviewSummary,
@@ -31,6 +40,7 @@ import {
   getSeasonalProducts,
   getSeasonalitySummary,
   getSupplierForecast,
+  isAuthEnabled,
   loginAdmin,
   issuePurchaseOrder,
   listRecommendations,
@@ -40,6 +50,8 @@ import {
   rejectRecommendation,
   rejectProductSupplier,
   rejectSupplierAssignmentReview,
+  reviewManualSupplierCleanupCandidate,
+  searchManualSupplierCleanupSuppliers,
   setUnauthorizedHandler,
   setPreferredProductSupplier,
   submitPurchaseOrderForApproval,
@@ -51,8 +63,13 @@ import type {
   ForecastResponse,
   ForecastInputAudit,
   ForecastReadinessSummary,
+  ForecastReconciliationProduct,
+  ForecastReconciliationSummary,
   ForecastSupplierContext,
   CurrentAdmin,
+  ManualSupplierCleanupCandidate,
+  ManualSupplierCleanupSummary,
+  ManualSupplierCleanupSupplier,
   RecommendationLLMExplanation,
   ProductSeasonalityDetail,
   Product,
@@ -82,6 +99,7 @@ type TabId =
   | "supplier-forecast"
   | "forecast-readiness"
   | "supplier-assignment-review"
+  | "supplier-cleanup"
   | "seasonality"
   | "purchase-orders"
   | "recommendations";
@@ -109,6 +127,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "supplier-forecast", label: "Supplier Forecast" },
   { id: "forecast-readiness", label: "Forecast Readiness" },
   { id: "supplier-assignment-review", label: "Supplier Assignment Review" },
+  { id: "supplier-cleanup", label: "Supplier Cleanup" },
   { id: "seasonality", label: "Seasonality" },
   { id: "purchase-orders", label: "Purchase Orders" },
   { id: "recommendations", label: "Recommendations" },
@@ -382,6 +401,17 @@ function formatDate(value: string | null | undefined): string {
   return new Date(value).toLocaleString();
 }
 
+function downloadBlob(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
 function weakMappingReason(mapping: WeakMapping): string {
   if (mapping.reason) {
     return mapping.reason;
@@ -412,21 +442,29 @@ function matchesText(values: Array<string | number | null | undefined>, query: s
 }
 
 function App() {
-  const [admin, setAdmin] = useState<CurrentAdmin | null>(() =>
-    getStoredAccessToken() ? { email: "", role: "admin" } : null,
-  );
+  const authEnabled = isAuthEnabled();
+  const [admin, setAdmin] = useState<CurrentAdmin | null>(() => {
+    if (!authEnabled) {
+      return { email: "authentication-disabled", role: "admin" };
+    }
+    return getStoredAccessToken() ? { email: "", role: "admin" } : null;
+  });
   const [authMessage, setAuthMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!authEnabled) {
+      setUnauthorizedHandler(null);
+      return;
+    }
     setUnauthorizedHandler(() => {
       setAdmin(null);
       setAuthMessage("Your session expired. Please sign in again.");
     });
     return () => setUnauthorizedHandler(null);
-  }, []);
+  }, [authEnabled]);
 
   useEffect(() => {
-    if (!getStoredAccessToken()) {
+    if (!authEnabled || !getStoredAccessToken()) {
       return;
     }
     let active = true;
@@ -447,7 +485,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [authEnabled]);
 
   async function handleLogin(email: string, password: string) {
     setAuthMessage(null);
@@ -466,7 +504,7 @@ function App() {
     return <LoginScreen message={authMessage} onLogin={handleLogin} />;
   }
 
-  return <PurchasingApp admin={admin} onLogout={handleLogout} />;
+  return <PurchasingApp admin={admin} authEnabled={authEnabled} onLogout={handleLogout} />;
 }
 
 function LoginScreen({
@@ -531,9 +569,11 @@ function LoginScreen({
 
 function PurchasingApp({
   admin,
+  authEnabled,
   onLogout,
 }: {
   admin: CurrentAdmin;
+  authEnabled: boolean;
   onLogout: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<TabId>("products");
@@ -735,9 +775,11 @@ function PurchasingApp({
         </div>
         <div className="auth-status">
           <span>{admin.email || "Admin"}</span>
-          <button onClick={onLogout} type="button">
-            Logout
-          </button>
+          {authEnabled && (
+            <button onClick={onLogout} type="button">
+              Logout
+            </button>
+          )}
         </div>
         <label className="search-label">
           <span>Search</span>
@@ -829,9 +871,11 @@ function PurchasingApp({
         <SupplierForecastPanel onViewPurchaseOrder={handleViewGeneratedPo} />
       )}
 
-      {activeTab === "forecast-readiness" && <ForecastReadinessPanel />}
+      {activeTab === "forecast-readiness" && <ForecastReadinessPanel onNavigate={setActiveTab} />}
 
       {activeTab === "supplier-assignment-review" && <SupplierAssignmentReviewPanel />}
+
+      {activeTab === "supplier-cleanup" && <ManualSupplierCleanupPanel />}
 
       {activeTab === "seasonality" && <SeasonalityPanel />}
 
@@ -2692,6 +2736,31 @@ const forecastReadinessFilters: Array<{ value: ForecastReadinessFilter; label: s
   { value: "ready_for_forecast", label: "Ready for forecast" },
 ];
 
+const readinessStatuses = [
+  { value: "all", label: "All statuses" },
+  { value: "ready", label: "Ready" },
+  { value: "partially_ready", label: "Partially ready" },
+  { value: "blocked", label: "Blocked" },
+  { value: "monitor_only", label: "Monitor only" },
+];
+
+const readinessMissingInputs = [
+  { value: "all", label: "All inputs" },
+  { value: "supplier_id", label: "Missing supplier" },
+  { value: "lead_time", label: "Missing lead time" },
+  { value: "cost_price", label: "Missing cost" },
+  { value: "pack_size", label: "Missing pack size" },
+  { value: "demand_history", label: "Missing demand" },
+  { value: "current_stock", label: "Missing stock" },
+];
+
+function readinessStatusClassName(status: string): string {
+  if (status === "ready") return "status mapped";
+  if (status === "blocked") return "status rejected";
+  if (status === "partially_ready") return "status pending-approval";
+  return "status needs-review";
+}
+
 function sourceLabel(source: string | null | undefined): string {
   const labels: Record<string, string> = {
     orderpro_product_cost: "OrderPro product cost",
@@ -3023,22 +3092,428 @@ function SupplierAssignmentReviewPanel() {
   );
 }
 
-function ForecastReadinessPanel() {
-  const [summary, setSummary] = useState<ForecastReadinessSummary | null>(null);
-  const [rows, setRows] = useState<ResourceState<ForecastInputAudit>>(initialResource);
-  const [filter, setFilter] = useState<ForecastReadinessFilter>("all");
+type CleanupReviewStatus = "deferred" | "needs_information" | "rejected";
+
+function ManualSupplierCleanupPanel() {
+  const [summary, setSummary] = useState<ManualSupplierCleanupSummary | null>(null);
+  const [candidates, setCandidates] = useState<ManualSupplierCleanupCandidate[]>([]);
+  const [totalPages, setTotalPages] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [priorityOnly, setPriorityOnly] = useState(false);
+  const [hasOpenDemand, setHasOpenDemand] = useState(false);
+  const [hasStock, setHasStock] = useState(false);
+  const [hasCost, setHasCost] = useState(false);
+  const [hasSuggestion, setHasSuggestion] = useState(false);
+  const [sortBy, setSortBy] = useState("priority");
+  const [selected, setSelected] = useState<ManualSupplierCleanupCandidate | null>(null);
+  const [supplierQuery, setSupplierQuery] = useState("");
+  const [suppliers, setSuppliers] = useState<ManualSupplierCleanupSupplier[]>([]);
+  const [selectedSupplierId, setSelectedSupplierId] = useState("");
+  const [reviewedBy, setReviewedBy] = useState("Maged");
+  const [notes, setNotes] = useState("");
+  const [actionLoading, setActionLoading] = useState(false);
+
+  const loadCleanup = useCallback(
+    (active = true) => {
+      setLoading(true);
+      setError(null);
+      Promise.all([
+        getManualSupplierCleanupSummary(),
+        getManualSupplierCleanupCandidates({
+          page,
+          page_size: 25,
+          search,
+          priority_only: priorityOnly,
+          sort_by: sortBy,
+          has_open_demand: hasOpenDemand ? true : undefined,
+          has_stock: hasStock ? true : undefined,
+          has_cost: hasCost ? true : undefined,
+          has_existing_suggestion: hasSuggestion ? true : undefined,
+        }),
+      ])
+        .then(([loadedSummary, loadedCandidates]) => {
+          if (!active) return;
+          setSummary(loadedSummary);
+          setCandidates(loadedCandidates.items);
+          setTotalPages(loadedCandidates.total_pages);
+          setLoading(false);
+        })
+        .catch((loadError: Error) => {
+          if (!active) return;
+          setCandidates([]);
+          setLoading(false);
+          setError(loadError.message);
+        });
+    },
+    [hasCost, hasOpenDemand, hasStock, hasSuggestion, page, priorityOnly, search, sortBy],
+  );
+
+  useEffect(() => {
+    let active = true;
+    loadCleanup(active);
+    return () => {
+      active = false;
+    };
+  }, [loadCleanup]);
+
+  useEffect(() => {
+    let active = true;
+    searchManualSupplierCleanupSuppliers({ search: supplierQuery, page_size: 25 })
+      .then((result) => {
+        if (active) setSuppliers(result.items);
+      })
+      .catch(() => {
+        if (active) setSuppliers([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [supplierQuery]);
+
+  async function openDetail(candidate: ManualSupplierCleanupCandidate) {
+    setError(null);
+    try {
+      const detail = await getManualSupplierCleanupCandidate(candidate.product_id);
+      setSelected(detail);
+      setSelectedSupplierId(detail.existing_suggested_supplier_id ? String(detail.existing_suggested_supplier_id) : "");
+      setNotes("");
+    } catch (loadError) {
+      setError((loadError as Error).message);
+    }
+  }
+
+  async function runAction(action: () => Promise<unknown>, success: string) {
+    if (!selected) return;
+    setActionLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await action();
+      setSelected(null);
+      setSelectedSupplierId("");
+      setNotes("");
+      setMessage(success);
+      loadCleanup();
+    } catch (actionError) {
+      setError((actionError as Error).message);
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  function assignSelectedSupplier() {
+    if (!selected) return;
+    const supplier = suppliers.find((item) => item.id === Number(selectedSupplierId));
+    if (!supplier) {
+      setError("Choose a supplier before assigning.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `Assign supplier "${supplier.name}" to product "${selected.product_name}"?\nSKU: ${formatValue(
+          selected.orderpro_sku,
+        )}\nSupplier code: ${formatValue(supplier.orderpro_code)}\nReviewer: ${reviewedBy || "manual"}`,
+      )
+    ) {
+      return;
+    }
+    void runAction(
+      () =>
+        assignManualSupplierCleanupCandidate(selected.product_id, {
+          supplier_id: supplier.id,
+          reviewed_by: reviewedBy || null,
+          notes: notes || null,
+        }),
+      "Supplier assigned locally.",
+    );
+  }
+
+  function recordStatus(status: CleanupReviewStatus) {
+    if (!selected) return;
+    void runAction(
+      () =>
+        reviewManualSupplierCleanupCandidate(selected.product_id, {
+          status,
+          reviewed_by: reviewedBy || null,
+          notes: notes || null,
+        }),
+      `Review marked ${status}.`,
+    );
+  }
+
+  return (
+    <div className="review-stack" aria-label="Manual supplier cleanup workspace">
+      <section className="panel-heading">
+        <div>
+          <h2>Supplier Cleanup</h2>
+          <p>
+            Assign missing product suppliers locally after human review. This does not create suppliers or write back to OrderPro.
+          </p>
+        </div>
+        <button className="secondary-button" onClick={() => loadCleanup()} type="button">
+          Refresh
+        </button>
+      </section>
+
+      {summary && (
+        <section className="summary-grid" aria-label="Manual supplier cleanup summary">
+          <SummaryCard label="Missing suppliers" value={summary.products_missing_supplier} />
+          <SummaryCard label="Priority candidates" value={summary.priority_missing_supplier_products} />
+          <SummaryCard label="Confirmed manually" value={summary.confirmed_manual_assignments} />
+          <SummaryCard label="Deferred" value={summary.deferred_reviews} />
+          <SummaryCard label="Rejected" value={summary.rejected_reviews} />
+          <SummaryCard label="Completion %" value={summary.completion_percentage} />
+        </section>
+      )}
+
+      <section className="detail-panel" aria-label="Manual supplier cleanup filters">
+        <div className="filter-grid">
+          <label>
+            Search
+            <input
+              aria-label="Search supplier cleanup products"
+              onChange={(event) => {
+                setPage(1);
+                setSearch(event.target.value);
+              }}
+              placeholder="SKU, barcode, name, description"
+              value={search}
+            />
+          </label>
+          <label>
+            Sort by
+            <select onChange={(event) => setSortBy(event.target.value)} value={sortBy}>
+              <option value="priority">Priority</option>
+              <option value="sku">SKU</option>
+              <option value="product_name">Product name</option>
+              <option value="stock">Stock</option>
+              <option value="open_demand">Open demand</option>
+            </select>
+          </label>
+          <label className="checkbox-label">
+            <input checked={priorityOnly} onChange={(event) => setPriorityOnly(event.target.checked)} type="checkbox" />
+            Priority only
+          </label>
+          <label className="checkbox-label">
+            <input checked={hasOpenDemand} onChange={(event) => setHasOpenDemand(event.target.checked)} type="checkbox" />
+            Open demand
+          </label>
+          <label className="checkbox-label">
+            <input checked={hasStock} onChange={(event) => setHasStock(event.target.checked)} type="checkbox" />
+            Has stock
+          </label>
+          <label className="checkbox-label">
+            <input checked={hasCost} onChange={(event) => setHasCost(event.target.checked)} type="checkbox" />
+            Has cost
+          </label>
+          <label className="checkbox-label">
+            <input checked={hasSuggestion} onChange={(event) => setHasSuggestion(event.target.checked)} type="checkbox" />
+            Existing suggestion
+          </label>
+        </div>
+      </section>
+
+      {message && <p className="success-state">{message}</p>}
+      {error && <p className="error-state">{error}</p>}
+
+      <section className="table-wrap" aria-label="Manual supplier cleanup candidates">
+        {loading && <p className="empty-state">Loading supplier cleanup candidates...</p>}
+        {!loading && candidates.length === 0 && <p className="empty-state">No missing-supplier products match these filters.</p>}
+        {!loading && candidates.length > 0 && (
+          <table>
+            <thead>
+              <tr>
+                <th>Priority</th>
+                <th>SKU</th>
+                <th>Product</th>
+                <th>Stock</th>
+                <th>Open demand</th>
+                <th>Cost</th>
+                <th>Demand history</th>
+                <th>Suggested supplier</th>
+                <th>Readiness</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((candidate) => (
+                <tr key={candidate.product_id}>
+                  <td>
+                    <strong>{candidate.priority_score}</strong>
+                    <div className="muted">{candidate.priority_reason}</div>
+                  </td>
+                  <td>{formatValue(candidate.orderpro_sku)}</td>
+                  <td>
+                    <strong>{candidate.product_name}</strong>
+                    <div className="muted">
+                      ID {candidate.product_id} | {formatValue(candidate.brand)} | {formatValue(candidate.category)}
+                    </div>
+                  </td>
+                  <td>{formatValue(candidate.current_stock)}</td>
+                  <td>{formatValue(candidate.open_customer_demand)}</td>
+                  <td>{formatValue(candidate.cost_price)}</td>
+                  <td>{candidate.demand_history_available ? "Yes" : "No"}</td>
+                  <td>{formatValue(candidate.existing_suggested_supplier_name)}</td>
+                  <td>{formatValue(candidate.forecast_readiness_score)}</td>
+                  <td><span className={statusClassName(candidate.review_status)}>{candidate.review_status}</span></td>
+                  <td>
+                    <button onClick={() => openDetail(candidate)} type="button">
+                      Review
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div className="action-row">
+          <button disabled={page <= 1} onClick={() => setPage((current) => Math.max(current - 1, 1))} type="button">
+            Previous
+          </button>
+          <span>Page {page} of {totalPages || 1}</span>
+          <button disabled={totalPages === 0 || page >= totalPages} onClick={() => setPage((current) => current + 1)} type="button">
+            Next
+          </button>
+        </div>
+      </section>
+
+      {selected && (
+        <section className="detail-panel" aria-label="Supplier cleanup candidate detail">
+          <div className="section-header">
+            <h3>{selected.product_name}</h3>
+            <button className="secondary-button" onClick={() => setSelected(null)} type="button">
+              Close
+            </button>
+          </div>
+          <p className="state warning">Local-only assignment. No OrderPro supplier data is changed.</p>
+          <dl className="detail-list">
+            <div><dt>Product ID</dt><dd>{selected.product_id}</dd></div>
+            <div><dt>OrderPro SKU</dt><dd>{formatValue(selected.orderpro_sku)}</dd></div>
+            <div><dt>Barcode</dt><dd>{formatValue(selected.barcode)}</dd></div>
+            <div><dt>Description</dt><dd>{formatValue(selected.description)}</dd></div>
+            <div><dt>Current stock</dt><dd>{formatValue(selected.current_stock)}</dd></div>
+            <div><dt>Open demand</dt><dd>{formatValue(selected.open_customer_demand)}</dd></div>
+            <div><dt>Cost</dt><dd>{formatValue(selected.cost_price)}</dd></div>
+            <div><dt>Lead time status</dt><dd>{formatValue(selected.lead_time_status)}</dd></div>
+            <div><dt>Priority</dt><dd>{selected.priority_score} - {selected.priority_reason}</dd></div>
+            <div><dt>Existing suggestion</dt><dd>{formatValue(selected.existing_suggested_supplier_name)}</dd></div>
+            <div><dt>Evidence</dt><dd>{formatValue(selected.existing_suggestion_source)}</dd></div>
+            <div>
+              <dt>Evidence summary</dt>
+              <dd>
+                {formatValue(
+                  typeof selected.evidence_summary?.message === "string"
+                    ? selected.evidence_summary.message
+                    : JSON.stringify(selected.evidence_summary ?? {}),
+                )}
+              </dd>
+            </div>
+            <div><dt>Blocking issues</dt><dd>{selected.blocking_issues.length ? selected.blocking_issues.join(", ") : "-"}</dd></div>
+            <div><dt>Warnings</dt><dd>{selected.warning_issues.length ? selected.warning_issues.join(", ") : "-"}</dd></div>
+          </dl>
+
+          <div className="mapping-form">
+            <label>
+              Supplier search
+              <input
+                aria-label="Search suppliers for cleanup"
+                onChange={(event) => setSupplierQuery(event.target.value)}
+                placeholder="Supplier name or code"
+                value={supplierQuery}
+              />
+            </label>
+            <label>
+              Selected supplier
+              <select
+                aria-label="Supplier cleanup selected supplier"
+                onChange={(event) => setSelectedSupplierId(event.target.value)}
+                value={selectedSupplierId}
+              >
+                <option value="">Select supplier</option>
+                {suppliers.map((supplier) => (
+                  <option key={supplier.id} value={supplier.id}>
+                    {supplier.name} {supplier.orderpro_code ? `(${supplier.orderpro_code})` : ""} - lead time {formatValue(supplier.lead_time_days)} - products {supplier.assigned_product_count}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Reviewed by
+              <input onChange={(event) => setReviewedBy(event.target.value)} value={reviewedBy} />
+            </label>
+            <label>
+              Notes
+              <input onChange={(event) => setNotes(event.target.value)} value={notes} />
+            </label>
+            <div className="action-row">
+              <button disabled={actionLoading} onClick={assignSelectedSupplier} type="button">
+                {actionLoading ? "Saving..." : "Assign supplier"}
+              </button>
+              <button disabled={actionLoading} onClick={() => recordStatus("deferred")} type="button">
+                Defer
+              </button>
+              <button disabled={actionLoading} onClick={() => recordStatus("needs_information")} type="button">
+                Needs information
+              </button>
+              <button disabled={actionLoading} onClick={() => recordStatus("rejected")} type="button">
+                Reject suggestion
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function ForecastReadinessPanel({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
+  const [summary, setSummary] = useState<ForecastReconciliationSummary | null>(null);
+  const [rows, setRows] = useState<ResourceState<ForecastReconciliationProduct>>(initialResource);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [missingInputFilter, setMissingInputFilter] = useState("all");
+  const [supplierFilter, setSupplierFilter] = useState("");
+  const [hasOpenDemand, setHasOpenDemand] = useState(false);
+  const [hasStock, setHasStock] = useState(false);
+  const [sortBy, setSortBy] = useState("readiness_score");
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [selected, setSelected] = useState<ForecastReconciliationProduct | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const query = useMemo(
+    () => ({
+      page,
+      page_size: 25,
+      search,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      missing_input: missingInputFilter === "all" ? undefined : missingInputFilter,
+      supplier_id: supplierFilter ? Number(supplierFilter) : undefined,
+      has_open_demand: hasOpenDemand ? true : undefined,
+      has_stock: hasStock ? true : undefined,
+      sort_by: sortBy,
+    }),
+    [hasOpenDemand, hasStock, missingInputFilter, page, search, sortBy, statusFilter, supplierFilter],
+  );
 
   const loadReadiness = useCallback(
     (active = true) => {
       setRows((current) => ({ ...current, loading: true, error: null }));
       Promise.all([
-        getForecastReadinessSummary(),
-        getForecastReadinessRows(filter),
+        getForecastReconciliationSummary(),
+        getForecastReconciliationProducts(query),
       ])
         .then(([loadedSummary, loadedRows]) => {
           if (active) {
             setSummary(loadedSummary);
-            setRows({ data: loadedRows, loading: false, error: null });
+            setRows({ data: loadedRows.items, loading: false, error: null });
+            setTotalPages(loadedRows.total_pages);
           }
         })
         .catch((error: Error) => {
@@ -3047,7 +3522,7 @@ function ForecastReadinessPanel() {
           }
         });
     },
-    [filter],
+    [query],
   );
 
   useEffect(() => {
@@ -3058,6 +3533,29 @@ function ForecastReadinessPanel() {
     };
   }, [loadReadiness]);
 
+  async function openReadinessDetail(row: ForecastReconciliationProduct) {
+    setRows((current) => ({ ...current, error: null }));
+    try {
+      setSelected(await getForecastReconciliationProduct(row.product_id));
+    } catch (error) {
+      setRows((current) => ({ ...current, error: (error as Error).message }));
+    }
+  }
+
+  async function handleExport() {
+    setExporting(true);
+    setMessage(null);
+    try {
+      const exported = await exportForecastReconciliationCsv(query);
+      downloadBlob(exported.blob, exported.filename ?? "forecast_readiness.csv");
+      setMessage("Forecast readiness CSV exported.");
+    } catch (error) {
+      setRows((current) => ({ ...current, error: (error as Error).message }));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <div className="review-stack" aria-label="Forecast readiness workspace">
       <section className="panel-heading">
@@ -3067,39 +3565,108 @@ function ForecastReadinessPanel() {
             Deterministic reconciliation only. These inputs explain forecast quality and do not activate seasonality.
           </p>
         </div>
-        <button className="secondary-button" type="button" onClick={() => loadReadiness()}>
-          Refresh
-        </button>
+        <div className="action-row">
+          <button className="secondary-button" type="button" onClick={() => loadReadiness()}>
+            Refresh
+          </button>
+          <button disabled={exporting} type="button" onClick={handleExport}>
+            {exporting ? "Exporting..." : "Export Readiness CSV"}
+          </button>
+        </div>
       </section>
 
       {summary && (
         <section className="summary-grid" aria-label="Forecast readiness summary">
-          <SummaryCard label="OrderPro products" value={summary.product_count} />
-          <SummaryCard label="Complete before reconciliation" value={summary.products_complete_before_reconciliation ?? "-"} />
-          <SummaryCard label="Complete after reconciliation" value={summary.products_complete_after_reconciliation ?? summary.products_with_complete_critical_inputs} />
-          <SummaryCard label="Missing supplier" value={summary.products_missing_supplier} />
-          <SummaryCard label="Missing cost" value={summary.products_missing_cost} />
-          <SummaryCard label="Missing lead time" value={summary.products_missing_lead_time} />
-          <SummaryCard label="Fallback MOQ" value={summary.products_using_fallback_moq ?? "-"} />
-          <SummaryCard label="PO-derived cost" value={summary.products_using_po_derived_cost ?? "-"} />
+          <SummaryCard label="Ready" value={summary.ready} />
+          <SummaryCard label="Partially ready" value={summary.partially_ready} />
+          <SummaryCard label="Blocked" value={summary.blocked} />
+          <SummaryCard label="Monitor only" value={summary.monitor_only} />
+          <SummaryCard label="Missing supplier" value={summary.missing_supplier} />
+          <SummaryCard label="Missing lead time" value={summary.missing_lead_time} />
+          <SummaryCard label="Missing cost" value={summary.missing_cost} />
+          <SummaryCard label="Missing demand" value={summary.missing_demand_history} />
+          <SummaryCard label="Readiness %" value={summary.readiness_percentage} />
         </section>
       )}
 
       <section className="detail-panel" aria-label="Forecast readiness filters">
-        <div className="filter-row">
-          {forecastReadinessFilters.map((option) => (
-            <button
-              key={option.value}
-              className={filter === option.value ? "filter-chip active" : "filter-chip"}
-              type="button"
-              onClick={() => setFilter(option.value)}
+        <div className="filter-grid">
+          <label>
+            Search
+            <input
+              aria-label="Search forecast readiness products"
+              onChange={(event) => {
+                setPage(1);
+                setSearch(event.target.value);
+              }}
+              placeholder="SKU, barcode, product, description"
+              value={search}
+            />
+          </label>
+          <label>
+            Status
+            <select
+              aria-label="Readiness status filter"
+              onChange={(event) => {
+                setPage(1);
+                setStatusFilter(event.target.value);
+              }}
+              value={statusFilter}
             >
-              {option.label}
-            </button>
-          ))}
+              {readinessStatuses.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Missing input
+            <select
+              aria-label="Missing input filter"
+              onChange={(event) => {
+                setPage(1);
+                setMissingInputFilter(event.target.value);
+              }}
+              value={missingInputFilter}
+            >
+              {readinessMissingInputs.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Supplier ID
+            <input
+              aria-label="Forecast readiness supplier filter"
+              onChange={(event) => {
+                setPage(1);
+                setSupplierFilter(event.target.value);
+              }}
+              value={supplierFilter}
+            />
+          </label>
+          <label>
+            Sort by
+            <select onChange={(event) => setSortBy(event.target.value)} value={sortBy}>
+              <option value="readiness_score">Readiness score</option>
+              <option value="status">Status</option>
+              <option value="sku">SKU</option>
+              <option value="product_name">Product name</option>
+              <option value="stock">Stock</option>
+              <option value="open_demand">Open demand</option>
+            </select>
+          </label>
+          <label className="checkbox-label">
+            <input checked={hasOpenDemand} onChange={(event) => setHasOpenDemand(event.target.checked)} type="checkbox" />
+            Open demand
+          </label>
+          <label className="checkbox-label">
+            <input checked={hasStock} onChange={(event) => setHasStock(event.target.checked)} type="checkbox" />
+            Has stock
+          </label>
         </div>
       </section>
 
+      {message && <p className="success-state">{message}</p>}
       <section className="table-wrap" aria-label="Forecast readiness rows">
         {rows.loading && <p className="empty-state">Loading forecast readiness...</p>}
         {rows.error && <p className="error-state">{rows.error}</p>}
@@ -3110,21 +3677,34 @@ function ForecastReadinessPanel() {
           <table>
             <thead>
               <tr>
-                <th>Product</th>
+                <th>Readiness</th>
+                <th>Status</th>
                 <th>SKU</th>
+                <th>Product</th>
+                <th>Supplier</th>
+                <th>Stock</th>
+                <th>Demand</th>
                 <th>Cost</th>
                 <th>Lead time</th>
-                <th>MOQ</th>
                 <th>Pack</th>
-                <th>Readiness</th>
-                <th>Issues</th>
+                <th>Missing inputs</th>
+                <th>Recommendation</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {rows.data.map((row) => (
                 <tr key={row.product_id}>
-                  <td>{row.product_name}</td>
-                  <td>{formatValue(row.orderpro_sku)}</td>
+                  <td>{formatValue(row.readiness_score)}</td>
+                  <td><span className={readinessStatusClassName(row.readiness_status)}>{row.readiness_status}</span></td>
+                  <td>{formatValue(row.sku)}</td>
+                  <td>
+                    <strong>{row.product_name}</strong>
+                    <div className="muted">ID {row.product_id}</div>
+                  </td>
+                  <td>{formatValue(row.supplier_name)}</td>
+                  <td>{formatValue(row.current_stock)}</td>
+                  <td>{row.demand_history_available ? "Available" : "Missing"}</td>
                   <td>
                     <strong>{formatValue(row.cost_price)}</strong>
                     <span className="muted"> {sourceLabel(row.cost_source)}</span>
@@ -3134,27 +3714,70 @@ function ForecastReadinessPanel() {
                     <span className="muted"> {sourceLabel(row.lead_time_source)}</span>
                   </td>
                   <td>
-                    <strong>{formatValue(row.min_order_qty)}</strong>
-                    <span className="muted"> {sourceLabel(row.moq_source)}</span>
-                  </td>
-                  <td>
                     <strong>{formatValue(row.pack_size)}</strong>
                     <span className="muted"> {sourceLabel(row.pack_size_source)}</span>
                   </td>
-                  <td>{formatValue(row.forecast_readiness_score ?? row.readiness_score)}</td>
                   <td>
-                    {[...(row.blocking_issues ?? []), ...(row.warning_issues ?? [])].map((issue) => (
-                      <span key={issue} className={issue.startsWith("missing_supplier") ? "status rejected" : "status needs-review"}>
+                    {row.missing_inputs.map((issue) => (
+                      <span key={issue} className={issue.includes("supplier") ? "status rejected" : "status needs-review"}>
                         {issue}
                       </span>
                     ))}
+                  </td>
+                  <td>
+                    {formatValue(row.recommendation_status)} {formatValue(row.recommended_quantity)}
+                  </td>
+                  <td>
+                    <button onClick={() => openReadinessDetail(row)} type="button">Details</button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
+        <div className="action-row">
+          <button disabled={page <= 1} onClick={() => setPage((current) => Math.max(current - 1, 1))} type="button">
+            Previous
+          </button>
+          <span>Page {page} of {totalPages || 1}</span>
+          <button disabled={totalPages === 0 || page >= totalPages} onClick={() => setPage((current) => current + 1)} type="button">
+            Next
+          </button>
+        </div>
       </section>
+
+      {selected && (
+        <section className="detail-panel" aria-label="Forecast readiness detail">
+          <div className="section-header">
+            <h3>{selected.product_name}</h3>
+            <button className="secondary-button" onClick={() => setSelected(null)} type="button">Close</button>
+          </div>
+          <p className="state">{selected.explanation}</p>
+          <dl className="detail-list">
+            <div><dt>Product ID</dt><dd>{selected.product_id}</dd></div>
+            <div><dt>SKU</dt><dd>{formatValue(selected.sku)}</dd></div>
+            <div><dt>Supplier</dt><dd>{formatValue(selected.supplier_name)}</dd></div>
+            <div><dt>Supplier source</dt><dd>{sourceLabel(selected.supplier_source)}</dd></div>
+            <div><dt>Stock</dt><dd>{formatValue(selected.current_stock)} ({sourceLabel(selected.stock_source)})</dd></div>
+            <div><dt>Demand source</dt><dd>{demandSourceLabel(selected.demand_source)}</dd></div>
+            <div><dt>Lead time</dt><dd>{formatValue(selected.lead_time_days)} ({sourceLabel(selected.lead_time_source)})</dd></div>
+            <div><dt>Cost</dt><dd>{formatValue(selected.cost_price)} ({sourceLabel(selected.cost_source)})</dd></div>
+            <div><dt>Pack size</dt><dd>{formatValue(selected.pack_size)} ({sourceLabel(selected.pack_size_source)})</dd></div>
+            <div><dt>Seasonality</dt><dd>{formatValue(selected.seasonality_status)}</dd></div>
+            <div><dt>Missing inputs</dt><dd>{selected.missing_inputs.length ? selected.missing_inputs.join(", ") : "-"}</dd></div>
+            <div><dt>Warnings</dt><dd>{selected.warnings.length ? selected.warnings.join(", ") : "-"}</dd></div>
+            <div><dt>Recommendation</dt><dd>{formatValue(selected.recommendation_status)} {formatValue(selected.recommended_quantity)}</dd></div>
+          </dl>
+          <div className="action-row">
+            {selected.missing_inputs.includes("supplier_id") && (
+              <button type="button" onClick={() => onNavigate("supplier-cleanup")}>
+                Review Supplier
+              </button>
+            )}
+            <button type="button" onClick={() => onNavigate("forecast")}>View Forecast</button>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -3646,9 +4269,11 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
   const [selectedPo, setSelectedPo] = useState<PurchaseOrder | null>(null);
   const [selectedPoError, setSelectedPoError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [lineActionLoading, setLineActionLoading] = useState(false);
   const [headerActionLoading, setHeaderActionLoading] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
 
   const loadPurchaseOrders = useCallback((active = true) => {
     listPurchaseOrders()
@@ -3681,6 +4306,7 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
   async function handleSelect(poId: number) {
     setSelectedPoError(null);
     setActionError(null);
+    setExportMessage(null);
     try {
       await refreshSelected(poId);
     } catch (loadError) {
@@ -3828,6 +4454,24 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
     }
   }
 
+  async function handleExportCsv() {
+    if (!selectedPo) {
+      return;
+    }
+    setExportLoading(true);
+    setActionError(null);
+    setExportMessage(null);
+    try {
+      const exported = await exportPurchaseOrderCsv(selectedPo.id);
+      downloadBlob(exported.blob, exported.filename ?? `purchase_order_${selectedPo.id}.csv`);
+      setExportMessage("Purchase order CSV exported.");
+    } catch (loadError) {
+      setActionError(`Could not export purchase order CSV. ${(loadError as Error).message}`);
+    } finally {
+      setExportLoading(false);
+    }
+  }
+
   return (
     <div className="review-stack">
       <CreatePurchaseOrderForm creating={creating} onCreate={handleCreate} />
@@ -3839,13 +4483,16 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
       />
       {selectedPoError && <div className="state error">Could not load PO: {selectedPoError}</div>}
       {actionError && <div className="state error">Purchase order action failed: {actionError}</div>}
+      {exportMessage && <div className="state">{exportMessage}</div>}
       {selectedPo ? (
         <PurchaseOrderDetail
+          exportLoading={exportLoading}
           headerActionLoading={headerActionLoading}
           lineActionLoading={lineActionLoading}
           onAddLine={handleAddLine}
           onApprove={handleApprove}
           onCancel={handleCancel}
+          onExportCsv={handleExportCsv}
           onIssue={handleIssue}
           onReceive={handleReceive}
           onSubmitForApproval={handleSubmitForApproval}
@@ -3973,22 +4620,26 @@ function PurchaseOrdersTable({
 }
 
 function PurchaseOrderDetail({
+  exportLoading,
   headerActionLoading,
   lineActionLoading,
   onAddLine,
   onApprove,
   onCancel,
+  onExportCsv,
   onIssue,
   onReceive,
   onSubmitForApproval,
   onUpdateLine,
   purchaseOrder,
 }: {
+  exportLoading: boolean;
   headerActionLoading: boolean;
   lineActionLoading: boolean;
   onAddLine: (payload: AddPurchaseOrderLineRequest) => Promise<void>;
   onApprove: (approvedBy: string | null) => Promise<void>;
   onCancel: () => void;
+  onExportCsv: () => void;
   onIssue: () => void;
   onReceive: () => void;
   onSubmitForApproval: () => void;
@@ -4001,6 +4652,7 @@ function PurchaseOrderDetail({
   const canApprove = purchaseOrder.status === "pending_approval";
   const canIssue = purchaseOrder.status === "approved";
   const canReceive = purchaseOrder.status === "issued";
+  const canExport = purchaseOrder.lines.length > 0;
 
   return (
     <section className="detail-panel" aria-label="Purchase order details">
@@ -4047,8 +4699,17 @@ function PurchaseOrderDetail({
               Cancel
             </button>
           )}
+          <button
+            disabled={exportLoading || !canExport}
+            onClick={onExportCsv}
+            title={canExport ? "Export purchase order lines to CSV" : "Add at least one line before exporting"}
+            type="button"
+          >
+            {exportLoading ? "Exporting..." : "Export CSV"}
+          </button>
         </div>
       </div>
+      {!canExport && <div className="state">Add at least one line before exporting CSV.</div>}
       {canEdit && (
         <div className="state">
           Submit for approval only moves this draft into review; it does not issue the PO.

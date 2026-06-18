@@ -16,9 +16,10 @@ from app.core.config import settings
 
 AUTH_ERROR = "Invalid or expired authentication credentials."
 INVALID_LOGIN = "Invalid email or password."
+AUTH_DISABLED_EMAIL = "authentication-disabled"
 
 password_hash = PasswordHash.recommended()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,15 @@ def decode_access_token(token: str) -> CurrentUser:
     return CurrentUser(email=settings.admin_email, role="admin")
 
 
-def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
+def auth_disabled_user() -> CurrentUser:
+    return CurrentUser(email=AUTH_DISABLED_EMAIL, role="admin")
+
+
+def get_current_user(token: str | None = Depends(oauth2_scheme)) -> CurrentUser:
+    if not settings.auth_enabled:
+        return auth_disabled_user()
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=AUTH_ERROR)
     return decode_access_token(token)
 
 

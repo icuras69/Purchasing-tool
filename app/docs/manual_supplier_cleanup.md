@@ -97,3 +97,35 @@ Unreviewed export rows and dry-run results do not affect forecasting or purchase
 - No fuzzy matching is used.
 - No purchase orders are created, approved, issued, received, cancelled, or edited.
 - Seasonality remains advisory and does not alter order quantities.
+
+## Local Web Review UI
+
+Task OP-22B adds a local `Supplier Cleanup` page in the frontend and protected API routes under
+`/api/manual-supplier-cleanup`.
+
+The page lists OrderPro products whose direct `products.supplier_id` is still missing. It reuses the
+same OP-22A cleanup rows and priority scoring used by the CSV/XLSX export workflow.
+
+The UI supports:
+
+- Summary cards for missing suppliers, priority candidates, confirmed manual assignments, deferred
+  reviews, rejected reviews, and completion percentage.
+- Searching by SKU, barcode, product name, or description.
+- Filters for priority only, open demand, stock on hand, cost, and existing suggestions.
+- Candidate detail review with priority reasons, forecast readiness issues, suggestion evidence,
+  stock, demand, and cost information.
+- Server-side supplier search by supplier name or OrderPro supplier code.
+- Explicit confirmation before assigning a supplier locally.
+- Deferred, needs-information, and rejected review statuses without changing `products.supplier_id`.
+
+Assignments through the UI:
+
+- Resolve only an existing local supplier by exact `supplier_id`.
+- Update `products.supplier_id` locally.
+- Create or update `ProductSupplierAssignmentReview` with `status="confirmed"` and
+  `suggestion_source="manual_supplier_cleanup"`.
+- Store reviewer, notes, review timestamp, and evidence summary.
+- Return `409 Conflict` if the product gained a different supplier after the page was loaded.
+
+This UI does not create suppliers, edit supplier master data, call OrderPro, or write supplier changes
+back to OrderPro.

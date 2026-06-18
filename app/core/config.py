@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     orderpro_open_demand_statuses: str = "confirmed,packed,backorder"
     orderpro_excluded_demand_statuses: str = "cancelled"
     orderpro_demand_included_statuses: str = "shipped"
+    auth_enabled: bool = True
     admin_email: str = ""
     admin_password_hash: str = ""
     jwt_secret_key: str = ""
@@ -47,7 +48,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security_settings(self) -> "Settings":
-        if not self.debug:
+        if not self.debug and self.auth_enabled:
             missing = [
                 name
                 for name, value in (

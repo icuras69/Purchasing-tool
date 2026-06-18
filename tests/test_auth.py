@@ -51,6 +51,31 @@ def test_missing_token_fails_on_protected_endpoint(unauthenticated_client):
     assert response.status_code == 401
 
 
+def test_auth_disabled_allows_protected_endpoint_without_token(unauthenticated_client, monkeypatch):
+    monkeypatch.setattr(settings, "auth_enabled", False)
+
+    response = unauthenticated_client.get("/products/")
+
+    assert response.status_code == 200
+
+
+def test_auth_disabled_current_user_returns_synthetic_admin(unauthenticated_client, monkeypatch):
+    monkeypatch.setattr(settings, "auth_enabled", False)
+
+    response = unauthenticated_client.get("/auth/me")
+
+    assert response.status_code == 200
+    assert response.json() == {"email": "authentication-disabled", "role": "admin"}
+
+
+def test_auth_enabled_still_requires_token(unauthenticated_client, monkeypatch):
+    monkeypatch.setattr(settings, "auth_enabled", True)
+
+    response = unauthenticated_client.get("/products/")
+
+    assert response.status_code == 401
+
+
 def test_malformed_token_fails(unauthenticated_client):
     response = unauthenticated_client.get(
         "/products/",
@@ -110,6 +135,7 @@ def test_startup_configuration_validation_catches_missing_security_secrets():
         Settings(
             _env_file=None,
             debug=False,
+            auth_enabled=True,
             admin_email="",
             admin_password_hash="",
             jwt_secret_key="",
@@ -118,6 +144,19 @@ def test_startup_configuration_validation_catches_missing_security_secrets():
     assert "ADMIN_EMAIL" in str(exc_info.value)
     assert "ADMIN_PASSWORD_HASH" in str(exc_info.value)
     assert "JWT_SECRET_KEY" in str(exc_info.value)
+
+
+def test_startup_configuration_allows_missing_security_secrets_when_auth_disabled():
+    settings_without_auth = Settings(
+        _env_file=None,
+        debug=False,
+        auth_enabled=False,
+        admin_email="",
+        admin_password_hash="",
+        jwt_secret_key="",
+    )
+
+    assert settings_without_auth.auth_enabled is False
 
 
 def test_security_headers_are_present_on_responses(client):

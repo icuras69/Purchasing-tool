@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
@@ -23,6 +23,7 @@ from app.services.purchase_order_drafting import (
     create_draft_purchase_order_from_products,
     snapshot_purchase_order_line_from_product,
 )
+from app.services.purchase_order_export import build_purchase_order_csv, load_purchase_order_for_export
 
 router = APIRouter(prefix="/purchase-orders", tags=["purchase-orders"])
 
@@ -242,6 +243,24 @@ def list_purchase_orders(db: Session = Depends(get_db)):
 @router.get("/{po_id}", response_model=PurchaseOrderResponse)
 def get_purchase_order(po_id: int, db: Session = Depends(get_db)):
     return serialize_purchase_order(load_purchase_order(db, po_id))
+
+
+@router.get("/{po_id}/export.csv")
+def export_purchase_order_csv(po_id: int, db: Session = Depends(get_db)):
+    po = load_purchase_order_for_export(db, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found.")
+    if not po.lines:
+        raise HTTPException(status_code=400, detail="Purchase order has no line items to export.")
+
+    exported = build_purchase_order_csv(po)
+    return Response(
+        content=exported.content,
+        media_type=exported.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{exported.filename}"',
+        },
+    )
 
 
 @router.post("/{po_id}/lines", response_model=PurchaseOrderResponse, status_code=status.HTTP_201_CREATED)

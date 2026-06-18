@@ -153,6 +153,89 @@ export interface SupplierAssignmentRejectRequest {
   reviewed_by?: string | null;
 }
 
+export interface ManualSupplierCleanupSummary {
+  total_products: number;
+  products_with_supplier: number;
+  products_missing_supplier: number;
+  priority_missing_supplier_products: number;
+  confirmed_manual_assignments: number;
+  deferred_reviews: number;
+  rejected_reviews: number;
+  needs_information_reviews: number;
+  completion_percentage: number;
+}
+
+export interface ManualSupplierCleanupCandidate {
+  product_id: number;
+  orderpro_id: string | null;
+  orderpro_sku: string | null;
+  product_name: string;
+  barcode: string | null;
+  brand: string | null;
+  category: string | null;
+  description?: string | null;
+  current_stock: number;
+  demand_history_available: boolean;
+  open_customer_demand: number;
+  seasonality_tag: string | null;
+  cost_price: number | null;
+  cost_source: string | null;
+  lead_time_status: string;
+  forecast_readiness_score: number | null;
+  blocking_issues: string[];
+  warning_issues: string[];
+  existing_suggested_supplier_id: number | null;
+  existing_suggested_supplier_name: string | null;
+  existing_suggestion_source: string | null;
+  existing_confidence_label: string;
+  evidence_summary: Record<string, unknown> | null;
+  review_status: string;
+  priority_score: number;
+  priority_reason: string;
+  suggested_action: string;
+  review?: Record<string, unknown> | null;
+}
+
+export interface ManualSupplierCleanupCandidatesResponse {
+  items: ManualSupplierCleanupCandidate[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  summary: {
+    total_missing_supplier: number;
+    priority_candidates: number;
+    with_open_demand: number;
+    with_stock: number;
+    with_demand_history: number;
+    with_cost: number;
+  };
+}
+
+export interface ManualSupplierCleanupSupplier extends SupplierOption {
+  assigned_product_count: number;
+}
+
+export interface ManualSupplierCleanupSuppliersResponse {
+  items: ManualSupplierCleanupSupplier[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+}
+
+export interface ManualSupplierCleanupAssignRequest {
+  supplier_id: number;
+  reviewed_by?: string | null;
+  notes?: string | null;
+}
+
+export interface ManualSupplierCleanupReviewRequest {
+  status: "deferred" | "rejected" | "needs_information" | string;
+  reviewed_by?: string | null;
+  notes?: string | null;
+}
+
 export interface WeakMapping {
   product_id: number;
   product_name: string;
@@ -337,6 +420,75 @@ export interface ForecastInputAudit {
     confidence_label: string;
     confidence_score: number;
   } | null;
+}
+
+export interface ForecastReconciliationSummary {
+  total_products: number;
+  ready: number;
+  partially_ready: number;
+  blocked: number;
+  monitor_only: number;
+  missing_supplier: number;
+  missing_lead_time: number;
+  missing_cost: number;
+  missing_pack_size: number;
+  missing_demand_history: number;
+  missing_stock: number;
+  readiness_percentage: number;
+}
+
+export interface ForecastReconciliationProduct {
+  product_id: number;
+  sku: string | null;
+  orderpro_sku: string | null;
+  product_name: string;
+  description: string | null;
+  barcode: string | null;
+  supplier_id: number | null;
+  supplier_code: string | null;
+  supplier_name: string | null;
+  supplier_source: string;
+  current_stock: number | null;
+  stock_source: string;
+  demand_history_available: boolean;
+  demand_source: string;
+  open_customer_demand: number;
+  lead_time_days: number | null;
+  lead_time_source: string;
+  cost_price: number | null;
+  cost_source: string;
+  pack_size: number | null;
+  pack_size_source: string;
+  min_order_qty: number | null;
+  moq_source: string;
+  seasonality_status: string;
+  readiness_score: number;
+  readiness_status: "ready" | "partially_ready" | "blocked" | "monitor_only" | string;
+  missing_inputs: string[];
+  warnings: string[];
+  blocking_issues: string[];
+  recommendation_status: string | null;
+  recommended_quantity: number | null;
+  explanation: string;
+  sources: Record<string, string>;
+  inputs?: Record<string, {
+    value: string | number | boolean | null;
+    supplier_id?: number | null;
+    source: string;
+    is_missing: boolean;
+    is_fallback: boolean;
+    blocks_forecast: boolean;
+    warning?: string | null;
+  }>;
+}
+
+export interface ForecastReconciliationProductsResponse {
+  items: ForecastReconciliationProduct[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  summary: ForecastReconciliationSummary;
 }
 
 export type SeasonalityStatus =

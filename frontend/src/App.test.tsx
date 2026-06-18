@@ -6,6 +6,7 @@ import {
   confirmProductSupplier,
   confirmSupplierAssignmentReview,
   addPurchaseOrderLine,
+  assignManualSupplierCleanupCandidate,
   acceptRecommendation,
   approvePurchaseOrder,
   cancelPurchaseOrder,
@@ -15,6 +16,7 @@ import {
   createPurchaseOrder,
   createProductSupplier,
   createReorderRecommendation,
+  exportPurchaseOrderCsv,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
@@ -25,6 +27,13 @@ import {
   getCurrentAdmin,
   getForecastReadinessRows,
   getForecastReadinessSummary,
+  getForecastReconciliationProduct,
+  getForecastReconciliationProducts,
+  getForecastReconciliationSummary,
+  exportForecastReconciliationCsv,
+  getManualSupplierCleanupCandidate,
+  getManualSupplierCleanupCandidates,
+  getManualSupplierCleanupSummary,
   getStoredAccessToken,
   getSupplierAssignmentReviewItems,
   getSupplierAssignmentReviewSummary,
@@ -34,6 +43,7 @@ import {
   getSupplierForecast,
   getPurchaseOrder,
   getRecommendation,
+  isAuthEnabled,
   issuePurchaseOrder,
   loginAdmin,
   listRecommendations,
@@ -43,6 +53,8 @@ import {
   rejectRecommendation,
   rejectProductSupplier,
   rejectSupplierAssignmentReview,
+  reviewManualSupplierCleanupCandidate,
+  searchManualSupplierCleanupSuppliers,
   setPreferredProductSupplier,
   setUnauthorizedHandler,
   submitPurchaseOrderForApproval,
@@ -52,6 +64,11 @@ import type {
   ForecastResponse,
   ForecastInputAudit,
   ForecastReadinessSummary,
+  ForecastReconciliationProduct,
+  ForecastReconciliationSummary,
+  ManualSupplierCleanupCandidate,
+  ManualSupplierCleanupSummary,
+  ManualSupplierCleanupSupplier,
   ProductSeasonalityDetail,
   Product,
   ProductSupplierMapping,
@@ -81,8 +98,18 @@ vi.mock("./api", () => ({
   generateRecommendationLLMExplanation: vi.fn(),
   getForecastReadinessSummary: vi.fn(),
   getForecastReadinessRows: vi.fn(),
+  getForecastReconciliationSummary: vi.fn(),
+  getForecastReconciliationProducts: vi.fn(),
+  getForecastReconciliationProduct: vi.fn(),
+  exportForecastReconciliationCsv: vi.fn(),
   getSupplierAssignmentReviewSummary: vi.fn(),
   getSupplierAssignmentReviewItems: vi.fn(),
+  getManualSupplierCleanupSummary: vi.fn(),
+  getManualSupplierCleanupCandidates: vi.fn(),
+  getManualSupplierCleanupCandidate: vi.fn(),
+  searchManualSupplierCleanupSuppliers: vi.fn(),
+  assignManualSupplierCleanupCandidate: vi.fn(),
+  reviewManualSupplierCleanupCandidate: vi.fn(),
   listSuppliers: vi.fn(),
   confirmSupplierAssignmentReview: vi.fn(),
   rejectSupplierAssignmentReview: vi.fn(),
@@ -91,6 +118,7 @@ vi.mock("./api", () => ({
   getProductSeasonality: vi.fn(),
   getSupplierForecast: vi.fn(),
   createDraftPOFromSupplierForecast: vi.fn(),
+  isAuthEnabled: vi.fn(),
   createProductSupplier: vi.fn(),
   confirmProductSupplier: vi.fn(),
   rejectProductSupplier: vi.fn(),
@@ -106,6 +134,7 @@ vi.mock("./api", () => ({
   convertRecommendationToDraftPO: vi.fn(),
   createDraftPurchaseOrderFromProducts: vi.fn(),
   createPurchaseOrder: vi.fn(),
+  exportPurchaseOrderCsv: vi.fn(),
   addPurchaseOrderLine: vi.fn(),
   updatePurchaseOrderLine: vi.fn(),
   submitPurchaseOrderForApproval: vi.fn(),
@@ -360,6 +389,85 @@ function mockForecastInputAudit(overrides: Partial<ForecastInputAudit> = {}): Fo
     seasonality_activation_recommendation: "safe_for_advisory_only",
     seasonality_readiness_status: null,
     forecast_recommended_qty: 0,
+    ...overrides,
+  };
+}
+
+function mockForecastReconciliationSummary(
+  overrides: Partial<ForecastReconciliationSummary> = {},
+): ForecastReconciliationSummary {
+  return {
+    total_products: 3,
+    ready: 1,
+    partially_ready: 1,
+    blocked: 1,
+    monitor_only: 0,
+    missing_supplier: 1,
+    missing_lead_time: 1,
+    missing_cost: 1,
+    missing_pack_size: 1,
+    missing_demand_history: 1,
+    missing_stock: 0,
+    readiness_percentage: 66.67,
+    ...overrides,
+  };
+}
+
+function mockForecastReconciliationProduct(
+  overrides: Partial<ForecastReconciliationProduct> = {},
+): ForecastReconciliationProduct {
+  return {
+    product_id: 77,
+    sku: "READY-77",
+    orderpro_sku: "READY-77",
+    product_name: "Ready Product",
+    description: "Operationally ready product",
+    barcode: "1234567890",
+    supplier_id: 10,
+    supplier_code: "ACME",
+    supplier_name: "Acme Supplies",
+    supplier_source: "manual_supplier_cleanup",
+    current_stock: 12,
+    stock_source: "product_current_stock_cache",
+    demand_history_available: true,
+    demand_source: "orderpro_orders",
+    open_customer_demand: 3,
+    lead_time_days: 5,
+    lead_time_source: "supplier_record",
+    cost_price: 6.5,
+    cost_source: "orderpro_product_cost",
+    pack_size: 2,
+    pack_size_source: "forecast_input_profile",
+    min_order_qty: 1,
+    moq_source: "business_default",
+    seasonality_status: "year_round",
+    readiness_score: 100,
+    readiness_status: "ready",
+    missing_inputs: [],
+    warnings: [],
+    blocking_issues: [],
+    recommendation_status: "monitor",
+    recommended_quantity: 0,
+    explanation: "Ready for normal forecasting.",
+    sources: {
+      supplier: "manual_supplier_cleanup",
+      lead_time: "supplier_record",
+      stock: "product_current_stock_cache",
+      demand: "orderpro_orders",
+      cost: "orderpro_product_cost",
+      pack_size: "forecast_input_profile",
+      seasonality: "year_round",
+    },
+    inputs: {
+      supplier: {
+        value: "Acme Supplies",
+        supplier_id: 10,
+        source: "manual_supplier_cleanup",
+        is_missing: false,
+        is_fallback: false,
+        blocks_forecast: false,
+      },
+    },
     ...overrides,
   };
 }
@@ -668,9 +776,76 @@ function mockSupplierForecast(overrides: Partial<SupplierForecastResponse> = {})
   };
 }
 
+function mockCleanupSummary(overrides: Partial<ManualSupplierCleanupSummary> = {}): ManualSupplierCleanupSummary {
+  return {
+    total_products: 3,
+    products_with_supplier: 1,
+    products_missing_supplier: 2,
+    priority_missing_supplier_products: 1,
+    confirmed_manual_assignments: 0,
+    deferred_reviews: 0,
+    rejected_reviews: 0,
+    needs_information_reviews: 0,
+    completion_percentage: 33.33,
+    ...overrides,
+  };
+}
+
+function mockCleanupCandidate(
+  overrides: Partial<ManualSupplierCleanupCandidate> = {},
+): ManualSupplierCleanupCandidate {
+  return {
+    product_id: 71,
+    orderpro_id: "op-71",
+    orderpro_sku: "CLEAN-71",
+    product_name: "Cleanup Product",
+    barcode: "123456",
+    brand: "Stable",
+    category: "Grooming",
+    description: "Needs supplier review",
+    current_stock: 4,
+    demand_history_available: true,
+    open_customer_demand: 6,
+    seasonality_tag: "summer",
+    cost_price: 12.5,
+    cost_source: "product",
+    lead_time_status: "available",
+    forecast_readiness_score: 80,
+    blocking_issues: ["missing_supplier"],
+    warning_issues: [],
+    existing_suggested_supplier_id: 10,
+    existing_suggested_supplier_name: "Acme Supplies",
+    existing_suggestion_source: "orderpro_purchase_order_line",
+    existing_confidence_label: "medium",
+    evidence_summary: { message: "Recent PO evidence" },
+    review_status: "suggested",
+    priority_score: 105,
+    priority_reason: "open customer demand; stock on hand",
+    suggested_action: "confirm_existing_suggestion",
+    review: null,
+    ...overrides,
+  };
+}
+
+function mockCleanupSupplier(
+  overrides: Partial<ManualSupplierCleanupSupplier> = {},
+): ManualSupplierCleanupSupplier {
+  return {
+    id: 10,
+    name: "Acme Supplies",
+    orderpro_id: "sup-10",
+    orderpro_code: "ACME",
+    is_active: true,
+    lead_time_days: 7,
+    assigned_product_count: 12,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getStoredAccessToken).mockReturnValue("test-token");
+  vi.mocked(isAuthEnabled).mockReturnValue(true);
   vi.mocked(getCurrentAdmin).mockResolvedValue({ email: "admin@example.com", role: "admin" });
   vi.mocked(loginAdmin).mockResolvedValue({
     access_token: "new-token",
@@ -684,8 +859,79 @@ beforeEach(() => {
   vi.mocked(fetchProductForecast).mockResolvedValue(mockForecast());
   vi.mocked(getForecastReadinessSummary).mockResolvedValue(mockForecastReadinessSummary());
   vi.mocked(getForecastReadinessRows).mockResolvedValue([mockForecastInputAudit()]);
+  vi.mocked(getForecastReconciliationSummary).mockResolvedValue(mockForecastReconciliationSummary());
+  vi.mocked(getForecastReconciliationProducts).mockResolvedValue({
+    items: [
+      mockForecastReconciliationProduct(),
+      mockForecastReconciliationProduct({
+        product_id: 88,
+        sku: "MISSING-SUP",
+        orderpro_sku: "MISSING-SUP",
+        product_name: "Missing Supplier Product",
+        supplier_id: null,
+        supplier_code: null,
+        supplier_name: null,
+        supplier_source: "missing",
+        readiness_score: 66.67,
+        readiness_status: "blocked",
+        missing_inputs: ["supplier_id"],
+        blocking_issues: ["missing_supplier"],
+        explanation: "Supplier assignment is blocking forecast readiness.",
+      }),
+      mockForecastReconciliationProduct({
+        product_id: 89,
+        sku: "NO-HISTORY",
+        orderpro_sku: "NO-HISTORY",
+        product_name: "Monitor Only Product",
+        demand_history_available: false,
+        demand_source: "none",
+        open_customer_demand: 0,
+        readiness_score: 77.78,
+        readiness_status: "monitor_only",
+        missing_inputs: ["demand_history"],
+        warnings: ["missing_demand_history"],
+        explanation: "No demand history is available yet.",
+      }),
+    ],
+    page: 1,
+    page_size: 25,
+    total: 3,
+    total_pages: 1,
+    summary: mockForecastReconciliationSummary(),
+  });
+  vi.mocked(getForecastReconciliationProduct).mockResolvedValue(mockForecastReconciliationProduct());
+  vi.mocked(exportForecastReconciliationCsv).mockResolvedValue({
+    blob: new Blob(["csv"], { type: "text/csv" }),
+    filename: "forecast_readiness.csv",
+  });
   vi.mocked(getSupplierAssignmentReviewSummary).mockResolvedValue(mockSupplierAssignmentSummary());
   vi.mocked(getSupplierAssignmentReviewItems).mockResolvedValue([]);
+  vi.mocked(getManualSupplierCleanupSummary).mockResolvedValue(mockCleanupSummary());
+  vi.mocked(getManualSupplierCleanupCandidates).mockResolvedValue({
+    items: [mockCleanupCandidate()],
+    page: 1,
+    page_size: 25,
+    total: 1,
+    total_pages: 1,
+    summary: {
+      total_missing_supplier: 1,
+      priority_candidates: 1,
+      with_open_demand: 1,
+      with_stock: 1,
+      with_demand_history: 1,
+      with_cost: 1,
+    },
+  });
+  vi.mocked(getManualSupplierCleanupCandidate).mockResolvedValue(mockCleanupCandidate());
+  vi.mocked(searchManualSupplierCleanupSuppliers).mockResolvedValue({
+    items: [mockCleanupSupplier()],
+    page: 1,
+    page_size: 25,
+    total: 1,
+    total_pages: 1,
+  });
+  vi.mocked(assignManualSupplierCleanupCandidate).mockResolvedValue({});
+  vi.mocked(reviewManualSupplierCleanupCandidate).mockResolvedValue({});
   vi.mocked(listSuppliers).mockResolvedValue([mockSupplierOption()]);
   vi.mocked(confirmSupplierAssignmentReview).mockResolvedValue({});
   vi.mocked(rejectSupplierAssignmentReview).mockResolvedValue({});
@@ -719,6 +965,10 @@ beforeEach(() => {
     mockDraftFromProductsResponse({ status: "draft" }),
   );
   vi.mocked(createPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+  vi.mocked(exportPurchaseOrderCsv).mockResolvedValue({
+    blob: new Blob(["csv"], { type: "text/csv" }),
+    filename: "purchase_order_500.csv",
+  });
   vi.mocked(addPurchaseOrderLine).mockResolvedValue(mockPurchaseOrder());
   vi.mocked(submitPurchaseOrderForApproval).mockResolvedValue(
     mockPurchaseOrder({ status: "pending_approval" }),
@@ -809,6 +1059,30 @@ describe("App mapping review workflow", () => {
     expect(screen.queryByRole("button", { name: "Products" })).not.toBeInTheDocument();
   });
 
+  it("skips login screen and renders the app when authentication is disabled", async () => {
+    vi.mocked(isAuthEnabled).mockReturnValue(false);
+    vi.mocked(getStoredAccessToken).mockReturnValue(null);
+
+    render(<App />);
+
+    expect(screen.queryByLabelText("Admin login")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Products" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Logout" })).not.toBeInTheDocument();
+    expect(getCurrentAdmin).not.toHaveBeenCalled();
+    expect(fetchProducts).toHaveBeenCalled();
+  });
+
+  it("does not install a login redirect handler when authentication is disabled", async () => {
+    vi.mocked(isAuthEnabled).mockReturnValue(false);
+    vi.mocked(getStoredAccessToken).mockReturnValue(null);
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Products" });
+
+    expect(setUnauthorizedHandler).toHaveBeenCalledWith(null);
+    expect(screen.queryByLabelText("Admin login")).not.toBeInTheDocument();
+  });
+
   it("renders navigation tabs", async () => {
     render(<App />);
 
@@ -820,48 +1094,101 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Supplier Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast Readiness" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Assignment Review" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Supplier Cleanup" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Seasonality" })).toBeInTheDocument();
     expect(await screen.findByText("No products found.")).toBeInTheDocument();
   });
 
-  it("forecast readiness summary and source labels render", async () => {
+  it("forecast reconciliation summary, categories, and source labels render", async () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Forecast Readiness" }));
 
     const summary = await screen.findByLabelText("Forecast readiness summary");
-    expect(within(summary).getByText("OrderPro products")).toBeInTheDocument();
-    expect(within(summary).getByText("PO-derived cost")).toBeInTheDocument();
+    expect(within(summary).getByText("Ready")).toBeInTheDocument();
+    expect(within(summary).getByText("Blocked")).toBeInTheDocument();
+    expect(within(summary).getByText("Monitor only")).toBeInTheDocument();
+    expect(within(summary).getByText("Readiness %")).toBeInTheDocument();
 
     const table = await screen.findByLabelText("Forecast readiness rows");
     expect(within(table).getByText("Ready Product")).toBeInTheDocument();
     expect(within(table).getByText("READY-77")).toBeInTheDocument();
-    expect(within(table).getByText("OrderPro PO line")).toBeInTheDocument();
-    expect(within(table).getByText("Supplier record")).toBeInTheDocument();
-    expect(within(table).getByText("fallback_moq")).toBeInTheDocument();
+    expect(within(table).getByText("Missing Supplier Product")).toBeInTheDocument();
+    expect(within(table).getByText("Monitor Only Product")).toBeInTheDocument();
+    expect(within(table).getAllByText("OrderPro product cost")[0]).toBeInTheDocument();
+    expect(within(table).getAllByText("Supplier record")[0]).toBeInTheDocument();
   });
 
-  it("forecast readiness filters call the matching endpoint", async () => {
-    vi.mocked(getForecastReadinessRows).mockResolvedValueOnce([mockForecastInputAudit()]).mockResolvedValueOnce([
-      mockForecastInputAudit({
-        product_id: 88,
-        orderpro_sku: "MISS-COST",
-        product_name: "Missing Cost Product",
-        cost_price: null,
-        cost_source: "missing",
-        cost_confidence: "missing",
-        warning_issues: ["missing_cost"],
+  it("forecast reconciliation filters call the matching endpoint", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Forecast Readiness" }));
+    await screen.findByLabelText("Forecast readiness rows");
+    await userEvent.selectOptions(screen.getByLabelText("Readiness status filter"), "blocked");
+    await userEvent.selectOptions(screen.getByLabelText("Missing input filter"), "supplier_id");
+    await userEvent.type(screen.getByLabelText("Search forecast readiness products"), "halter");
+
+    expect(getForecastReconciliationProducts).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        status: "blocked",
+        missing_input: "supplier_id",
+        search: "halter",
       }),
-    ]);
+    );
+  });
+
+  it("forecast reconciliation detail links to supplier cleanup and forecast", async () => {
+    vi.mocked(getForecastReconciliationProduct).mockResolvedValueOnce(
+      mockForecastReconciliationProduct({
+        product_id: 88,
+        product_name: "Missing Supplier Product",
+        supplier_id: null,
+        supplier_name: null,
+        supplier_source: "missing",
+        readiness_status: "blocked",
+        missing_inputs: ["supplier_id"],
+        blocking_issues: ["missing_supplier"],
+        explanation: "Supplier assignment is blocking forecast readiness.",
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Forecast Readiness" }));
+    await screen.findByText("Missing Supplier Product");
+    await userEvent.click(screen.getAllByRole("button", { name: "Details" })[1]);
+
+    const detail = await screen.findByLabelText("Forecast readiness detail");
+    expect(within(detail).getByText("Supplier assignment is blocking forecast readiness.")).toBeInTheDocument();
+    expect(within(detail).getByText("Missing")).toBeInTheDocument();
+
+    await userEvent.click(within(detail).getByRole("button", { name: "Review Supplier" }));
+    const cleanupWorkspace = await screen.findByLabelText("Manual supplier cleanup workspace");
+    expect(within(cleanupWorkspace).getByRole("heading", { name: "Supplier Cleanup" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Forecast Readiness" }));
+    await screen.findByText("Missing Supplier Product");
+    await userEvent.click(screen.getAllByRole("button", { name: "Details" })[1]);
+    await userEvent.click(await screen.findByRole("button", { name: "View Forecast" }));
+    expect(await screen.findByLabelText("Product forecast")).toBeInTheDocument();
+  });
+
+  it("forecast reconciliation exports the current filter to CSV", async () => {
+    const objectUrlSpy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:forecast-readiness");
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Forecast Readiness" }));
     await screen.findByLabelText("Forecast readiness rows");
-    await userEvent.click(screen.getByRole("button", { name: "Missing cost" }));
+    await userEvent.selectOptions(screen.getByLabelText("Readiness status filter"), "ready");
+    await userEvent.click(screen.getByRole("button", { name: "Export Readiness CSV" }));
 
-    expect(getForecastReadinessRows).toHaveBeenLastCalledWith("missing_cost");
-    expect(await screen.findByText("Missing Cost Product")).toBeInTheDocument();
+    expect(exportForecastReconciliationCsv).toHaveBeenCalledWith(expect.objectContaining({ status: "ready" }));
+    expect(objectUrlSpy).toHaveBeenCalled();
+    expect(revokeSpy).toHaveBeenCalledWith("blob:forecast-readiness");
+    expect(await screen.findByText("Forecast readiness CSV exported.")).toBeInTheDocument();
+
+    objectUrlSpy.mockRestore();
+    revokeSpy.mockRestore();
   });
 
   it("supplier assignment review summary and suggested rows render", async () => {
@@ -976,6 +1303,131 @@ describe("App mapping review workflow", () => {
       8182,
       expect.objectContaining({ supplier_id: 55, reviewed_by: "manual" }),
     );
+  });
+
+  it("manual supplier cleanup summary and candidate table render", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Cleanup" }));
+
+    const summary = await screen.findByLabelText("Manual supplier cleanup summary");
+    expect(within(summary).getByText("Missing suppliers")).toBeInTheDocument();
+    expect(within(summary).getByText("Priority candidates")).toBeInTheDocument();
+    expect(screen.getByText("Cleanup Product")).toBeInTheDocument();
+    expect(screen.getByText("CLEAN-71")).toBeInTheDocument();
+    expect(screen.getByText(/This does not create suppliers or write back to OrderPro/)).toBeInTheDocument();
+  });
+
+  it("manual supplier cleanup filters and pagination call the API", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Cleanup" }));
+    await screen.findByLabelText("Manual supplier cleanup candidates");
+    await userEvent.type(screen.getByLabelText("Search supplier cleanup products"), "halter");
+    await userEvent.click(screen.getByLabelText("Priority only"));
+    await userEvent.click(screen.getByLabelText("Open demand"));
+
+    expect(getManualSupplierCleanupCandidates).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        search: "halter",
+        priority_only: true,
+        has_open_demand: true,
+      }),
+    );
+  });
+
+  it("manual supplier cleanup detail opens and supplier search works", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Cleanup" }));
+    await screen.findByText("Cleanup Product");
+    await userEvent.click(screen.getByRole("button", { name: "Review" }));
+    await screen.findByLabelText("Supplier cleanup candidate detail");
+    await userEvent.type(screen.getByLabelText("Search suppliers for cleanup"), "acme");
+
+    expect(getManualSupplierCleanupCandidate).toHaveBeenCalledWith(71);
+    expect(searchManualSupplierCleanupSuppliers).toHaveBeenLastCalledWith(
+      expect.objectContaining({ search: "acme", page_size: 25 }),
+    );
+    expect(screen.getByText("Recent PO evidence")).toBeInTheDocument();
+  });
+
+  it("manual supplier cleanup assignment confirms and removes the item", async () => {
+    vi.mocked(getManualSupplierCleanupCandidates)
+      .mockResolvedValueOnce({
+        items: [mockCleanupCandidate()],
+        page: 1,
+        page_size: 25,
+        total: 1,
+        total_pages: 1,
+        summary: {
+          total_missing_supplier: 1,
+          priority_candidates: 1,
+          with_open_demand: 1,
+          with_stock: 1,
+          with_demand_history: 1,
+          with_cost: 1,
+        },
+      })
+      .mockResolvedValue({
+        items: [],
+        page: 1,
+        page_size: 25,
+        total: 0,
+        total_pages: 0,
+        summary: {
+          total_missing_supplier: 0,
+          priority_candidates: 0,
+          with_open_demand: 0,
+          with_stock: 0,
+          with_demand_history: 0,
+          with_cost: 0,
+        },
+      });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Cleanup" }));
+    await screen.findByText("Cleanup Product");
+    await userEvent.click(screen.getByRole("button", { name: "Review" }));
+    await screen.findByLabelText("Supplier cleanup selected supplier");
+    await userEvent.click(screen.getByRole("button", { name: "Assign supplier" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Assign supplier \"Acme Supplies\""));
+    expect(assignManualSupplierCleanupCandidate).toHaveBeenCalledWith(
+      71,
+      expect.objectContaining({ supplier_id: 10, reviewed_by: "Maged" }),
+    );
+    expect(await screen.findByText("Supplier assigned locally.")).toBeInTheDocument();
+  });
+
+  it("manual supplier cleanup records defer and reject reviews", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Cleanup" }));
+    await screen.findByText("Cleanup Product");
+    await userEvent.click(screen.getByRole("button", { name: "Review" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Defer" }));
+
+    expect(reviewManualSupplierCleanupCandidate).toHaveBeenCalledWith(
+      71,
+      expect.objectContaining({ status: "deferred", reviewed_by: "Maged" }),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Review" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Reject suggestion" }));
+
+    expect(reviewManualSupplierCleanupCandidate).toHaveBeenCalledWith(
+      71,
+      expect.objectContaining({ status: "rejected" }),
+    );
+  });
+
+  it("manual supplier cleanup shows conflict errors", async () => {
+    vi.mocked(assignManualSupplierCleanupCandidate).mockRejectedValue(new Error("Product already has a different supplier assignment."));
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Cleanup" }));
+    await screen.findByText("Cleanup Product");
+    await userEvent.click(screen.getByRole("button", { name: "Review" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Assign supplier" }));
+
+    expect(await screen.findByText("Product already has a different supplier assignment.")).toBeInTheDocument();
   });
 
   it("seasonality summary cards display backend counts", async () => {
@@ -1671,6 +2123,112 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("draft")).toBeInTheDocument();
     expect(screen.getByText("Draft PO")).toBeInTheDocument();
     expect(screen.getByText("19")).toBeInTheDocument();
+  });
+
+  it("export CSV button renders on a purchase order with line items", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("button", { name: "Export CSV" })).toBeEnabled();
+  });
+
+  it("export CSV button is disabled for an empty purchase order", async () => {
+    const emptyPo = mockPurchaseOrder({ lines: [] });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([emptyPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(emptyPo);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("button", { name: "Export CSV" })).toBeDisabled();
+    expect(screen.getByText("Add at least one line before exporting CSV.")).toBeInTheDocument();
+  });
+
+  it("export CSV action downloads the returned blob with the response filename", async () => {
+    const objectUrlSpy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:purchase-order");
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+    vi.mocked(exportPurchaseOrderCsv).mockResolvedValue({
+      blob: new Blob(["csv"], { type: "text/csv" }),
+      filename: "purchase_order_500_acme.csv",
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+
+    expect(exportPurchaseOrderCsv).toHaveBeenCalledWith(500);
+    expect(objectUrlSpy).toHaveBeenCalled();
+    expect(clickSpy).toHaveBeenCalled();
+    expect(revokeSpy).toHaveBeenCalledWith("blob:purchase-order");
+    expect(await screen.findByText("Purchase order CSV exported.")).toBeInTheDocument();
+  });
+
+  it("export CSV action uses fallback filename when the header filename is absent", async () => {
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        expect(this.download).toBe("purchase_order_500.csv");
+      });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fallback");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+    vi.mocked(exportPurchaseOrderCsv).mockResolvedValue({
+      blob: new Blob(["csv"], { type: "text/csv" }),
+      filename: null,
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+
+    expect(clickSpy).toHaveBeenCalled();
+  });
+
+  it("export CSV button shows exporting state while waiting", async () => {
+    let resolveExport: (value: { blob: Blob; filename: string | null }) => void = () => {};
+    vi.mocked(exportPurchaseOrderCsv).mockReturnValue(
+      new Promise((resolve) => {
+        resolveExport = resolve;
+      }),
+    );
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+
+    expect(await screen.findByRole("button", { name: "Exporting..." })).toBeDisabled();
+    resolveExport({ blob: new Blob(["csv"]), filename: "done.csv" });
+  });
+
+  it("export CSV errors show a user-facing message", async () => {
+    vi.mocked(exportPurchaseOrderCsv).mockRejectedValue(new Error("Purchase order not found."));
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+
+    expect(
+      await screen.findByText(
+        "Purchase order action failed: Could not export purchase order CSV. Purchase order not found.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("create draft PO form validates supplier_id", async () => {

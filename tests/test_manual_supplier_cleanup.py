@@ -11,6 +11,7 @@ from app.services.manual_supplier_cleanup import (
     build_missing_supplier_cleanup_export,
     plan_missing_supplier_cleanup_import,
 )
+from app.core.security import settings
 from app.services.seasonality_backtesting import audit_product_forecast_inputs
 
 
@@ -320,3 +321,205 @@ def test_forecast_readiness_improves_after_manual_cleanup_confirmation(db_sessio
 
     assert "missing_supplier" in before["blocking_issues"]
     assert "missing_supplier" not in after["blocking_issues"]
+
+
+def test_cleanup_api_lists_missing_supplier_candidates(client, db_session):
+    supplier = _supplier(db_session)
+    missing = _product(db_session, sku="API-MISSING", stock=3, cost=10)
+    _product(db_session, sku="API-ASSIGNED", supplier_id=supplier.id)
+
+    response = client.get("/api/manual-supplier-cleanup/candidates")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["product_id"] == missing.id
+    assert body["summary"]["total_missing_supplier"] == 1
+    assert body["summary"]["with_stock"] == 1
+    assert body["summary"]["with_cost"] == 1
+
+
+def test_cleanup_api_priority_sorting_and_filters(client, db_session):
+    low = _product(db_session, sku="LOW")
+    high = _product(db_session, sku="HIGH", stock=4, cost=8)
+    _add_open_customer_demand(db_session, high, quantity=9)
+
+    response = client.get("/api/manual-supplier-cleanup/candidates?priority_only=true&has_open_demand=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["product_id"] for item in body["items"]] == [high.id]
+    assert low.id not in [item["product_id"] for item in body["items"]]
+
+
+def test_cleanup_api_search_and_pagination(client, db_session):
+    first = _product(db_session, name="Blue Training Halter", sku="BLUE-HALTER")
+    _product(db_session, name="Red Training Halter", sku="RED-HALTER")
+
+    response = client.get("/api/manual-supplier-cleanup/candidates?search=blue&page=1&page_size=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["total_pages"] == 1
+    assert body["items"][0]["product_id"] == first.id
+
+
+def test_cleanup_api_candidate_detail(client, db_session):
+    product = _product(db_session, sku="DETAIL", stock=2, cost=6)
+
+    response = client.get(f"/api/manual-supplier-cleanup/candidates/{product.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["product_id"] == product.id
+    assert body["orderpro_sku"] == "DETAIL"
+    assert body["description"] is None
+    assert body["review"] is None
+
+
+def test_cleanup_api_supplier_search_by_name_and_code(client, db_session):
+    supplier = _supplier(db_session, name="Maged Supplies", code="MAGED")
+    _supplier(db_session, name="Other Vendor", code="OTHER", orderpro_id="other-vendor")
+
+    by_name = client.get("/api/manual-supplier-cleanup/suppliers?search=maged")
+    by_code = client.get("/api/manual-supplier-cleanup/suppliers?search=MAGED")
+
+    assert by_name.status_code == 200
+    assert by_code.status_code == 200
+    assert by_name.json()["items"][0]["id"] == supplier.id
+    assert by_code.json()["items"][0]["orderpro_code"] == "MAGED"
+
+
+def test_cleanup_api_successful_assignment_updates_product_and_review(client, db_session):
+    supplier = _supplier(db_session)
+    product = _product(db_session)
+
+    response = client.post(
+        f"/api/manual-supplier-cleanup/candidates/{product.id}/assign",
+        json={"supplier_id": supplier.id, "reviewed_by": "Maged", "notes": "Confirmed locally"},
+    )
+
+    assert response.status_code == 200
+    db_session.expire_all()
+    review = db_session.query(ProductSupplierAssignmentReview).one()
+    assert db_session.get(Product, product.id).supplier_id == supplier.id
+    assert review.status == "confirmed"
+    assert review.suggestion_source == "manual_supplier_cleanup"
+    assert review.reviewed_by == "Maged"
+    assert review.notes == "Confirmed locally"
+    assert response.json()["review"]["status"] == "confirmed"
+
+
+def test_cleanup_api_assignment_is_idempotent_for_same_supplier(client, db_session):
+    supplier = _supplier(db_session)
+    product = _product(db_session, supplier_id=supplier.id)
+
+    response = client.post(
+        f"/api/manual-supplier-cleanup/candidates/{product.id}/assign",
+        json={"supplier_id": supplier.id, "reviewed_by": "Maged"},
+    )
+
+    assert response.status_code == 200
+    assert db_session.get(Product, product.id).supplier_id == supplier.id
+
+
+def test_cleanup_api_assignment_conflict_returns_409(client, db_session):
+    existing = _supplier(db_session, name="Existing", code="EXIST", orderpro_id="exist")
+    other = _supplier(db_session, name="Other", code="OTH", orderpro_id="oth")
+    product = _product(db_session, supplier_id=existing.id)
+
+    response = client.post(
+        f"/api/manual-supplier-cleanup/candidates/{product.id}/assign",
+        json={"supplier_id": other.id, "reviewed_by": "Maged"},
+    )
+
+    assert response.status_code == 409
+    assert db_session.get(Product, product.id).supplier_id == existing.id
+
+
+def test_cleanup_api_assignment_unknown_product_and_supplier(client, db_session):
+    product = _product(db_session)
+
+    missing_product = client.post(
+        "/api/manual-supplier-cleanup/candidates/999999/assign",
+        json={"supplier_id": 1},
+    )
+    missing_supplier = client.post(
+        f"/api/manual-supplier-cleanup/candidates/{product.id}/assign",
+        json={"supplier_id": 999999},
+    )
+
+    assert missing_product.status_code == 404
+    assert missing_supplier.status_code == 404
+    assert db_session.get(Product, product.id).supplier_id is None
+
+
+def test_cleanup_api_deferred_review_does_not_assign_supplier(client, db_session):
+    product = _product(db_session)
+
+    response = client.post(
+        f"/api/manual-supplier-cleanup/candidates/{product.id}/review",
+        json={"status": "deferred", "reviewed_by": "Maged", "notes": "Need spreadsheet."},
+    )
+
+    assert response.status_code == 200
+    db_session.expire_all()
+    review = db_session.query(ProductSupplierAssignmentReview).one()
+    assert db_session.get(Product, product.id).supplier_id is None
+    assert review.status == "deferred"
+    assert review.reviewed_by == "Maged"
+
+
+def test_cleanup_api_summary_counts(client, db_session):
+    supplier = _supplier(db_session)
+    _product(db_session, sku="ASSIGNED-SUMMARY", supplier_id=supplier.id)
+    missing = _product(db_session, sku="MISSING-SUMMARY", stock=2)
+    client.post(
+        f"/api/manual-supplier-cleanup/candidates/{missing.id}/review",
+        json={"status": "rejected", "reviewed_by": "Maged"},
+    )
+
+    response = client.get("/api/manual-supplier-cleanup/summary")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_products"] == 2
+    assert body["products_with_supplier"] == 1
+    assert body["products_missing_supplier"] == 1
+    assert body["rejected_reviews"] == 1
+    assert body["completion_percentage"] == 50.0
+
+
+def test_cleanup_api_auth_disabled_allows_local_access(unauthenticated_client, monkeypatch):
+    monkeypatch.setattr(settings, "auth_enabled", False)
+
+    response = unauthenticated_client.get("/api/manual-supplier-cleanup/summary")
+
+    assert response.status_code == 200
+
+
+def test_cleanup_api_auth_enabled_requires_token(unauthenticated_client, monkeypatch):
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    unauthenticated_client.headers.pop("authorization", None)
+    unauthenticated_client.headers.pop("Authorization", None)
+
+    response = unauthenticated_client.get("/api/manual-supplier-cleanup/summary")
+
+    assert response.status_code == 401
+
+
+def test_cleanup_api_does_not_call_orderpro(client, db_session, monkeypatch):
+    supplier = _supplier(db_session)
+    product = _product(db_session)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("OrderPro client must not be used by manual supplier cleanup API.")
+
+    monkeypatch.setattr("app.services.orderpro_client.OrderProClient.generic_get", fail_if_called)
+    response = client.post(
+        f"/api/manual-supplier-cleanup/candidates/{product.id}/assign",
+        json={"supplier_id": supplier.id},
+    )
+
+    assert response.status_code == 200

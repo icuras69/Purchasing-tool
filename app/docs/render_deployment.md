@@ -43,6 +43,7 @@ Required environment variables for staging:
 - `DATABASE_URL`
 - `DEBUG=false`
 - `DATABASE_AUTO_CREATE_TABLES=false`
+- `AUTH_ENABLED`
 - `FRONTEND_ORIGIN`
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD_HASH`
@@ -57,6 +58,7 @@ Required environment variables for staging:
 Optional staging variables:
 
 - `CORS_ORIGINS`
+- `VITE_AUTH_ENABLED` for the frontend static site
 - `ORDERPRO_API_TOKEN`
 - `ORDERPRO_TIMEOUT_SECONDS`
 - `OPENAI_API_KEY`
@@ -79,7 +81,7 @@ The backend does not use wildcard CORS with credentials.
 
 ### Authentication
 
-The staging backend uses single-admin authentication.
+The staging backend uses single-admin authentication when `AUTH_ENABLED=true`.
 
 Public endpoints:
 
@@ -93,6 +95,16 @@ Authorization: Bearer <access_token>
 ```
 
 When `DEBUG=false`, `/docs`, `/redoc`, and `/openapi.json` are disabled so API documentation is not publicly exposed.
+
+Temporary bypass:
+
+- `AUTH_ENABLED=false` on the backend allows protected routes without a bearer token.
+- `VITE_AUTH_ENABLED=false` on the frontend skips the login screen and sends requests without an `Authorization` header.
+- These values must be changed together.
+- Disabling authentication exposes the tool to anyone with the URL.
+- To restore authentication, set both `AUTH_ENABLED=true` and `VITE_AUTH_ENABLED=true`, then redeploy both services.
+
+When `DEBUG=false` and `AUTH_ENABLED=true`, the backend requires `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, and `JWT_SECRET_KEY` at startup. When `AUTH_ENABLED=false`, those authentication secrets are not required for startup, but the login/JWT implementation remains in the codebase for reactivation.
 
 Generate a JWT secret locally:
 
@@ -159,13 +171,13 @@ Do not commit:
 - `tmp/` reports
 - API keys or database URLs with passwords
 
-The demo should not be publicly shared until authentication or access protection is added.
+The demo should not be publicly shared while authentication is disabled. If `AUTH_ENABLED=false` and `VITE_AUTH_ENABLED=false`, anyone with the URL can access business data.
 
 ## Render Blueprint
 
 `render.yaml` defines:
 
-- `purchasing-ai-staging-db`: Render Postgres, `basic-256mb`, PostgreSQL 17.
+- `purchasing-ai-staging-db`: Render Postgres, free plan, PostgreSQL 17.
 - `purchasing-ai-api`: Python web service.
 - `purchasing-ai-frontend`: Vite static site.
 
@@ -226,9 +238,17 @@ Confirm:
 
 - `DEBUG=false`
 - `DATABASE_AUTO_CREATE_TABLES=false`
+- `AUTH_ENABLED=false` only for the temporary unauthenticated staging window.
 - `ORDERPRO_SYNC_ENABLED=false`
 - `LLM_PROVIDER=mock`
 - `ENABLE_REAL_LLM=false`
+
+For the frontend static site, set:
+
+- `VITE_API_BASE_URL`: the backend Render HTTPS URL.
+- `VITE_AUTH_ENABLED=false` only while the backend also has `AUTH_ENABLED=false`.
+
+To bring login back, set backend `AUTH_ENABLED=true`, set frontend `VITE_AUTH_ENABLED=true`, ensure the admin secrets are present, and redeploy both services.
 
 ### 5. Enter Frontend Environment Values
 
@@ -256,7 +276,7 @@ Backend:
 Invoke-RestMethod https://<backend-service>.onrender.com/health
 ```
 
-Login:
+Login when authentication is enabled:
 
 ```powershell
 $login = Invoke-RestMethod `
