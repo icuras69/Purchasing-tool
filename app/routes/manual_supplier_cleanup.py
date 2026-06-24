@@ -14,6 +14,7 @@ from app.services.manual_supplier_cleanup import (
     record_cleanup_review,
     search_cleanup_suppliers,
 )
+from app.services.perf_logging import perf_timer
 
 
 router = APIRouter(prefix="/api/manual-supplier-cleanup", tags=["manual-supplier-cleanup"])
@@ -46,8 +47,8 @@ def get_manual_supplier_cleanup_candidates(
     has_existing_suggestion: bool | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    return list_cleanup_candidates(
-        db,
+    with perf_timer(
+        "manual_supplier_cleanup.candidates",
         page=page,
         page_size=page_size,
         search=search,
@@ -59,7 +60,25 @@ def get_manual_supplier_cleanup_candidates(
         has_demand_history=has_demand_history,
         has_cost=has_cost,
         has_existing_suggestion=has_existing_suggestion,
-    )
+        summary_calculated=True,
+    ) as perf:
+        result = list_cleanup_candidates(
+            db,
+            page=page,
+            page_size=page_size,
+            search=search,
+            priority_only=priority_only,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            has_open_demand=has_open_demand,
+            has_stock=has_stock,
+            has_demand_history=has_demand_history,
+            has_cost=has_cost,
+            has_existing_suggestion=has_existing_suggestion,
+        )
+        perf["total"] = result.get("total")
+        perf["returned"] = len(result.get("items", []))
+        return result
 
 
 @router.get("/candidates/{product_id}")
@@ -131,4 +150,7 @@ def review_manual_supplier_cleanup_candidate(
 
 @router.get("/summary")
 def get_manual_supplier_cleanup_summary(db: Session = Depends(get_db)):
-    return get_cleanup_summary(db)
+    with perf_timer("manual_supplier_cleanup.summary", summary_calculated=True) as perf:
+        result = get_cleanup_summary(db)
+        perf["missing_supplier"] = result.get("products_missing_supplier")
+        return result

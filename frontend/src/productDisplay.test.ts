@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isProductMapped, supplierDisplayName } from "./productDisplay";
+import { filterProductsByQuery, isProductMapped, supplierDisplayName } from "./productDisplay";
 import type { Product } from "./types";
 
 function product(overrides: Partial<Product>): Product {
@@ -152,5 +152,26 @@ describe("supplierDisplayName", () => {
 
   it("treats products without direct or fallback supplier signals as unmapped", () => {
     expect(isProductMapped(product({}))).toBe(false);
+  });
+});
+
+describe("filterProductsByQuery", () => {
+  it("prefers exact Product ID over numeric SKU matches", () => {
+    const exactProduct = product({ id: 3020, name: "Exact Product", orderpro_sku: "EXACT-SKU" });
+    const numericSku = product({ id: 4000, name: "Numeric SKU", orderpro_sku: "3020" });
+
+    expect(filterProductsByQuery([numericSku, exactProduct], "3020")).toEqual([exactProduct]);
+  });
+
+  it("matches barcode and description when no exact Product ID exists", () => {
+    const barcodeProduct = product({
+      id: 10,
+      name: "Barcode Product",
+      barcode: "BAR-123",
+      description: "Smooth leather halter",
+    });
+
+    expect(filterProductsByQuery([barcodeProduct], "bar-123")).toEqual([barcodeProduct]);
+    expect(filterProductsByQuery([barcodeProduct], "leather halter")).toEqual([barcodeProduct]);
   });
 });

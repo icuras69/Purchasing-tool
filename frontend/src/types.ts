@@ -38,6 +38,8 @@ export interface Product {
   id: number;
   name: string;
   supplier: string | { name?: string | null } | null;
+  description?: string | null;
+  barcode?: string | null;
   orderpro_sku?: string | null;
   supplier_id: number | null;
   supplier_name: string | null;

@@ -10,6 +10,7 @@ from app.services.demand_history_reconciliation import (
     get_demand_reconciliation_summary,
     list_demand_coverage_products,
 )
+from app.services.perf_logging import perf_timer
 
 
 router = APIRouter(prefix="/api/demand-history-reconciliation", tags=["demand-history-reconciliation"])
@@ -17,7 +18,10 @@ router = APIRouter(prefix="/api/demand-history-reconciliation", tags=["demand-hi
 
 @router.get("/summary")
 def demand_history_summary(db: Session = Depends(get_db)):
-    return get_demand_reconciliation_summary(db)
+    with perf_timer("demand_history.summary", summary_calculated=True) as perf:
+        result = get_demand_reconciliation_summary(db)
+        perf["product_count"] = result.get("total_products")
+        return result
 
 
 @router.get("/products")
@@ -33,8 +37,8 @@ def demand_history_products(
     sort_direction: str = Query(default="desc"),
     db: Session = Depends(get_db),
 ):
-    return list_demand_coverage_products(
-        db,
+    with perf_timer(
+        "demand_history.products",
         page=page,
         page_size=page_size,
         search=search,
@@ -44,7 +48,23 @@ def demand_history_products(
         supplier_id=supplier_id,
         sort_by=sort_by,
         sort_direction=sort_direction,
-    )
+        summary_calculated=True,
+    ) as perf:
+        result = list_demand_coverage_products(
+            db,
+            page=page,
+            page_size=page_size,
+            search=search,
+            has_history=has_history,
+            has_recent_demand=has_recent_demand,
+            stale_only=stale_only,
+            supplier_id=supplier_id,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+        )
+        perf["total"] = result.get("total")
+        perf["returned"] = len(result.get("items", []))
+        return result
 
 
 @router.get("/products/{product_id}")

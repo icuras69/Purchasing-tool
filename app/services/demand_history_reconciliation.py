@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.product import Product
 from app.models.usage_history import UsageHistory
 from app.services.forecast_input_reconciliation import evaluate_product_readiness
+from app.services.product_search import filter_product_rows_by_search
 
 
 SOURCE_SYSTEM = "demand_history_import"
@@ -1310,12 +1311,13 @@ def list_demand_coverage_products(
 ) -> dict[str, Any]:
     rows = demand_coverage_rows(db)
     if search:
-        needle = search.lower()
-        rows = [
-            row
-            for row in rows
-            if needle in " ".join(str(row.get(key) or "") for key in ["sku", "product_name", "barcode", "description"]).lower()
-        ]
+        rows = filter_product_rows_by_search(
+            rows,
+            search,
+            exact_fields=("sku", "orderpro_sku", "barcode", "supplier_sku"),
+            partial_fields=("product_name", "name", "description"),
+            supplier_fields=("supplier_name", "supplier_code"),
+        )
     if supplier_id is not None:
         rows = [row for row in rows if row["supplier_id"] == supplier_id]
     if has_history is not None:

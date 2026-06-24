@@ -56,7 +56,23 @@ export function productMatchesQuery(product: Product, query: string): boolean {
     .map((mapping) => mapping.supplier_name ?? "")
     .join(" ");
 
-  return `${product.name} ${product.orderpro_sku ?? ""} ${product.supplier_sku ?? ""} ${product.supplier_code ?? ""} ${supplierDisplayName(product)} ${supplierNames}`
+  return `${product.id} ${product.name} ${product.description ?? ""} ${product.orderpro_sku ?? ""} ${product.barcode ?? ""} ${product.supplier_sku ?? ""} ${product.supplier_code ?? ""} ${supplierDisplayName(product)} ${supplierNames}`
     .toLowerCase()
     .includes(normalized);
+}
+
+export function filterProductsByQuery(products: Product[], query: string): Product[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) {
+    return products;
+  }
+
+  if (/^\d+$/.test(normalized)) {
+    const exactIdMatches = products.filter((product) => String(product.id) === normalized);
+    if (exactIdMatches.length > 0) {
+      return exactIdMatches;
+    }
+  }
+
+  return products.filter((product) => productMatchesQuery(product, query));
 }

@@ -486,6 +486,7 @@ export interface SeasonalProductsQuery {
   seasonality_tag?: string;
   supplier_id?: number;
   min_confidence?: string;
+  search?: string;
   active_only?: boolean;
   sort_by?: string;
   limit?: number;

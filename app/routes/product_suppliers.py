@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
@@ -12,6 +13,8 @@ from app.schemas.product_supplier import (
     ProductSupplierMappingResponse,
     ProductSupplierUpdate,
 )
+from app.services.perf_logging import perf_timer
+from app.services.product_search import normalize_search_query, parse_exact_product_id
 
 router = APIRouter(prefix="/product-suppliers", tags=["product-suppliers"])
 
@@ -116,20 +119,52 @@ def refresh_mapping(db: Session, mapping: ProductSupplier) -> ProductSupplier:
 def list_product_suppliers(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
+    search: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    mappings = (
-        db.query(ProductSupplier)
-        .options(
-            selectinload(ProductSupplier.product),
-            selectinload(ProductSupplier.supplier),
+    with perf_timer("product_suppliers.list", skip=skip, limit=limit, search=search) as perf:
+        query = (
+            db.query(ProductSupplier)
+            .join(ProductSupplier.product)
+            .join(ProductSupplier.supplier)
+            .options(
+                selectinload(ProductSupplier.product),
+                selectinload(ProductSupplier.supplier),
+            )
         )
-        .order_by(ProductSupplier.id.asc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
-    return [serialize_product_supplier(mapping) for mapping in mappings]
+        normalized = normalize_search_query(search)
+        if normalized:
+            exact_product_id = parse_exact_product_id(normalized)
+            if exact_product_id is not None and query.filter(ProductSupplier.product_id == exact_product_id).first():
+                query = query.filter(ProductSupplier.product_id == exact_product_id)
+            else:
+                exact_query = query.filter(
+                    or_(
+                        func.lower(Product.orderpro_sku) == normalized,
+                        func.lower(Product.barcode) == normalized,
+                        func.lower(Product.supplier_sku) == normalized,
+                        func.lower(ProductSupplier.supplier_sku) == normalized,
+                    )
+                )
+                if exact_query.first():
+                    query = exact_query
+                else:
+                    like_pattern = f"%{normalized}%"
+                    query = query.filter(
+                        or_(
+                            func.lower(Product.name).like(like_pattern),
+                            func.lower(Product.description).like(like_pattern),
+                            func.lower(Product.orderpro_sku).like(like_pattern),
+                            func.lower(Product.barcode).like(like_pattern),
+                            func.lower(ProductSupplier.supplier_sku).like(like_pattern),
+                            func.lower(ProductSupplier.supplier_product_name).like(like_pattern),
+                            func.lower(Supplier.name).like(like_pattern),
+                            func.lower(Supplier.orderpro_code).like(like_pattern),
+                        )
+                    )
+        mappings = query.order_by(ProductSupplier.id.asc()).offset(skip).limit(limit).all()
+        perf["returned"] = len(mappings)
+        return [serialize_product_supplier(mapping) for mapping in mappings]
 
 
 @router.post("", response_model=ProductSupplierMappingResponse, status_code=status.HTTP_201_CREATED)

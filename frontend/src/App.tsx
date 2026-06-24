@@ -62,7 +62,7 @@ import {
   unsetPreferredProductSupplier,
   updatePurchaseOrderLine,
 } from "./api";
-import { isProductMapped, productMatchesQuery, supplierDisplayName } from "./productDisplay";
+import { filterProductsByQuery, isProductMapped, supplierDisplayName } from "./productDisplay";
 import type {
   ForecastResponse,
   ForecastInputAudit,
@@ -728,12 +728,12 @@ function PurchasingApp({
   }
 
   const filteredProducts = useMemo(
-    () => products.data.filter((product) => productMatchesQuery(product, query)),
+    () => filterProductsByQuery(products.data, query),
     [products.data, query],
   );
 
   const filteredUnmappedProducts = useMemo(
-    () => unmappedProducts.data.filter((product) => productMatchesQuery(product, query)),
+    () => filterProductsByQuery(unmappedProducts.data, query),
     [unmappedProducts.data, query],
   );
 
@@ -794,7 +794,7 @@ function PurchasingApp({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Product, supplier, or SKU"
+            placeholder="Search by Product ID, SKU, barcode, supplier, or name"
           />
         </label>
       </header>
@@ -3290,7 +3290,7 @@ function ManualSupplierCleanupPanel() {
                 setPage(1);
                 setSearch(event.target.value);
               }}
-              placeholder="SKU, barcode, name, description"
+              placeholder="Product ID, SKU, barcode, name, description"
               value={search}
             />
           </label>
@@ -3609,7 +3609,7 @@ function ForecastReadinessPanel({ onNavigate }: { onNavigate: (tab: TabId) => vo
                 setPage(1);
                 setSearch(event.target.value);
               }}
-              placeholder="SKU, barcode, product, description"
+              placeholder="Product ID, SKU, barcode, product, description"
               value={search}
             />
           </label>
@@ -3919,7 +3919,7 @@ function DemandHistoryPanel() {
                 setPage(1);
                 setSearch(event.target.value);
               }}
-              placeholder="SKU, barcode, product, description"
+              placeholder="Product ID, SKU, barcode, product, description"
               value={search}
             />
           </label>
@@ -4080,6 +4080,7 @@ function SeasonalityPanel() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [tagFilter, setTagFilter] = useState("all");
   const [confidenceFilter, setConfidenceFilter] = useState("all");
+  const [seasonalitySearch, setSeasonalitySearch] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("");
   const [stockFilter, setStockFilter] = useState("all");
   const [supplierAssignmentFilter, setSupplierAssignmentFilter] = useState("all");
@@ -4108,6 +4109,7 @@ function SeasonalityPanel() {
           seasonality_tag: tagFilter === "all" ? undefined : tagFilter,
           supplier_id: supplierFilter ? Number(supplierFilter) : undefined,
           min_confidence: confidenceFilter === "all" ? undefined : confidenceFilter,
+          search: seasonalitySearch || undefined,
           sort_by: sortBy,
           limit: 500,
         }),
@@ -4125,7 +4127,7 @@ function SeasonalityPanel() {
           }
         });
     },
-    [confidenceFilter, month, sortBy, statusFilter, supplierFilter, tagFilter],
+    [confidenceFilter, month, seasonalitySearch, sortBy, statusFilter, supplierFilter, tagFilter],
   );
 
   useEffect(() => {
@@ -4279,6 +4281,14 @@ function SeasonalityPanel() {
 
       <section className="detail-panel" aria-label="Seasonality filters">
         <div className="filter-grid">
+          <label>
+            <span>Search</span>
+            <input
+              value={seasonalitySearch}
+              onChange={(event) => setSeasonalitySearch(event.target.value)}
+              placeholder="Product ID, SKU, barcode, supplier, or name"
+            />
+          </label>
           <label>
             <span>Current status</span>
             <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>

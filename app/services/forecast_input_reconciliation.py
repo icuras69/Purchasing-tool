@@ -16,6 +16,7 @@ from app.models.product_forecast_input_profile import ProductForecastInputProfil
 from app.models.product_supplier import ProductSupplier
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.supplier import Supplier
+from app.services.product_search import filter_product_rows_by_search
 
 
 CALCULATION_VERSION = "forecast-inputs-v1"
@@ -523,17 +524,13 @@ def _filter_readiness_rows(
     has_stock: bool | None,
 ) -> list[dict[str, Any]]:
     filtered = rows
-    needle = " ".join((search or "").lower().split())
-    if needle:
-        filtered = [
-            row
-            for row in filtered
-            if needle
-            in " ".join(
-                str(row.get(field) or "").lower()
-                for field in ("sku", "orderpro_sku", "barcode", "product_name", "description")
-            )
-        ]
+    filtered = filter_product_rows_by_search(
+        filtered,
+        search,
+        exact_fields=("sku", "orderpro_sku", "barcode"),
+        partial_fields=("product_name", "description"),
+        supplier_fields=("supplier_name", "supplier_code"),
+    )
     if status and status != "all":
         filtered = [row for row in filtered if row["readiness_status"] == status]
     if missing_input and missing_input != "all":

@@ -1,15 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
+from app.models.supplier import Supplier
 from app.schemas.product import ProductCreate, ProductResponse
 from app.schemas.product_supplier import ProductSupplierMappingResponse, WeakMappingResponse
 from app.schemas.forecast import ForecastResponse
 from app.services.forecasting import build_forecast
 from app.services.inbound_stock import get_product_inbound_stock as get_product_inbound_stock_context
+from app.services.perf_logging import perf_timer
+from app.services.product_search import normalize_search_query, parse_exact_product_id
 from app.routes.product_suppliers import serialize_product_supplier
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -27,6 +30,8 @@ def serialize_product(product: Product) -> dict:
         "id": product.id,
         "name": product.name,
         "supplier": product.supplier,
+        "description": product.description,
+        "barcode": product.barcode,
         "orderpro_sku": product.orderpro_sku,
         "supplier_id": product.supplier_id,
         "supplier_name": supplier_record.name if supplier_record else None,
@@ -70,6 +75,48 @@ def serialize_product(product: Product) -> dict:
     }
 
 
+def product_list_query(db: Session):
+    return db.query(Product).options(
+        selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+        selectinload(Product.supplier_record),
+    )
+
+
+def apply_product_search(db: Session, query, search: str | None):
+    normalized = normalize_search_query(search)
+    if not normalized:
+        return query
+
+    exact_product_id = parse_exact_product_id(normalized)
+    if exact_product_id is not None:
+        exact_id_exists = query.filter(Product.id == exact_product_id).first()
+        if exact_id_exists:
+            return query.filter(Product.id == exact_product_id)
+
+    query = query.outerjoin(Supplier, Product.supplier_id == Supplier.id)
+    exact_conditions = [
+        func.lower(Product.orderpro_sku) == normalized,
+        func.lower(Product.barcode) == normalized,
+        func.lower(Product.supplier_sku) == normalized,
+    ]
+    exact_query = query.filter(or_(*exact_conditions))
+    if exact_query.first():
+        return exact_query
+
+    like_pattern = f"%{normalized}%"
+    return query.filter(
+        or_(
+            func.lower(Product.name).like(like_pattern),
+            func.lower(Product.description).like(like_pattern),
+            func.lower(Product.orderpro_sku).like(like_pattern),
+            func.lower(Product.barcode).like(like_pattern),
+            func.lower(Product.supplier_sku).like(like_pattern),
+            func.lower(Supplier.name).like(like_pattern),
+            func.lower(Supplier.orderpro_code).like(like_pattern),
+        )
+    )
+
+
 @router.post("/", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
 def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
     existing_product = db.query(Product).filter(Product.name == payload.name).first()
@@ -84,32 +131,33 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/", response_model=list[ProductResponse])
-def list_products(db: Session = Depends(get_db)):
-    products = (
-        db.query(Product)
-        .options(
-            selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
-            selectinload(Product.supplier_record),
+def list_products(
+    search: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    with perf_timer("products.list", search=search) as perf:
+        products = (
+            apply_product_search(db, product_list_query(db), search)
+            .order_by(Product.id.asc())
+            .all()
         )
-        .order_by(Product.id.asc())
-        .all()
-    )
-    return [serialize_product(product) for product in products]
+        perf["returned"] = len(products)
+        return [serialize_product(product) for product in products]
 
 
 @router.get("/unmapped", response_model=list[ProductResponse])
-def list_unmapped_products(db: Session = Depends(get_db)):
-    products = (
-        db.query(Product)
-        .options(
-            selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
-            selectinload(Product.supplier_record),
+def list_unmapped_products(
+    search: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    with perf_timer("products.unmapped", search=search) as perf:
+        products = (
+            apply_product_search(db, product_list_query(db).filter(Product.supplier_id.is_(None)), search)
+            .order_by(Product.id.asc())
+            .all()
         )
-        .filter(Product.supplier_id.is_(None))
-        .order_by(Product.id.asc())
-        .all()
-    )
-    return [serialize_product(product) for product in products]
+        perf["returned"] = len(products)
+        return [serialize_product(product) for product in products]
 
 
 @router.get("/weak-mappings", response_model=list[WeakMappingResponse])

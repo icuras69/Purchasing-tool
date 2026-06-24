@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.product import Product
 from app.models.product_supplier_assignment_review import ProductSupplierAssignmentReview
 from app.models.supplier import Supplier
+from app.services.product_search import filter_product_rows_by_search
 from app.services.seasonality_backtesting import audit_product_forecast_inputs
 from app.services.supplier_assignment_review import missing_supplier_products, review_item_for_product
 
@@ -493,16 +494,13 @@ def _filter_candidate_rows(
     has_existing_suggestion: bool | None = None,
 ) -> list[dict[str, Any]]:
     filtered = rows
-    needle = _normalize_name(search)
-    if needle:
-        filtered = [
-            row
-            for row in filtered
-            if needle in " ".join(
-                str(row.get(field) or "").lower()
-                for field in ("orderpro_sku", "product_name", "barcode", "description")
-            )
-        ]
+    filtered = filter_product_rows_by_search(
+        filtered,
+        search,
+        exact_fields=("orderpro_sku", "barcode"),
+        partial_fields=("product_name", "description"),
+        supplier_fields=("existing_suggested_supplier_name",),
+    )
     if priority_only:
         filtered = [row for row in filtered if row["priority_score"] > 0]
     if has_open_demand is not None:

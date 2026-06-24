@@ -20,6 +20,8 @@ from app.services.historical_product_reconciliation import (
     confirmed_links_for_products,
 )
 from app.services.seasonality import collect_contributing_usage_rows
+from app.services.perf_logging import perf_timer
+from app.services.product_search import filter_product_rows_by_search
 
 
 router = APIRouter(tags=["seasonality"])
@@ -118,32 +120,34 @@ def get_seasonality_summary(
     db: Session = Depends(get_db),
 ):
     selected_month = normalize_month(month)
-    products = (
-        db.query(Product)
-        .options(joinedload(Product.seasonality_profile))
-    )
-    if not include_legacy:
-        products = products.filter(_orderpro_product_filter())
-    products = products.all()
-    profiles = [product.seasonality_profile for product in products if product.seasonality_profile is not None]
-    current_status_counts = Counter(
-        interpret_current_seasonality(profile, month=selected_month)["current_status"]
-        for profile in profiles
-    )
-    missing_profile_count = len(products) - len(profiles)
-    if missing_profile_count:
-        current_status_counts["insufficient_data"] += missing_profile_count
+    with perf_timer("seasonality.summary", month=selected_month, include_legacy=include_legacy, summary_calculated=True) as perf:
+        products = (
+            db.query(Product)
+            .options(joinedload(Product.seasonality_profile))
+        )
+        if not include_legacy:
+            products = products.filter(_orderpro_product_filter())
+        products = products.all()
+        profiles = [product.seasonality_profile for product in products if product.seasonality_profile is not None]
+        current_status_counts = Counter(
+            interpret_current_seasonality(profile, month=selected_month)["current_status"]
+            for profile in profiles
+        )
+        missing_profile_count = len(products) - len(profiles)
+        if missing_profile_count:
+            current_status_counts["insufficient_data"] += missing_profile_count
 
-    return SeasonalitySummaryResponse(
-        classification_counts=dict(Counter(profile.seasonality_tag for profile in profiles)),
-        confidence_counts=dict(Counter(profile.confidence_label for profile in profiles)),
-        current_season_counts=dict(current_status_counts),
-        profile_count=len(profiles),
-        product_count=len(products),
-        missing_profile_count=missing_profile_count,
-        selected_month=selected_month,
-        include_legacy=include_legacy,
-    )
+        perf["product_count"] = len(products)
+        return SeasonalitySummaryResponse(
+            classification_counts=dict(Counter(profile.seasonality_tag for profile in profiles)),
+            confidence_counts=dict(Counter(profile.confidence_label for profile in profiles)),
+            current_season_counts=dict(current_status_counts),
+            profile_count=len(profiles),
+            product_count=len(products),
+            missing_profile_count=missing_profile_count,
+            selected_month=selected_month,
+            include_legacy=include_legacy,
+        )
 
 
 @router.get("/products/seasonal", response_model=list[SeasonalProductResponse])
@@ -153,6 +157,7 @@ def list_seasonal_products(
     seasonality_tag: str | None = Query(default=None),
     supplier_id: int | None = Query(default=None),
     min_confidence: str | None = Query(default=None),
+    search: str | None = Query(default=None),
     active_only: bool = Query(default=True),
     include_legacy: bool = Query(default=False),
     sort_by: str = Query(default="seasonal_index"),
@@ -161,46 +166,76 @@ def list_seasonal_products(
     db: Session = Depends(get_db),
 ):
     selected_month = normalize_month(month)
-    query = db.query(Product).options(
-        joinedload(Product.seasonality_profile),
-        joinedload(Product.supplier_record),
-    )
-    if active_only:
-        query = query.filter(Product.is_active.is_(True))
-    if not include_legacy:
-        query = query.filter(_orderpro_product_filter())
-    if supplier_id is not None:
-        query = query.filter(Product.supplier_id == supplier_id)
+    with perf_timer(
+        "seasonality.products",
+        month=selected_month,
+        status=status,
+        seasonality_tag=seasonality_tag,
+        supplier_id=supplier_id,
+        min_confidence=min_confidence,
+        search=search,
+        active_only=active_only,
+        include_legacy=include_legacy,
+        sort_by=sort_by,
+        limit=limit,
+        offset=offset,
+    ) as perf:
+        query = db.query(Product).options(
+            joinedload(Product.seasonality_profile),
+            joinedload(Product.supplier_record),
+        )
+        if active_only:
+            query = query.filter(Product.is_active.is_(True))
+        if not include_legacy:
+            query = query.filter(_orderpro_product_filter())
+        if supplier_id is not None:
+            query = query.filter(Product.supplier_id == supplier_id)
 
-    products = query.all()
-    rows = [_profile_to_product_response(product, selected_month) for product in products]
+        products = query.all()
+        rows = [_profile_to_product_response(product, selected_month) for product in products]
 
-    if status:
-        rows = [row for row in rows if row.current_seasonality_status == status]
-    if seasonality_tag:
-        rows = [row for row in rows if row.seasonality_tag == seasonality_tag]
-    if min_confidence:
-        minimum = CONFIDENCE_ORDER.get(min_confidence)
-        if minimum is None:
-            raise HTTPException(status_code=400, detail="Invalid min_confidence value.")
-        rows = [
-            row
-            for row in rows
-            if CONFIDENCE_ORDER.get(row.confidence_label or "insufficient", 0) >= minimum
-        ]
+        if search:
+            matched_ids = {
+                row["product_id"]
+                for row in filter_product_rows_by_search(
+                    [seasonal_row.model_dump() for seasonal_row in rows],
+                    search,
+                    exact_fields=("orderpro_sku",),
+                    partial_fields=("name",),
+                    supplier_fields=("supplier_name",),
+                )
+            }
+            rows = [row for row in rows if row.product_id in matched_ids]
 
-    if sort_by == "seasonal_index":
-        rows.sort(key=lambda row: (row.selected_month_index or 0, row.name.lower()), reverse=True)
-    elif sort_by == "current_stock":
-        rows.sort(key=lambda row: row.current_stock)
-    elif sort_by == "product_name":
-        rows.sort(key=lambda row: row.name.lower())
-    elif sort_by == "recommended_qty":
-        rows.sort(key=lambda row: (row.selected_month_index or 0, row.current_stock), reverse=True)
-    else:
-        raise HTTPException(status_code=400, detail="Invalid sort_by value.")
+        if status:
+            rows = [row for row in rows if row.current_seasonality_status == status]
+        if seasonality_tag:
+            rows = [row for row in rows if row.seasonality_tag == seasonality_tag]
+        if min_confidence:
+            minimum = CONFIDENCE_ORDER.get(min_confidence)
+            if minimum is None:
+                raise HTTPException(status_code=400, detail="Invalid min_confidence value.")
+            rows = [
+                row
+                for row in rows
+                if CONFIDENCE_ORDER.get(row.confidence_label or "insufficient", 0) >= minimum
+            ]
 
-    return rows[offset : offset + limit]
+        if sort_by == "seasonal_index":
+            rows.sort(key=lambda row: (row.selected_month_index or 0, row.name.lower()), reverse=True)
+        elif sort_by == "current_stock":
+            rows.sort(key=lambda row: row.current_stock)
+        elif sort_by == "product_name":
+            rows.sort(key=lambda row: row.name.lower())
+        elif sort_by == "recommended_qty":
+            rows.sort(key=lambda row: (row.selected_month_index or 0, row.current_stock), reverse=True)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid sort_by value.")
+
+        perf["total"] = len(rows)
+        result = rows[offset : offset + limit]
+        perf["returned"] = len(result)
+        return result
 
 
 @router.get("/products/{product_id}/seasonality", response_model=ProductSeasonalityProfileResponse)

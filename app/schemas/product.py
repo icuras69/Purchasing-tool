@@ -18,6 +18,8 @@ class ProductResponse(BaseModel):
     id: int
     name: str
     supplier: str | None
+    description: str | None = None
+    barcode: str | None = None
     orderpro_sku: str | None = None
     supplier_id: int | None = None
     supplier_name: str | None = None

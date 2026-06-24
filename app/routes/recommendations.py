@@ -22,6 +22,7 @@ from app.services.recommendations import (
     create_reorder_recommendation_for_product,
     reject_recommendation,
 )
+from app.services.perf_logging import perf_timer
 
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
@@ -86,8 +87,10 @@ def create_reorder_recommendation(product_id: int, db: Session = Depends(get_db)
 
 @router.get("", response_model=list[RecommendationResponse])
 def list_recommendations(db: Session = Depends(get_db)):
-    recommendations = recommendation_query(db).order_by(Recommendation.id.asc()).all()
-    return [serialize_recommendation(recommendation) for recommendation in recommendations]
+    with perf_timer("recommendations.list") as perf:
+        recommendations = recommendation_query(db).order_by(Recommendation.id.asc()).all()
+        perf["returned"] = len(recommendations)
+        return [serialize_recommendation(recommendation) for recommendation in recommendations]
 
 
 @router.get("/{recommendation_id}", response_model=RecommendationResponse)

@@ -10,6 +10,7 @@ from app.services.forecast_input_reconciliation import (
     get_readiness_summary,
     list_readiness_candidates,
 )
+from app.services.perf_logging import perf_timer
 
 
 router = APIRouter(prefix="/api/forecast-reconciliation", tags=["forecast-reconciliation"])
@@ -17,7 +18,10 @@ router = APIRouter(prefix="/api/forecast-reconciliation", tags=["forecast-reconc
 
 @router.get("/summary")
 def get_forecast_reconciliation_summary(db: Session = Depends(get_db)):
-    return get_readiness_summary(db)
+    with perf_timer("forecast_reconciliation.summary", summary_calculated=True) as perf:
+        result = get_readiness_summary(db)
+        perf["product_count"] = result.get("total_products")
+        return result
 
 
 @router.get("/products")
@@ -34,8 +38,8 @@ def list_forecast_reconciliation_products(
     sort_direction: str = Query(default="asc"),
     db: Session = Depends(get_db),
 ):
-    return list_readiness_candidates(
-        db,
+    with perf_timer(
+        "forecast_reconciliation.products",
         page=page,
         page_size=page_size,
         search=search,
@@ -46,7 +50,24 @@ def list_forecast_reconciliation_products(
         has_stock=has_stock,
         sort_by=sort_by,
         sort_direction=sort_direction,
-    )
+        summary_calculated=True,
+    ) as perf:
+        result = list_readiness_candidates(
+            db,
+            page=page,
+            page_size=page_size,
+            search=search,
+            status=status,
+            missing_input=missing_input,
+            supplier_id=supplier_id,
+            has_open_demand=has_open_demand,
+            has_stock=has_stock,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+        )
+        perf["total"] = result.get("total")
+        perf["returned"] = len(result.get("items", []))
+        return result
 
 
 @router.get("/products/{product_id}")

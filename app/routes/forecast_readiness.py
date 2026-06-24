@@ -10,6 +10,8 @@ from app.services.seasonality_backtesting import (
     forecast_readiness_summary,
     list_forecast_readiness,
 )
+from app.services.perf_logging import perf_timer
+from app.services.product_search import filter_product_rows_by_search
 
 
 router = APIRouter(tags=["forecast-readiness"])
@@ -17,21 +19,43 @@ router = APIRouter(tags=["forecast-readiness"])
 
 @router.get("/forecast-readiness/summary")
 def get_forecast_readiness_summary(db: Session = Depends(get_db)):
-    return forecast_readiness_summary(db)
+    with perf_timer("forecast_readiness.summary", summary_calculated=True) as perf:
+        result = forecast_readiness_summary(db)
+        perf["product_count"] = result.get("product_count")
+        return result
 
 
 @router.get("/products/forecast-readiness")
 def list_products_forecast_readiness(
     filter: str | None = Query(default=None),
+    search: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    try:
-        rows = list_forecast_readiness(db, filter_name=filter)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return rows[offset : offset + limit]
+    with perf_timer(
+        "forecast_readiness.products",
+        filter=filter,
+        search=search,
+        limit=limit,
+        offset=offset,
+        summary_calculated=True,
+    ) as perf:
+        try:
+            rows = list_forecast_readiness(db, filter_name=filter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        rows = filter_product_rows_by_search(
+            rows,
+            search,
+            exact_fields=("orderpro_sku", "barcode", "supplier_sku"),
+            partial_fields=("product_name", "name", "description"),
+            supplier_fields=("supplier_name", "supplier_code"),
+        )
+        perf["total"] = len(rows)
+        result = rows[offset : offset + limit]
+        perf["returned"] = len(result)
+        return result
 
 
 @router.get("/products/{product_id}/forecast-readiness")
