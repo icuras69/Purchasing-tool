@@ -3,9 +3,12 @@ import {
   apiUrl,
   assignManualSupplierCleanupCandidate,
   clearStoredAccessToken,
+  exportDemandHistoryCsv,
   exportForecastReconciliationCsv,
   exportPurchaseOrderCsv,
   fetchProducts,
+  getDemandHistoryProduct,
+  getDemandHistoryProducts,
   getForecastReconciliationProduct,
   getForecastReconciliationProducts,
   getManualSupplierCleanupCandidates,
@@ -253,6 +256,74 @@ describe("apiUrl", () => {
       expect.objectContaining({ headers: {} }),
     );
     expect(result.filename).toBe("forecast_readiness.csv");
+  });
+
+  it("fetches demand history products with filters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ items: [], page: 1, page_size: 25, total: 0, total_pages: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getDemandHistoryProducts({
+      page: 2,
+      search: "halter",
+      has_history: false,
+      has_recent_demand: true,
+      supplier_id: 34,
+      sort_by: "latest_demand_date",
+    });
+
+    const calledUrl = String(fetchMock.mock.calls[0][0]);
+    expect(calledUrl).toContain("/api/demand-history-reconciliation/products?");
+    expect(calledUrl).toContain("page=2");
+    expect(calledUrl).toContain("search=halter");
+    expect(calledUrl).toContain("has_history=false");
+    expect(calledUrl).toContain("has_recent_demand=true");
+    expect(calledUrl).toContain("supplier_id=34");
+    expect(calledUrl).toContain("sort_by=latest_demand_date");
+  });
+
+  it("fetches one demand history detail", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ product_id: 7832 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getDemandHistoryProduct(7832);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/demand-history-reconciliation/products/7832"),
+      expect.any(Object),
+    );
+  });
+
+  it("exports demand history CSV without auth header when authentication is disabled", async () => {
+    vi.stubEnv("VITE_AUTH_ENABLED", "false");
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("csv", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/csv",
+          "Content-Disposition": 'attachment; filename="demand_coverage.csv"',
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    storeAccessToken("ignored-token");
+
+    const result = await exportDemandHistoryCsv({ has_history: true });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/demand-history-reconciliation/export.csv?has_history=true"),
+      expect.objectContaining({ headers: {} }),
+    );
+    expect(result.filename).toBe("demand_coverage.csv");
   });
 
   it("fetches manual supplier cleanup candidates with filters", async () => {

@@ -18,6 +18,7 @@ from app.routes.suppliers import router as suppliers_router
 from app.routes.forecast_readiness import router as forecast_readiness_router
 from app.routes.forecast_reconciliation import router as forecast_reconciliation_router
 from app.routes.manual_supplier_cleanup import router as manual_supplier_cleanup_router
+from app.routes.demand_history_reconciliation import router as demand_history_reconciliation_router
 from app.routes.supplier_assignment_review import router as supplier_assignment_review_router
 
 import app.models  # noqa: F401
@@ -60,6 +61,7 @@ app.include_router(seasonality_router, dependencies=admin_dependencies)
 app.include_router(forecast_readiness_router, dependencies=admin_dependencies)
 app.include_router(forecast_reconciliation_router, dependencies=admin_dependencies)
 app.include_router(manual_supplier_cleanup_router, dependencies=admin_dependencies)
+app.include_router(demand_history_reconciliation_router, dependencies=admin_dependencies)
 app.include_router(supplier_assignment_review_router, dependencies=admin_dependencies)
 app.include_router(products_router, dependencies=admin_dependencies)
 app.include_router(inventory_router, dependencies=admin_dependencies)

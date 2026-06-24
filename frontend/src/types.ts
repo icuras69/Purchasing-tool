@@ -491,6 +491,61 @@ export interface ForecastReconciliationProductsResponse {
   summary: ForecastReconciliationSummary;
 }
 
+export interface DemandHistorySummary {
+  total_products: number;
+  products_with_demand_history: number;
+  products_without_demand_history: number;
+  products_with_recent_demand: number;
+  products_with_stale_demand: number;
+  total_demand_rows: number;
+  earliest_demand_date: string | null;
+  latest_demand_date: string | null;
+  coverage_percentage: number;
+  products_blocked_by_missing_demand_history: number;
+  selected_date: string;
+}
+
+export interface DemandHistoryProduct {
+  product_id: number;
+  sku: string | null;
+  orderpro_sku: string | null;
+  barcode: string | null;
+  description: string | null;
+  product_name: string;
+  supplier_id: number | null;
+  supplier_code: string | null;
+  supplier_name: string | null;
+  current_stock: number | null;
+  has_demand_history: boolean;
+  demand_row_count: number;
+  earliest_demand_date: string | null;
+  latest_demand_date: string | null;
+  months_covered: number;
+  total_units: number;
+  units_last_30_days: number;
+  units_last_90_days: number;
+  average_monthly_units: number;
+  return_units: number;
+  stale_demand: boolean;
+  gap_warnings: string[];
+  readiness_status: string;
+  readiness_score: number;
+  readiness_missing_inputs?: string[];
+  demand_source: string;
+  monthly_buckets?: Array<{ month: string; net_units: number; return_units: number }>;
+  source_systems?: string[];
+  readiness_impact?: string;
+  current_forecast_demand_source?: string;
+}
+
+export interface DemandHistoryProductsResponse {
+  items: DemandHistoryProduct[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+}
+
 export type SeasonalityStatus =
   | "in_season"
   | "approaching_season"

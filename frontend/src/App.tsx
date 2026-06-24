@@ -28,6 +28,10 @@ import {
   getForecastReconciliationProducts,
   getForecastReconciliationSummary,
   exportForecastReconciliationCsv,
+  getDemandHistoryProduct,
+  getDemandHistoryProducts,
+  getDemandHistorySummary,
+  exportDemandHistoryCsv,
   getManualSupplierCleanupCandidate,
   getManualSupplierCleanupCandidates,
   getManualSupplierCleanupSummary,
@@ -65,6 +69,8 @@ import type {
   ForecastReadinessSummary,
   ForecastReconciliationProduct,
   ForecastReconciliationSummary,
+  DemandHistoryProduct,
+  DemandHistorySummary,
   ForecastSupplierContext,
   CurrentAdmin,
   ManualSupplierCleanupCandidate,
@@ -98,6 +104,7 @@ type TabId =
   | "forecast"
   | "supplier-forecast"
   | "forecast-readiness"
+  | "demand-history"
   | "supplier-assignment-review"
   | "supplier-cleanup"
   | "seasonality"
@@ -126,6 +133,7 @@ const tabs: Array<{ id: TabId; label: string }> = [
   { id: "forecast", label: "Forecast" },
   { id: "supplier-forecast", label: "Supplier Forecast" },
   { id: "forecast-readiness", label: "Forecast Readiness" },
+  { id: "demand-history", label: "Demand History" },
   { id: "supplier-assignment-review", label: "Supplier Assignment Review" },
   { id: "supplier-cleanup", label: "Supplier Cleanup" },
   { id: "seasonality", label: "Seasonality" },
@@ -872,6 +880,8 @@ function PurchasingApp({
       )}
 
       {activeTab === "forecast-readiness" && <ForecastReadinessPanel onNavigate={setActiveTab} />}
+
+      {activeTab === "demand-history" && <DemandHistoryPanel />}
 
       {activeTab === "supplier-assignment-review" && <SupplierAssignmentReviewPanel />}
 
@@ -3776,6 +3786,288 @@ function ForecastReadinessPanel({ onNavigate }: { onNavigate: (tab: TabId) => vo
             )}
             <button type="button" onClick={() => onNavigate("forecast")}>View Forecast</button>
           </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function DemandHistoryPanel() {
+  const [summary, setSummary] = useState<DemandHistorySummary | null>(null);
+  const [rows, setRows] = useState<ResourceState<DemandHistoryProduct>>(initialResource);
+  const [search, setSearch] = useState("");
+  const [historyFilter, setHistoryFilter] = useState("all");
+  const [recentOnly, setRecentOnly] = useState(false);
+  const [staleOnly, setStaleOnly] = useState(false);
+  const [supplierFilter, setSupplierFilter] = useState("");
+  const [sortBy, setSortBy] = useState("latest_demand_date");
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [selected, setSelected] = useState<DemandHistoryProduct | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const query = useMemo(
+    () => ({
+      page,
+      page_size: 25,
+      search,
+      has_history: historyFilter === "with_history" ? true : historyFilter === "missing_history" ? false : undefined,
+      has_recent_demand: recentOnly ? true : undefined,
+      stale_only: staleOnly ? true : undefined,
+      supplier_id: supplierFilter ? Number(supplierFilter) : undefined,
+      sort_by: sortBy,
+      sort_direction: sortBy === "product_name" || sortBy === "sku" ? "asc" : "desc",
+    }),
+    [historyFilter, page, recentOnly, search, sortBy, staleOnly, supplierFilter],
+  );
+
+  const loadDemandHistory = useCallback(
+    (active = true) => {
+      setRows((current) => ({ ...current, loading: true, error: null }));
+      Promise.all([getDemandHistorySummary(), getDemandHistoryProducts(query)])
+        .then(([loadedSummary, loadedRows]) => {
+          if (active) {
+            setSummary(loadedSummary);
+            setRows({ data: loadedRows.items, loading: false, error: null });
+            setTotalPages(loadedRows.total_pages);
+          }
+        })
+        .catch((error: Error) => {
+          if (active) {
+            setRows({ data: [], loading: false, error: error.message });
+          }
+        });
+    },
+    [query],
+  );
+
+  useEffect(() => {
+    let active = true;
+    loadDemandHistory(active);
+    return () => {
+      active = false;
+    };
+  }, [loadDemandHistory]);
+
+  async function openDemandDetail(row: DemandHistoryProduct) {
+    setRows((current) => ({ ...current, error: null }));
+    try {
+      setSelected(await getDemandHistoryProduct(row.product_id));
+    } catch (error) {
+      setRows((current) => ({ ...current, error: (error as Error).message }));
+    }
+  }
+
+  async function handleExport() {
+    setExporting(true);
+    setMessage(null);
+    try {
+      const exported = await exportDemandHistoryCsv(query);
+      downloadBlob(exported.blob, exported.filename ?? "demand_coverage.csv");
+      setMessage("Demand coverage CSV exported.");
+    } catch (error) {
+      setRows((current) => ({ ...current, error: (error as Error).message }));
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  return (
+    <div className="review-stack" aria-label="Demand history workspace">
+      <section className="panel-heading">
+        <div>
+          <h2>Demand History</h2>
+          <p>
+            Inspect local historical demand coverage and import reviewed files with the dry-run CLI.
+          </p>
+        </div>
+        <div className="action-row">
+          <button className="secondary-button" type="button" onClick={() => loadDemandHistory()}>
+            Refresh
+          </button>
+          <button disabled={exporting} type="button" onClick={handleExport}>
+            {exporting ? "Exporting..." : "Export Demand Coverage CSV"}
+          </button>
+        </div>
+      </section>
+
+      {summary && (
+        <section className="summary-grid" aria-label="Demand history summary">
+          <SummaryCard label="Products with history" value={summary.products_with_demand_history} />
+          <SummaryCard label="Products missing history" value={summary.products_without_demand_history} />
+          <SummaryCard label="Recent demand" value={summary.products_with_recent_demand} />
+          <SummaryCard label="Stale demand" value={summary.products_with_stale_demand} />
+          <SummaryCard label="Total demand rows" value={summary.total_demand_rows} />
+          <SummaryCard label="Coverage %" value={summary.coverage_percentage} />
+        </section>
+      )}
+
+      <section className="detail-panel" aria-label="Demand history import guidance">
+        <h3>Local import commands</h3>
+        <pre>{".\\.venv\\Scripts\\python.exe scripts\\plan_demand_history_import.py `\n  --file \"PATH_TO_FILE.xlsx\" `\n  --save-report"}</pre>
+        <pre>{".\\.venv\\Scripts\\python.exe scripts\\plan_demand_history_import.py `\n  --file \"PATH_TO_FILE.xlsx\" `\n  --apply `\n  --reviewed-by \"Maged\" `\n  --save-report"}</pre>
+      </section>
+
+      <section className="detail-panel" aria-label="Demand history filters">
+        <div className="filter-grid">
+          <label>
+            Search
+            <input
+              aria-label="Search demand history products"
+              onChange={(event) => {
+                setPage(1);
+                setSearch(event.target.value);
+              }}
+              placeholder="SKU, barcode, product, description"
+              value={search}
+            />
+          </label>
+          <label>
+            History
+            <select
+              aria-label="Demand history filter"
+              onChange={(event) => {
+                setPage(1);
+                setHistoryFilter(event.target.value);
+              }}
+              value={historyFilter}
+            >
+              <option value="all">All products</option>
+              <option value="with_history">Has history</option>
+              <option value="missing_history">Missing history</option>
+            </select>
+          </label>
+          <label>
+            Supplier ID
+            <input
+              aria-label="Demand history supplier filter"
+              onChange={(event) => {
+                setPage(1);
+                setSupplierFilter(event.target.value);
+              }}
+              value={supplierFilter}
+            />
+          </label>
+          <label>
+            Sort by
+            <select onChange={(event) => setSortBy(event.target.value)} value={sortBy}>
+              <option value="latest_demand_date">Last demand date</option>
+              <option value="demand_row_count">Demand rows</option>
+              <option value="months_covered">Months covered</option>
+              <option value="units_last_90_days">Last 90 days</option>
+              <option value="sku">SKU</option>
+              <option value="product_name">Product name</option>
+            </select>
+          </label>
+          <label className="checkbox-label">
+            <input checked={recentOnly} onChange={(event) => setRecentOnly(event.target.checked)} type="checkbox" />
+            Recent demand
+          </label>
+          <label className="checkbox-label">
+            <input checked={staleOnly} onChange={(event) => setStaleOnly(event.target.checked)} type="checkbox" />
+            Stale demand
+          </label>
+        </div>
+      </section>
+
+      {message && <p className="success-state">{message}</p>}
+      <section className="table-wrap" aria-label="Demand history products">
+        {rows.loading && <p className="empty-state">Loading demand history...</p>}
+        {rows.error && <p className="error-state">{rows.error}</p>}
+        {!rows.loading && !rows.error && rows.data.length === 0 && (
+          <p className="empty-state">No products match this demand history filter.</p>
+        )}
+        {!rows.loading && !rows.error && rows.data.length > 0 && (
+          <table>
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>Product</th>
+                <th>Supplier</th>
+                <th>Stock</th>
+                <th>Rows</th>
+                <th>First demand</th>
+                <th>Last demand</th>
+                <th>Months</th>
+                <th>Last 30</th>
+                <th>Last 90</th>
+                <th>Monthly avg</th>
+                <th>Readiness</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.data.map((row) => (
+                <tr key={row.product_id}>
+                  <td>{formatValue(row.sku)}</td>
+                  <td>
+                    <strong>{row.product_name}</strong>
+                    <div className="muted">ID {row.product_id}</div>
+                    {!row.has_demand_history && <span className="status rejected">Missing history</span>}
+                    {row.stale_demand && <span className="status needs-review">Stale demand</span>}
+                  </td>
+                  <td>{formatValue(row.supplier_name)}</td>
+                  <td>{formatValue(row.current_stock)}</td>
+                  <td>{row.demand_row_count}</td>
+                  <td>{formatValue(row.earliest_demand_date)}</td>
+                  <td>{formatValue(row.latest_demand_date)}</td>
+                  <td>{row.months_covered}</td>
+                  <td>{formatValue(row.units_last_30_days)}</td>
+                  <td>{formatValue(row.units_last_90_days)}</td>
+                  <td>{formatValue(row.average_monthly_units)}</td>
+                  <td><span className={readinessStatusClassName(row.readiness_status)}>{row.readiness_status}</span></td>
+                  <td><button type="button" onClick={() => openDemandDetail(row)}>Details</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div className="action-row">
+          <button disabled={page <= 1} onClick={() => setPage((current) => Math.max(current - 1, 1))} type="button">
+            Previous
+          </button>
+          <span>Page {page} of {totalPages || 1}</span>
+          <button disabled={totalPages === 0 || page >= totalPages} onClick={() => setPage((current) => current + 1)} type="button">
+            Next
+          </button>
+        </div>
+      </section>
+
+      {selected && (
+        <section className="detail-panel" aria-label="Demand history detail">
+          <div className="section-header">
+            <h3>{selected.product_name}</h3>
+            <button className="secondary-button" onClick={() => setSelected(null)} type="button">Close</button>
+          </div>
+          <dl className="detail-list">
+            <div><dt>SKU</dt><dd>{formatValue(selected.sku)}</dd></div>
+            <div><dt>Supplier</dt><dd>{formatValue(selected.supplier_name)}</dd></div>
+            <div><dt>Demand source</dt><dd>{demandSourceLabel(selected.demand_source)}</dd></div>
+            <div><dt>Date range</dt><dd>{formatValue(selected.earliest_demand_date)} to {formatValue(selected.latest_demand_date)}</dd></div>
+            <div><dt>Total rows</dt><dd>{selected.demand_row_count}</dd></div>
+            <div><dt>Total units</dt><dd>{formatValue(selected.total_units)}</dd></div>
+            <div><dt>Last 30 days</dt><dd>{formatValue(selected.units_last_30_days)}</dd></div>
+            <div><dt>Last 90 days</dt><dd>{formatValue(selected.units_last_90_days)}</dd></div>
+            <div><dt>Returns/refunds</dt><dd>{formatValue(selected.return_units)}</dd></div>
+            <div><dt>Coverage gaps</dt><dd>{selected.gap_warnings.length ? selected.gap_warnings.join(", ") : "-"}</dd></div>
+            <div><dt>Readiness impact</dt><dd>{formatValue(selected.readiness_impact)}</dd></div>
+          </dl>
+          <h4>Monthly demand</h4>
+          <table>
+            <thead>
+              <tr><th>Month</th><th>Net units</th><th>Returns</th></tr>
+            </thead>
+            <tbody>
+              {(selected.monthly_buckets ?? []).map((bucket) => (
+                <tr key={bucket.month}>
+                  <td>{bucket.month}</td>
+                  <td>{formatValue(bucket.net_units)}</td>
+                  <td>{formatValue(bucket.return_units)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </section>
       )}
     </div>

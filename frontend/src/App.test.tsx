@@ -31,6 +31,10 @@ import {
   getForecastReconciliationProducts,
   getForecastReconciliationSummary,
   exportForecastReconciliationCsv,
+  getDemandHistoryProduct,
+  getDemandHistoryProducts,
+  getDemandHistorySummary,
+  exportDemandHistoryCsv,
   getManualSupplierCleanupCandidate,
   getManualSupplierCleanupCandidates,
   getManualSupplierCleanupSummary,
@@ -66,6 +70,8 @@ import type {
   ForecastReadinessSummary,
   ForecastReconciliationProduct,
   ForecastReconciliationSummary,
+  DemandHistoryProduct,
+  DemandHistorySummary,
   ManualSupplierCleanupCandidate,
   ManualSupplierCleanupSummary,
   ManualSupplierCleanupSupplier,
@@ -102,6 +108,10 @@ vi.mock("./api", () => ({
   getForecastReconciliationProducts: vi.fn(),
   getForecastReconciliationProduct: vi.fn(),
   exportForecastReconciliationCsv: vi.fn(),
+  getDemandHistorySummary: vi.fn(),
+  getDemandHistoryProducts: vi.fn(),
+  getDemandHistoryProduct: vi.fn(),
+  exportDemandHistoryCsv: vi.fn(),
   getSupplierAssignmentReviewSummary: vi.fn(),
   getSupplierAssignmentReviewItems: vi.fn(),
   getManualSupplierCleanupSummary: vi.fn(),
@@ -468,6 +478,66 @@ function mockForecastReconciliationProduct(
         blocks_forecast: false,
       },
     },
+    ...overrides,
+  };
+}
+
+function mockDemandHistorySummary(
+  overrides: Partial<DemandHistorySummary> = {},
+): DemandHistorySummary {
+  return {
+    total_products: 3,
+    products_with_demand_history: 2,
+    products_without_demand_history: 1,
+    products_with_recent_demand: 1,
+    products_with_stale_demand: 1,
+    total_demand_rows: 24,
+    earliest_demand_date: "2022-01-01",
+    latest_demand_date: "2025-12-03",
+    coverage_percentage: 66.67,
+    products_blocked_by_missing_demand_history: 1,
+    selected_date: "2026-06-18",
+    ...overrides,
+  };
+}
+
+function mockDemandHistoryProduct(
+  overrides: Partial<DemandHistoryProduct> = {},
+): DemandHistoryProduct {
+  return {
+    product_id: 7832,
+    sku: "DEMAND-7832",
+    orderpro_sku: "DEMAND-7832",
+    barcode: "1234567890",
+    description: "Demand-covered product",
+    product_name: "Demand Covered Product",
+    supplier_id: 34,
+    supplier_code: "SUP34",
+    supplier_name: "Demand Supplier",
+    current_stock: 8,
+    has_demand_history: true,
+    demand_row_count: 12,
+    earliest_demand_date: "2022-01-01",
+    latest_demand_date: "2025-12-03",
+    months_covered: 18,
+    total_units: 144,
+    units_last_30_days: 6,
+    units_last_90_days: 18,
+    average_monthly_units: 8,
+    return_units: 2,
+    stale_demand: false,
+    gap_warnings: ["Missing recent month"],
+    readiness_status: "ready",
+    readiness_score: 90,
+    readiness_missing_inputs: [],
+    demand_source: "usage_history",
+    monthly_buckets: [
+      { month: "2025-12", net_units: 12, return_units: 1 },
+      { month: "2025-11", net_units: 8, return_units: 0 },
+    ],
+    source_systems: ["demand_history_import"],
+    readiness_impact: "Demand history is present.",
+    current_forecast_demand_source: "usage_history",
     ...overrides,
   };
 }
@@ -904,6 +974,43 @@ beforeEach(() => {
     blob: new Blob(["csv"], { type: "text/csv" }),
     filename: "forecast_readiness.csv",
   });
+  vi.mocked(getDemandHistorySummary).mockResolvedValue(mockDemandHistorySummary());
+  vi.mocked(getDemandHistoryProducts).mockResolvedValue({
+    items: [
+      mockDemandHistoryProduct(),
+      mockDemandHistoryProduct({
+        product_id: 7900,
+        sku: "MISSING-HISTORY",
+        orderpro_sku: "MISSING-HISTORY",
+        product_name: "Missing History Product",
+        has_demand_history: false,
+        demand_row_count: 0,
+        earliest_demand_date: null,
+        latest_demand_date: null,
+        months_covered: 0,
+        total_units: 0,
+        units_last_30_days: 0,
+        units_last_90_days: 0,
+        average_monthly_units: 0,
+        return_units: 0,
+        stale_demand: false,
+        gap_warnings: ["No local demand history"],
+        readiness_status: "blocked",
+        readiness_score: 55,
+        readiness_missing_inputs: ["demand_history"],
+        demand_source: "none",
+      }),
+    ],
+    page: 1,
+    page_size: 25,
+    total: 2,
+    total_pages: 1,
+  });
+  vi.mocked(getDemandHistoryProduct).mockResolvedValue(mockDemandHistoryProduct());
+  vi.mocked(exportDemandHistoryCsv).mockResolvedValue({
+    blob: new Blob(["csv"], { type: "text/csv" }),
+    filename: "demand_coverage.csv",
+  });
   vi.mocked(getSupplierAssignmentReviewSummary).mockResolvedValue(mockSupplierAssignmentSummary());
   vi.mocked(getSupplierAssignmentReviewItems).mockResolvedValue([]);
   vi.mocked(getManualSupplierCleanupSummary).mockResolvedValue(mockCleanupSummary());
@@ -1093,6 +1200,7 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast Readiness" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Demand History" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Assignment Review" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Cleanup" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Purchase Orders" })).toBeInTheDocument();
@@ -1186,6 +1294,76 @@ describe("App mapping review workflow", () => {
     expect(objectUrlSpy).toHaveBeenCalled();
     expect(revokeSpy).toHaveBeenCalledWith("blob:forecast-readiness");
     expect(await screen.findByText("Forecast readiness CSV exported.")).toBeInTheDocument();
+
+    objectUrlSpy.mockRestore();
+    revokeSpy.mockRestore();
+  });
+
+  it("demand history summary, import guidance, and product rows render", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Demand History" }));
+
+    const summary = await screen.findByLabelText("Demand history summary");
+    expect(within(summary).getByText("Products with history")).toBeInTheDocument();
+    expect(within(summary).getByText("Products missing history")).toBeInTheDocument();
+    expect(within(summary).getByText("Coverage %")).toBeInTheDocument();
+    expect(screen.getByText("Local import commands")).toBeInTheDocument();
+
+    const table = await screen.findByLabelText("Demand history products");
+    expect(within(table).getByText("Demand Covered Product")).toBeInTheDocument();
+    expect(within(table).getByText("DEMAND-7832")).toBeInTheDocument();
+    expect(within(table).getByText("Missing History Product")).toBeInTheDocument();
+    expect(within(table).getByText("Missing history")).toBeInTheDocument();
+  });
+
+  it("demand history filters call the coverage endpoint", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Demand History" }));
+    await screen.findByLabelText("Demand history products");
+    await userEvent.selectOptions(screen.getByLabelText("Demand history filter"), "missing_history");
+    await userEvent.type(screen.getByLabelText("Search demand history products"), "halter");
+    await userEvent.type(screen.getByLabelText("Demand history supplier filter"), "34");
+    await userEvent.click(screen.getByLabelText("Recent demand"));
+
+    expect(getDemandHistoryProducts).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        has_history: false,
+        search: "halter",
+        supplier_id: 34,
+        has_recent_demand: true,
+      }),
+    );
+  });
+
+  it("demand history detail displays monthly demand and readiness impact", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Demand History" }));
+    await screen.findByText("Demand Covered Product");
+    await userEvent.click(screen.getAllByRole("button", { name: "Details" })[0]);
+
+    const detail = await screen.findByLabelText("Demand history detail");
+    expect(getDemandHistoryProduct).toHaveBeenCalledWith(7832);
+    expect(within(detail).getByText("Demand Covered Product")).toBeInTheDocument();
+    expect(within(detail).getByText("Legacy usage history")).toBeInTheDocument();
+    expect(within(detail).getByText("Demand history is present.")).toBeInTheDocument();
+    expect(within(detail).getByText("2025-12")).toBeInTheDocument();
+    expect(within(detail).getAllByText("12").length).toBeGreaterThan(0);
+  });
+
+  it("demand history export downloads the current coverage CSV", async () => {
+    const objectUrlSpy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:demand-history");
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Demand History" }));
+    await screen.findByLabelText("Demand history products");
+    await userEvent.selectOptions(screen.getByLabelText("Demand history filter"), "with_history");
+    await userEvent.click(screen.getByRole("button", { name: "Export Demand Coverage CSV" }));
+
+    expect(exportDemandHistoryCsv).toHaveBeenCalledWith(expect.objectContaining({ has_history: true }));
+    expect(objectUrlSpy).toHaveBeenCalled();
+    expect(revokeSpy).toHaveBeenCalledWith("blob:demand-history");
+    expect(await screen.findByText("Demand coverage CSV exported.")).toBeInTheDocument();
 
     objectUrlSpy.mockRestore();
     revokeSpy.mockRestore();

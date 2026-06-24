@@ -10,6 +10,9 @@ import type {
   AuthTokenResponse,
   CurrentAdmin,
   CreatePurchaseOrderRequest,
+  DemandHistoryProduct,
+  DemandHistoryProductsResponse,
+  DemandHistorySummary,
   DraftFromProductsRequest,
   DraftFromProductsResponse,
   LoginRequest,
@@ -280,6 +283,47 @@ export function exportForecastReconciliationCsv(
   query: ForecastReconciliationQuery = {},
 ): Promise<{ blob: Blob; filename: string | null }> {
   return fetchBlob(`/api/forecast-reconciliation/export.csv${queryString(query)}`, "forecast readiness CSV");
+}
+
+export interface DemandHistoryQuery {
+  page?: number;
+  page_size?: number;
+  search?: string;
+  has_history?: boolean;
+  has_recent_demand?: boolean;
+  stale_only?: boolean;
+  supplier_id?: number;
+  sort_by?: string;
+  sort_direction?: string;
+}
+
+export function getDemandHistorySummary(): Promise<DemandHistorySummary> {
+  return fetchJson<DemandHistorySummary>(
+    "/api/demand-history-reconciliation/summary",
+    "demand history summary",
+  );
+}
+
+export function getDemandHistoryProducts(
+  query: DemandHistoryQuery = {},
+): Promise<DemandHistoryProductsResponse> {
+  return fetchJson<DemandHistoryProductsResponse>(
+    `/api/demand-history-reconciliation/products${queryString(query)}`,
+    "demand history products",
+  );
+}
+
+export function getDemandHistoryProduct(productId: number): Promise<DemandHistoryProduct> {
+  return fetchJson<DemandHistoryProduct>(
+    `/api/demand-history-reconciliation/products/${productId}`,
+    "demand history product",
+  );
+}
+
+export function exportDemandHistoryCsv(
+  query: DemandHistoryQuery = {},
+): Promise<{ blob: Blob; filename: string | null }> {
+  return fetchBlob(`/api/demand-history-reconciliation/export.csv${queryString(query)}`, "demand coverage CSV");
 }
 
 export interface SupplierAssignmentReviewQuery {
