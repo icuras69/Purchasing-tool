@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -1830,7 +1830,57 @@ describe("App mapping review workflow", () => {
     expect(screen.getByLabelText("Select Direct Supplier Product for draft PO")).not.toBeDisabled();
   });
 
-  it("filters products by direct supplier name and code", async () => {
+  it("renders a Products page search bar and loads the normal list when empty", async () => {
+    vi.mocked(fetchProducts).mockResolvedValue([
+      mockProduct({ id: 3020, name: "Internal Product", orderpro_sku: "SKU-3020" }),
+    ]);
+
+    render(<App />);
+
+    expect(
+      await screen.findByPlaceholderText("Search by Product ID, SKU, barcode, or name"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Internal Product")).toBeInTheDocument();
+    expect(fetchProducts).toHaveBeenCalledWith("");
+  });
+
+  it("Products page search sends the query to the backend and prioritizes internal product ID", async () => {
+    vi.mocked(fetchProducts).mockImplementation(async (search?: string) => {
+      if (search === "3020") {
+        return [
+          mockProduct({
+            id: 3020,
+            name: "Exact ID Product",
+            orderpro_sku: "EXACT-ID-SKU",
+          }),
+        ];
+      }
+      return [
+        mockProduct({
+          id: 4000,
+          name: "Numeric SKU Product",
+          orderpro_sku: "3020",
+        }),
+      ];
+    });
+
+    render(<App />);
+    expect(await screen.findByText("Numeric SKU Product")).toBeInTheDocument();
+
+    await userEvent.type(
+      screen.getByPlaceholderText("Search by Product ID, SKU, barcode, or name"),
+      "3020",
+    );
+
+    await waitFor(() => expect(fetchProducts).toHaveBeenLastCalledWith("3020"));
+    expect(await screen.findByText("Exact ID Product")).toBeInTheDocument();
+    expect(screen.queryByText("Numeric SKU Product")).not.toBeInTheDocument();
+    const row = screen.getByText("Exact ID Product").closest("tr");
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("3020")).toBeInTheDocument();
+  });
+
+  it("global search does not conflict with Products page backend search", async () => {
     vi.mocked(fetchProducts).mockResolvedValue([
       mockProduct({
         id: 12,
@@ -1853,7 +1903,7 @@ describe("App mapping review workflow", () => {
     await userEvent.type(screen.getByLabelText("Search"), "DOP");
 
     expect(screen.getByText("Direct Supplier Product")).toBeInTheDocument();
-    expect(screen.queryByText("Other Product")).not.toBeInTheDocument();
+    expect(screen.getByText("Other Product")).toBeInTheDocument();
   });
 
   it("selects OrderPro-supplied products for draft PO generation", async () => {

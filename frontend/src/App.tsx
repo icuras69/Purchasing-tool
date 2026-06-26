@@ -449,6 +449,17 @@ function matchesText(values: Array<string | number | null | undefined>, query: s
     .includes(normalized);
 }
 
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+
+  return debounced;
+}
+
 function App() {
   const authEnabled = isAuthEnabled();
   const [admin, setAdmin] = useState<CurrentAdmin | null>(() => {
@@ -592,6 +603,8 @@ function PurchasingApp({
     useState<ResourceState<ProductSupplierMapping>>(initialResource);
   const [expandedProductId, setExpandedProductId] = useState<number | null>(null);
   const [query, setQuery] = useState("");
+  const [productSearch, setProductSearch] = useState("");
+  const debouncedProductSearch = useDebouncedValue(productSearch, 250);
   const [actionMappingId, setActionMappingId] = useState<number | null>(null);
   const [mappingActionError, setMappingActionError] = useState<string | null>(null);
   const [createMappingError, setCreateMappingError] = useState<string | null>(null);
@@ -600,8 +613,9 @@ function PurchasingApp({
   const [selectedProductIdsForDraft, setSelectedProductIdsForDraft] = useState<number[]>([]);
   const [poToViewId, setPoToViewId] = useState<number | null>(null);
 
-  const loadProducts = useCallback((active = true) => {
-    fetchProducts()
+  const loadProducts = useCallback((active = true, search = debouncedProductSearch) => {
+    setProducts((current) => ({ ...current, loading: true, error: null }));
+    fetchProducts(search)
       .then((loadedProducts) => {
         if (active) {
           setProducts({ data: loadedProducts, loading: false, error: null });
@@ -612,7 +626,7 @@ function PurchasingApp({
           setProducts({ data: [], loading: false, error: loadError.message });
         }
       });
-  }, []);
+  }, [debouncedProductSearch]);
 
   const loadUnmappedProducts = useCallback((active = true) => {
     fetchUnmappedProducts()
@@ -666,7 +680,7 @@ function PurchasingApp({
   useEffect(() => {
     let active = true;
 
-    loadProducts(active);
+    loadProducts(active, debouncedProductSearch);
     loadUnmappedProducts(active);
     loadWeakMappings(active);
     loadSupplierMappings(active);
@@ -674,7 +688,7 @@ function PurchasingApp({
     return () => {
       active = false;
     };
-  }, [loadProducts, loadSupplierMappings, loadUnmappedProducts, loadWeakMappings]);
+  }, [debouncedProductSearch, loadProducts, loadSupplierMappings, loadUnmappedProducts, loadWeakMappings]);
 
   async function runMappingAction(
     mappingId: number,
@@ -726,11 +740,6 @@ function PurchasingApp({
     setPoToViewId(poId);
     setActiveTab("purchase-orders");
   }
-
-  const filteredProducts = useMemo(
-    () => filterProductsByQuery(products.data, query),
-    [products.data, query],
-  );
 
   const filteredUnmappedProducts = useMemo(
     () => filterProductsByQuery(unmappedProducts.data, query),
@@ -819,11 +828,24 @@ function PurchasingApp({
             products={products.data}
             selectedProductIds={selectedProductIdsForDraft}
           />
+          <section className="detail-panel" aria-label="Products search">
+            <label className="search-label">
+              <span>Products search</span>
+              <input
+                value={productSearch}
+                onChange={(event) => setProductSearch(event.target.value)}
+                placeholder="Search by Product ID, SKU, barcode, or name"
+              />
+            </label>
+            <p className="muted-text">
+              Product searches are resolved by the backend with internal Product ID checked first.
+            </p>
+          </section>
           <ProductTable
             expandedProductId={expandedProductId}
             onExpandedProductIdChange={setExpandedProductId}
             onToggleDraftSelection={toggleProductForDraft}
-            products={filteredProducts}
+            products={products.data}
             resource={products}
             selectedProductIds={selectedProductIdsForDraft}
           />

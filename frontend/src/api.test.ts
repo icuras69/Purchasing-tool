@@ -77,6 +77,23 @@ describe("apiUrl", () => {
     );
   });
 
+  it("fetches products with a backend search query", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchProducts("3020");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/products/?search=3020"),
+      expect.any(Object),
+    );
+  });
+
   it("defaults authentication to enabled unless explicitly disabled", () => {
     expect(isAuthEnabled()).toBe(true);
 

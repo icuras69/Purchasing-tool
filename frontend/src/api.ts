@@ -208,8 +208,8 @@ export function getCurrentAdmin(): Promise<CurrentAdmin> {
   return fetchJson<CurrentAdmin>("/auth/me", "current admin");
 }
 
-export function fetchProducts(): Promise<Product[]> {
-  return fetchJson<Product[]>("/products/", "products");
+export function fetchProducts(search?: string): Promise<Product[]> {
+  return fetchJson<Product[]>(`/products/${queryString({ search })}`, "products");
 }
 
 export function fetchUnmappedProducts(): Promise<Product[]> {
