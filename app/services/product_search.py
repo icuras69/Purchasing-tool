@@ -51,7 +51,7 @@ def filter_product_rows_by_search(
         if normalized
         in " ".join(
             normalize_search_query(_string(row.get(field)))
-            for field in (*exact_fields, *partial_fields, *supplier_fields)
+            for field in (*partial_fields, *supplier_fields)
         )
     ]
 

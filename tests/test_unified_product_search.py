@@ -44,6 +44,20 @@ def test_product_search_helper_prefers_exact_product_id_over_numeric_sku():
     assert filter_product_rows_by_search(rows, "3020") == [rows[0]]
 
 
+def test_product_search_helper_does_not_partially_match_identifier_fields():
+    rows = [
+        {
+            "product_id": 7721,
+            "orderpro_sku": "4018653020258",
+            "barcode": "4018653020258",
+            "supplier_sku": "4018653020258",
+            "product_name": "Plastic Curry Comb",
+        }
+    ]
+
+    assert filter_product_rows_by_search(rows, "3020") == []
+
+
 def test_products_endpoint_prefers_exact_product_id_over_numeric_sku(client, db_session):
     exact = _orderpro_product(db_session, product_id=3020, name="Exact Product", sku="EXACT-SKU")
     _orderpro_product(db_session, product_id=4000, name="Numeric SKU Product", sku="3020")
@@ -53,6 +67,22 @@ def test_products_endpoint_prefers_exact_product_id_over_numeric_sku(client, db_
     assert response.status_code == 200
     payload = response.json()
     assert [row["id"] for row in payload] == [exact.id]
+
+
+def test_products_endpoint_does_not_partially_match_identifier_fields(client, db_session):
+    _orderpro_product(
+        db_session,
+        product_id=7721,
+        name="Plastic Curry Comb",
+        sku="4018653020258",
+        barcode="4018653020258",
+        supplier_sku="4018653020258",
+    )
+
+    response = client.get("/products/?search=3020")
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def test_products_endpoint_searches_exact_barcode(client, db_session):
@@ -97,6 +127,24 @@ def test_demand_history_search_prefers_exact_product_id(client, db_session):
     assert payload["items"][0]["product_id"] == exact.id
 
 
+def test_demand_history_search_does_not_partially_match_identifier_fields(client, db_session):
+    _orderpro_product(
+        db_session,
+        product_id=7721,
+        name="Demand Plastic Curry Comb",
+        sku="4018653020258",
+        barcode="4018653020258",
+        supplier_sku="4018653020258",
+    )
+
+    response = client.get("/api/demand-history-reconciliation/products?search=3020")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 0
+    assert payload["items"] == []
+
+
 def test_manual_supplier_cleanup_search_prefers_exact_product_id(client, db_session):
     exact = _orderpro_product(db_session, product_id=3020, name="Cleanup Exact", sku="CLEANUP-EXACT")
     _orderpro_product(db_session, product_id=4300, name="Cleanup Numeric SKU", sku="3020")
@@ -109,6 +157,24 @@ def test_manual_supplier_cleanup_search_prefers_exact_product_id(client, db_sess
     assert payload["items"][0]["product_id"] == exact.id
 
 
+def test_manual_supplier_cleanup_search_does_not_partially_match_identifier_fields(client, db_session):
+    _orderpro_product(
+        db_session,
+        product_id=7721,
+        name="Cleanup Plastic Curry Comb",
+        sku="4018653020258",
+        barcode="4018653020258",
+        supplier_sku="4018653020258",
+    )
+
+    response = client.get("/api/manual-supplier-cleanup/candidates?search=3020")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 0
+    assert payload["items"] == []
+
+
 def test_seasonal_products_search_prefers_exact_product_id(client, db_session):
     exact = _orderpro_product(db_session, product_id=3020, name="Seasonal Exact", sku="SEASONAL-EXACT")
     _orderpro_product(db_session, product_id=4400, name="Seasonal Numeric SKU", sku="3020")
@@ -118,6 +184,22 @@ def test_seasonal_products_search_prefers_exact_product_id(client, db_session):
     assert response.status_code == 200
     payload = response.json()
     assert [row["product_id"] for row in payload] == [exact.id]
+
+
+def test_seasonal_products_search_does_not_partially_match_identifier_fields(client, db_session):
+    _orderpro_product(
+        db_session,
+        product_id=7721,
+        name="Seasonal Plastic Curry Comb",
+        sku="4018653020258",
+        barcode="4018653020258",
+        supplier_sku="4018653020258",
+    )
+
+    response = client.get("/products/seasonal?search=3020")
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def test_perf_log_is_emitted_for_baseline_endpoint(client, db_session, caplog):

@@ -108,9 +108,6 @@ def apply_product_search(db: Session, query, search: str | None):
         or_(
             func.lower(Product.name).like(like_pattern),
             func.lower(Product.description).like(like_pattern),
-            func.lower(Product.orderpro_sku).like(like_pattern),
-            func.lower(Product.barcode).like(like_pattern),
-            func.lower(Product.supplier_sku).like(like_pattern),
             func.lower(Supplier.name).like(like_pattern),
             func.lower(Supplier.orderpro_code).like(like_pattern),
         )
