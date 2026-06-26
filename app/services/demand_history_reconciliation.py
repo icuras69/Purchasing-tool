@@ -15,12 +15,14 @@ from typing import Any
 from xml.etree import ElementTree
 
 import pandas as pd
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.product import Product
+from app.models.supplier import Supplier
 from app.models.usage_history import UsageHistory
 from app.services.forecast_input_reconciliation import evaluate_product_readiness
-from app.services.product_search import filter_product_rows_by_search
+from app.services.product_search import filter_product_rows_by_search, normalize_search_query, parse_exact_product_id
 
 
 SOURCE_SYSTEM = "demand_history_import"
@@ -1275,8 +1277,7 @@ def summarize_plan(
 
 
 def get_demand_reconciliation_summary(db: Session) -> dict[str, Any]:
-    rows = list_demand_coverage_products(db, page=1, page_size=100000)
-    items = rows["items"]
+    items = demand_coverage_rows(db, include_readiness=False)
     total = len(items)
     today = datetime.now(timezone.utc).date()
     return {
@@ -1289,9 +1290,7 @@ def get_demand_reconciliation_summary(db: Session) -> dict[str, Any]:
         "earliest_demand_date": min((item["earliest_demand_date"] for item in items if item["earliest_demand_date"]), default=None),
         "latest_demand_date": max((item["latest_demand_date"] for item in items if item["latest_demand_date"]), default=None),
         "coverage_percentage": round((sum(1 for item in items if item["has_demand_history"]) / total) * 100, 2) if total else 0,
-        "products_blocked_by_missing_demand_history": sum(
-            1 for item in items if "demand_history" in item["readiness_missing_inputs"]
-        ),
+        "products_blocked_by_missing_demand_history": sum(1 for item in items if not item["has_demand_history"]),
         "selected_date": today.isoformat(),
     }
 
@@ -1309,17 +1308,7 @@ def list_demand_coverage_products(
     sort_by: str = "latest_demand_date",
     sort_direction: str = "desc",
 ) -> dict[str, Any]:
-    rows = demand_coverage_rows(db)
-    if search:
-        rows = filter_product_rows_by_search(
-            rows,
-            search,
-            exact_fields=("sku", "orderpro_sku", "barcode", "supplier_sku"),
-            partial_fields=("product_name", "name", "description"),
-            supplier_fields=("supplier_name", "supplier_code"),
-        )
-    if supplier_id is not None:
-        rows = [row for row in rows if row["supplier_id"] == supplier_id]
+    rows = demand_coverage_rows(db, search=search, supplier_id=supplier_id, include_readiness=False)
     if has_history is not None:
         rows = [row for row in rows if row["has_demand_history"] is has_history]
     if has_recent_demand is not None:
@@ -1332,7 +1321,8 @@ def list_demand_coverage_products(
     total = len(rows)
     total_pages = (total + page_size - 1) // page_size if total else 0
     start = (page - 1) * page_size
-    return {"items": rows[start : start + page_size], "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
+    page_rows = _attach_demand_readiness(db, rows[start : start + page_size])
+    return {"items": page_rows, "page": page, "page_size": page_size, "total": total, "total_pages": total_pages}
 
 
 def get_demand_coverage_detail(db: Session, product_id: int) -> dict[str, Any] | None:
@@ -1365,7 +1355,47 @@ def get_demand_coverage_detail(db: Session, product_id: int) -> dict[str, Any] |
     return row
 
 
-def demand_coverage_rows(db: Session, *, product_id: int | None = None) -> list[dict[str, Any]]:
+def _apply_demand_product_search(query, search: str | None):
+    normalized = normalize_search_query(search)
+    if not normalized:
+        return query
+
+    exact_product_id = parse_exact_product_id(normalized)
+    if exact_product_id is not None:
+        exact_id_exists = query.filter(Product.id == exact_product_id).first()
+        if exact_id_exists:
+            return query.filter(Product.id == exact_product_id)
+
+    query = query.outerjoin(Supplier, Product.supplier_id == Supplier.id)
+    exact_query = query.filter(
+        or_(
+            func.lower(Product.orderpro_sku) == normalized,
+            func.lower(Product.barcode) == normalized,
+            func.lower(Product.supplier_sku) == normalized,
+        )
+    )
+    if exact_query.first():
+        return exact_query
+
+    like_pattern = f"%{normalized}%"
+    return query.filter(
+        or_(
+            func.lower(Product.name).like(like_pattern),
+            func.lower(Product.description).like(like_pattern),
+            func.lower(Supplier.name).like(like_pattern),
+            func.lower(Supplier.orderpro_code).like(like_pattern),
+        )
+    )
+
+
+def demand_coverage_rows(
+    db: Session,
+    *,
+    product_id: int | None = None,
+    search: str | None = None,
+    supplier_id: int | None = None,
+    include_readiness: bool = True,
+) -> list[dict[str, Any]]:
     query = (
         db.query(Product)
         .options(selectinload(Product.supplier_record))
@@ -1373,6 +1403,9 @@ def demand_coverage_rows(db: Session, *, product_id: int | None = None) -> list[
     )
     if product_id is not None:
         query = query.filter(Product.id == product_id)
+    if supplier_id is not None:
+        query = query.filter(Product.supplier_id == supplier_id)
+    query = _apply_demand_product_search(query, search)
     products = query.all()
     product_ids = [product.id for product in products]
     usage_by_product: dict[int, list[UsageHistory]] = defaultdict(list)
@@ -1393,13 +1426,12 @@ def demand_coverage_rows(db: Session, *, product_id: int | None = None) -> list[
         earliest = min(demand_dates).isoformat() if demand_dates else None
         latest_date = max(demand_dates) if demand_dates else None
         months_covered = len(month_keys)
-        readiness = evaluate_product_readiness(db, product)
         gap_warnings = coverage_gap_warnings(month_keys, latest_date)
-        rows.append(
-            {
+        row = {
                 "product_id": product.id,
                 "sku": product.orderpro_sku or product.source_key,
                 "orderpro_sku": product.orderpro_sku,
+                "supplier_sku": product.supplier_sku,
                 "barcode": product.barcode,
                 "description": product.description,
                 "product_name": product.name,
@@ -1419,13 +1451,63 @@ def demand_coverage_rows(db: Session, *, product_id: int | None = None) -> list[
                 "return_units": return_units,
                 "stale_demand": bool(latest_date and latest_date < today - timedelta(days=180)),
                 "gap_warnings": gap_warnings,
+            }
+        if include_readiness:
+            readiness = evaluate_product_readiness(db, product)
+            row.update(
+                {
+                    "readiness_status": readiness["readiness_status"],
+                    "readiness_score": readiness["readiness_score"],
+                    "readiness_missing_inputs": readiness["missing_inputs"],
+                    "demand_source": readiness["demand_source"],
+                }
+            )
+        else:
+            row.update(
+                {
+                    "readiness_status": "partially_ready" if usage else "monitor_only",
+                    "readiness_score": None,
+                    "readiness_missing_inputs": [] if usage else ["demand_history"],
+                    "demand_source": "usage_history" if usage else "none",
+                }
+            )
+        rows.append(row)
+    return rows
+
+
+def _attach_demand_readiness(db: Session, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return rows
+    products = {
+        product.id: product
+        for product in db.query(Product)
+        .options(
+            selectinload(Product.supplier_record),
+            selectinload(Product.product_suppliers),
+            selectinload(Product.forecast_input_profile),
+            selectinload(Product.orderpro_order_items),
+        )
+        .filter(Product.id.in_([row["product_id"] for row in rows]))
+        .all()
+    }
+    enriched = []
+    for row in rows:
+        product = products.get(row["product_id"])
+        if product is None:
+            enriched.append(row)
+            continue
+        readiness = evaluate_product_readiness(db, product)
+        updated = dict(row)
+        updated.update(
+            {
                 "readiness_status": readiness["readiness_status"],
                 "readiness_score": readiness["readiness_score"],
                 "readiness_missing_inputs": readiness["missing_inputs"],
                 "demand_source": readiness["demand_source"],
             }
         )
-    return rows
+        enriched.append(updated)
+    return enriched
 
 
 def coverage_gap_warnings(month_keys: set[tuple[int, int]], latest_date: date | None) -> list[str]:

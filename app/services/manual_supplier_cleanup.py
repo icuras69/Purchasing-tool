@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
+from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
+from app.models.product_supplier import ProductSupplier
 from app.models.product_supplier_assignment_review import ProductSupplierAssignmentReview
 from app.models.supplier import Supplier
-from app.services.product_search import filter_product_rows_by_search
+from app.models.usage_history import UsageHistory
+from app.services.product_search import filter_product_rows_by_search, normalize_search_query, parse_exact_product_id
 from app.services.seasonality_backtesting import audit_product_forecast_inputs
 from app.services.supplier_assignment_review import missing_supplier_products, review_item_for_product
 
@@ -111,11 +114,12 @@ def list_cleanup_candidates(
     has_cost: bool | None = None,
     has_existing_suggestion: bool | None = None,
 ) -> dict[str, Any]:
-    rows = [_cleanup_row_for_product(db, product) for product in missing_supplier_products(db)]
-    summary = _candidate_summary(rows)
+    summary = _fast_candidate_summary(db)
+    products = _searched_missing_supplier_products(db, search=search)
+    rows = [_cleanup_row_for_product(db, product) for product in products]
     rows = _filter_candidate_rows(
         rows,
-        search=search,
+        search=None,
         priority_only=priority_only,
         has_open_demand=has_open_demand,
         has_stock=has_stock,
@@ -293,7 +297,7 @@ def get_cleanup_summary(db: Session) -> dict[str, Any]:
         )
         .count()
     )
-    candidate_page = list_cleanup_candidates(db, page=1, page_size=1)
+    candidate_summary = _fast_candidate_summary(db)
     status_counts = dict(
         db.query(ProductSupplierAssignmentReview.status, func.count(ProductSupplierAssignmentReview.id))
         .group_by(ProductSupplierAssignmentReview.status)
@@ -303,13 +307,149 @@ def get_cleanup_summary(db: Session) -> dict[str, Any]:
     return {
         "total_products": total_products,
         "products_with_supplier": products_with_supplier,
-        "products_missing_supplier": candidate_page["summary"]["total_missing_supplier"],
-        "priority_missing_supplier_products": candidate_page["summary"]["priority_candidates"],
+        "products_missing_supplier": candidate_summary["total_missing_supplier"],
+        "priority_missing_supplier_products": candidate_summary["priority_candidates"],
         "confirmed_manual_assignments": status_counts.get("confirmed", 0),
         "deferred_reviews": status_counts.get("deferred", 0),
         "rejected_reviews": status_counts.get("rejected", 0),
         "needs_information_reviews": status_counts.get("needs_information", 0),
         "completion_percentage": round(completion, 2),
+    }
+
+
+def _missing_supplier_base_query(db: Session):
+    return (
+        db.query(Product)
+        .options(
+            selectinload(Product.supplier_assignment_review),
+            selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+            selectinload(Product.seasonality_profile),
+        )
+        .filter(Product.supplier_id.is_(None))
+        .filter(
+            (Product.source_system == "orderpro")
+            | (Product.orderpro_id.is_not(None))
+            | (Product.orderpro_sku.is_not(None))
+        )
+    )
+
+
+def _searched_missing_supplier_products(db: Session, *, search: str | None = None) -> list[Product]:
+    query = _missing_supplier_base_query(db)
+    normalized = normalize_search_query(search)
+    if not normalized:
+        return query.order_by(Product.id.asc()).all()
+
+    exact_product_id = parse_exact_product_id(normalized)
+    if exact_product_id is not None:
+        exact_id_exists = query.filter(Product.id == exact_product_id).first()
+        if exact_id_exists:
+            return query.filter(Product.id == exact_product_id).order_by(Product.id.asc()).all()
+
+    exact_query = query.filter(
+        or_(
+            func.lower(Product.orderpro_sku) == normalized,
+            func.lower(Product.barcode) == normalized,
+            func.lower(Product.supplier_sku) == normalized,
+        )
+    )
+    if exact_query.first():
+        return exact_query.order_by(Product.id.asc()).all()
+
+    like = f"%{normalized}%"
+    return (
+        query.filter(
+            or_(
+                func.lower(Product.name).like(like),
+                func.lower(Product.description).like(like),
+            )
+        )
+        .order_by(Product.id.asc())
+        .all()
+    )
+
+
+def _fast_candidate_summary(db: Session) -> dict[str, Any]:
+    product_rows = (
+        db.query(Product.id, Product.current_stock, Product.cost_price, Product.seasonality_tag)
+        .filter(Product.supplier_id.is_(None))
+        .filter(
+            (Product.source_system == "orderpro")
+            | (Product.orderpro_id.is_not(None))
+            | (Product.orderpro_sku.is_not(None))
+        )
+        .all()
+    )
+    product_ids = [row.id for row in product_rows]
+    if not product_ids:
+        return {
+            "total_missing_supplier": 0,
+            "priority_candidates": 0,
+            "with_open_demand": 0,
+            "with_stock": 0,
+            "with_demand_history": 0,
+            "with_cost": 0,
+        }
+
+    usage_product_ids = {
+        product_id
+        for (product_id,) in db.query(UsageHistory.product_id)
+        .filter(UsageHistory.product_id.in_(product_ids))
+        .distinct()
+        .all()
+    }
+    shipped_product_ids = {
+        product_id
+        for (product_id,) in db.query(OrderProOrderItem.product_id)
+        .join(OrderProOrder, OrderProOrder.id == OrderProOrderItem.order_id)
+        .filter(OrderProOrderItem.product_id.in_(product_ids))
+        .filter(func.lower(OrderProOrder.status) == "shipped")
+        .distinct()
+        .all()
+    }
+    open_quantities: dict[int, float] = {}
+    for product_id, quantity_ordered, quantity_shipped in (
+        db.query(
+            OrderProOrderItem.product_id,
+            OrderProOrderItem.quantity_ordered,
+            OrderProOrderItem.quantity_shipped,
+        )
+        .join(OrderProOrder, OrderProOrder.id == OrderProOrderItem.order_id)
+        .filter(OrderProOrderItem.product_id.in_(product_ids))
+        .filter(func.lower(OrderProOrder.status).in_(["confirmed", "packed", "backorder"]))
+        .all()
+    ):
+        open_quantities[product_id] = open_quantities.get(product_id, 0.0) + max(
+            float(quantity_ordered or 0) - float(quantity_shipped or 0),
+            0.0,
+        )
+    suggested_product_ids = {
+        product_id
+        for (product_id,) in db.query(ProductSupplierAssignmentReview.product_id)
+        .filter(ProductSupplierAssignmentReview.product_id.in_(product_ids))
+        .filter(ProductSupplierAssignmentReview.suggested_supplier_id.is_not(None))
+        .all()
+    }
+    demand_product_ids = usage_product_ids | shipped_product_ids
+    priority_count = 0
+    for row in product_rows:
+        has_priority = (
+            float(open_quantities.get(row.id) or 0) > 0
+            or float(row.current_stock or 0) > 0
+            or row.id in demand_product_ids
+            or row.cost_price is not None
+            or bool(row.seasonality_tag and row.seasonality_tag != "insufficient_data")
+            or row.id in suggested_product_ids
+        )
+        if has_priority:
+            priority_count += 1
+    return {
+        "total_missing_supplier": len(product_rows),
+        "priority_candidates": priority_count,
+        "with_open_demand": sum(1 for value in open_quantities.values() if float(value or 0) > 0),
+        "with_stock": sum(1 for row in product_rows if float(row.current_stock or 0) > 0),
+        "with_demand_history": len(demand_product_ids),
+        "with_cost": sum(1 for row in product_rows if row.cost_price is not None),
     }
 
 

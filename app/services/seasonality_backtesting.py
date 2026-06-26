@@ -5,14 +5,21 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.product import Product
+from app.models.product_historical_link import ProductHistoricalLink
 from app.models.product_seasonality_backtest import ProductSeasonalityBacktest
+from app.models.orderpro_purchase_order import OrderProPurchaseOrderLine
+from app.models.purchase_order import PurchaseOrderLine
+from app.models.supplier import Supplier
 from app.models.usage_history import UsageHistory
+from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.services.forecasting import build_forecast
 from app.services.forecast_input_reconciliation import effective_forecast_inputs, forecast_input_audit
 from app.services.historical_product_reconciliation import confirmed_links_for_products
+from app.services.product_search import normalize_search_query, parse_exact_product_id
 from app.services.seasonality import collect_contributing_usage_rows, is_orderpro_catalog_product, utc_now
 from app.services.supplier_assignment_review import suggest_supplier_for_product
 
@@ -556,11 +563,10 @@ def forecast_readiness_summary(db: Session) -> dict[str, Any]:
     products = (
         db.query(Product)
         .options(
-            selectinload(Product.inventory_positions),
-            selectinload(Product.orderpro_order_items),
             selectinload(Product.seasonality_profile),
             selectinload(Product.seasonality_backtests),
             selectinload(Product.supplier_record),
+            selectinload(Product.forecast_input_profile),
         )
         .filter(
             (Product.source_system == "orderpro")
@@ -569,30 +575,57 @@ def forecast_readiness_summary(db: Session) -> dict[str, Any]:
         )
         .all()
     )
-    audits = [audit_product_forecast_inputs(db, product) for product in products]
-    input_audit = forecast_input_audit(db, products=products)
+    product_ids = [product.id for product in products]
+    po_cost_product_ids = _po_cost_product_ids(db, product_ids)
+    effective_inputs = [_summary_forecast_inputs(product, po_cost_product_ids=po_cost_product_ids) for product in products]
+    suppliers_missing_lead_time = (
+        db.query(Supplier)
+        .filter((Supplier.lead_time_days.is_(None)) | (Supplier.lead_time_days <= 0))
+        .count()
+    )
+    orderpro_demand_product_ids = set()
+    if product_ids:
+        orderpro_demand_product_ids = {
+            product_id
+            for (product_id,) in db.query(OrderProOrderItem.product_id)
+            .join(OrderProOrder, OrderProOrder.id == OrderProOrderItem.order_id)
+            .filter(OrderProOrderItem.product_id.in_(product_ids))
+            .filter(func.lower(OrderProOrder.status) == "shipped")
+            .distinct()
+            .all()
+        }
+    linked_history_product_ids = set()
+    if product_ids:
+        linked_history_product_ids = {
+            orderpro_product_id
+            for (orderpro_product_id,) in db.query(ProductHistoricalLink.orderpro_product_id)
+            .join(UsageHistory, UsageHistory.product_id == ProductHistoricalLink.historical_product_id)
+            .filter(ProductHistoricalLink.orderpro_product_id.in_(product_ids))
+            .filter(ProductHistoricalLink.status.in_(["auto_confirmed", "manually_confirmed"]))
+            .distinct()
+            .all()
+        }
+    demand_history_product_ids = orderpro_demand_product_ids | linked_history_product_ids
     return {
         "product_count": len(products),
         "products_with_complete_critical_inputs": sum(
-            1 for audit in audits if not any(issue == "missing_supplier" for issue in audit["blocking_issues"])
+            1 for item in effective_inputs if "missing_supplier" not in item["blocking_issues"]
         ),
-        "products_missing_supplier": sum(1 for audit in audits if "missing_supplier" in audit["blocking_issues"]),
-        "products_missing_lead_time": sum(1 for audit in audits if "missing_lead_time" in audit["warning_issues"]),
-        "products_missing_cost": sum(1 for audit in audits if "missing_cost" in audit["warning_issues"]),
-        "products_missing_moq": sum(1 for audit in audits if audit["moq_source"] == "missing"),
-        "products_missing_pack_size": sum(1 for audit in audits if "missing_pack_size" in audit["warning_issues"]),
-        "products_using_fallback_moq": sum(1 for audit in audits if audit["moq_source"] == "business_default"),
+        "products_missing_supplier": sum(1 for item in effective_inputs if "missing_supplier" in item["blocking_issues"]),
+        "products_missing_lead_time": sum(1 for item in effective_inputs if "missing_lead_time" in item["warning_issues"]),
+        "products_missing_cost": sum(1 for item in effective_inputs if "missing_cost" in item["warning_issues"]),
+        "products_missing_moq": sum(1 for item in effective_inputs if item["moq_source"] == "missing"),
+        "products_missing_pack_size": sum(1 for item in effective_inputs if "missing_pack_size" in item["warning_issues"]),
+        "products_using_fallback_moq": sum(1 for item in effective_inputs if item["moq_source"] == "business_default"),
         "products_using_po_derived_cost": sum(
             1
-            for audit in audits
-            if audit["cost_source"] in {"orderpro_purchase_order_line", "local_purchase_order_line"}
+            for item in effective_inputs
+            if item["cost_source"] in {"orderpro_purchase_order_line", "local_purchase_order_line"}
         ),
-        "products_using_orderpro_cost": sum(1 for audit in audits if audit["cost_source"] == "orderpro_product_cost"),
-        "suppliers_missing_lead_time": input_audit["suppliers_missing_lead_time"],
-        "products_blocked_by_missing_supplier": sum(1 for audit in audits if "missing_supplier" in audit["blocking_issues"]),
-        "products_blocked_by_missing_demand": sum(
-            1 for audit in audits if "missing_demand_history" in audit["warning_issues"]
-        ),
+        "products_using_orderpro_cost": sum(1 for item in effective_inputs if item["cost_source"] == "orderpro_product_cost"),
+        "suppliers_missing_lead_time": suppliers_missing_lead_time,
+        "products_blocked_by_missing_supplier": sum(1 for item in effective_inputs if "missing_supplier" in item["blocking_issues"]),
+        "products_blocked_by_missing_demand": len(products) - len(demand_history_product_ids),
         "products_complete_before_reconciliation": sum(
             1
             for product in products
@@ -605,28 +638,133 @@ def forecast_readiness_summary(db: Session) -> dict[str, Any]:
         ),
         "products_complete_after_reconciliation": sum(
             1
-            for audit in audits
-            if "missing_supplier" not in audit["blocking_issues"]
-            and "missing_cost" not in audit["warning_issues"]
-            and "missing_lead_time" not in audit["warning_issues"]
+            for item in effective_inputs
+            if "missing_supplier" not in item["blocking_issues"]
+            and "missing_cost" not in item["warning_issues"]
+            and "missing_lead_time" not in item["warning_issues"]
         ),
-        "products_missing_demand_history": sum(
-            1 for audit in audits if "missing_demand_history" in audit["warning_issues"]
-        ),
+        "products_missing_demand_history": len(products) - len(demand_history_product_ids),
         "products_missing_seasonality": sum(
-            1 for audit in audits if "usable_seasonality_profile" in audit["missing_inputs"]
+            1
+            for product in products
+            if not product.seasonality_profile or product.seasonality_profile.seasonality_tag == "insufficient_data"
         ),
         "products_with_validated_seasonality": sum(
-            1 for audit in audits if audit["seasonality_readiness_status"] == "validated"
+            1 for product in products if (_latest_backtest(product) and _latest_backtest(product).readiness_status == "validated")
         ),
         "products_with_harmful_seasonality": sum(
-            1 for audit in audits if audit["seasonality_readiness_status"] == "harmful"
+            1 for product in products if (_latest_backtest(product) and _latest_backtest(product).readiness_status == "harmful")
         ),
     }
 
 
-def list_forecast_readiness(db: Session, *, filter_name: str | None = None) -> list[dict[str, Any]]:
-    products = (
+def _po_cost_product_ids(db: Session, product_ids: list[int]) -> set[int]:
+    if not product_ids:
+        return set()
+    orderpro_ids = {
+        product_id
+        for (product_id,) in db.query(OrderProPurchaseOrderLine.product_id)
+        .filter(OrderProPurchaseOrderLine.product_id.in_(product_ids))
+        .filter(OrderProPurchaseOrderLine.unit_cost.is_not(None))
+        .distinct()
+        .all()
+    }
+    local_ids = {
+        product_id
+        for (product_id,) in db.query(PurchaseOrderLine.product_id)
+        .filter(PurchaseOrderLine.product_id.in_(product_ids))
+        .filter(PurchaseOrderLine.unit_cost.is_not(None))
+        .distinct()
+        .all()
+    }
+    return orderpro_ids | local_ids
+
+
+def _summary_forecast_inputs(product: Product, *, po_cost_product_ids: set[int]) -> dict[str, Any]:
+    profile = product.forecast_input_profile
+    if profile is not None:
+        blocking = ["missing_supplier"] if product.supplier_id is None else []
+        warnings = []
+        if profile.lead_time_days is None:
+            warnings.append("missing_lead_time")
+        if profile.cost_price is None:
+            warnings.append("missing_cost")
+        if profile.pack_size is None:
+            warnings.append("missing_pack_size")
+        if profile.moq_source == "business_default":
+            warnings.append("fallback_moq")
+        return {
+            "blocking_issues": blocking,
+            "warning_issues": warnings,
+            "cost_source": profile.cost_source or "missing",
+            "lead_time_source": profile.lead_time_source or "missing",
+            "moq_source": profile.moq_source or "missing",
+            "pack_size_source": profile.pack_size_source or "missing",
+        }
+
+    if product.cost_price and product.cost_price > 0:
+        cost_source = "orderpro_product_cost"
+    elif product.id in po_cost_product_ids:
+        cost_source = "orderpro_purchase_order_line"
+    else:
+        cost_source = "missing"
+    lead_time_days = product.lead_time_days or (
+        product.supplier_record.lead_time_days if product.supplier_record else None
+    )
+    return {
+        "blocking_issues": ["missing_supplier"] if product.supplier_id is None else [],
+        "warning_issues": [
+            warning
+            for warning, present in (
+                ("missing_lead_time", not lead_time_days or lead_time_days <= 0),
+                ("missing_cost", cost_source == "missing"),
+                ("missing_pack_size", True),
+                ("fallback_moq", not product.min_order_qty or product.min_order_qty <= 0),
+            )
+            if present
+        ],
+        "cost_source": cost_source,
+        "lead_time_source": "product_record" if product.lead_time_days and product.lead_time_days > 0 else "supplier_record" if lead_time_days else "missing",
+        "moq_source": "product_record" if product.min_order_qty and product.min_order_qty > 0 else "business_default",
+        "pack_size_source": "missing",
+    }
+
+
+def _apply_forecast_readiness_product_search(query, search: str | None):
+    normalized = normalize_search_query(search)
+    if not normalized:
+        return query
+
+    exact_product_id = parse_exact_product_id(normalized)
+    if exact_product_id is not None:
+        exact_id_exists = query.filter(Product.id == exact_product_id).first()
+        if exact_id_exists:
+            return query.filter(Product.id == exact_product_id)
+
+    query = query.outerjoin(Supplier, Product.supplier_id == Supplier.id)
+    exact_query = query.filter(
+        or_(
+            func.lower(Product.orderpro_sku) == normalized,
+            func.lower(Product.barcode) == normalized,
+            func.lower(Product.supplier_sku) == normalized,
+        )
+    )
+    if exact_query.first():
+        return exact_query
+
+    like_pattern = f"%{normalized}%"
+    return query.filter(
+        or_(
+            func.lower(Product.name).like(like_pattern),
+            func.lower(Product.description).like(like_pattern),
+            func.lower(Supplier.name).like(like_pattern),
+            func.lower(Supplier.orderpro_code).like(like_pattern),
+        )
+    )
+
+
+def list_forecast_readiness(db: Session, *, filter_name: str | None = None, search: str | None = None) -> list[dict[str, Any]]:
+    query = (
         db.query(Product)
         .options(
             selectinload(Product.inventory_positions),
@@ -640,9 +778,9 @@ def list_forecast_readiness(db: Session, *, filter_name: str | None = None) -> l
             | (Product.orderpro_id.is_not(None))
             | (Product.orderpro_sku.is_not(None))
         )
-        .order_by(Product.id.asc())
-        .all()
     )
+    query = _apply_forecast_readiness_product_search(query, search)
+    products = query.order_by(Product.id.asc()).all()
     audits = [audit_product_forecast_inputs(db, product) for product in products]
     if filter_name == "missing_supplier":
         audits = [audit for audit in audits if "missing_supplier" in audit["blocking_issues"]]

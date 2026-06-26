@@ -145,6 +145,35 @@ def test_demand_history_search_does_not_partially_match_identifier_fields(client
     assert payload["items"] == []
 
 
+def test_demand_history_search_enriches_only_matching_products(client, db_session, monkeypatch):
+    exact = _orderpro_product(db_session, product_id=3020, name="Demand Exact", sku="DEMAND-EXACT")
+    other = _orderpro_product(db_session, product_id=4200, name="Demand Other", sku="DEMAND-OTHER")
+    evaluated_product_ids = []
+
+    def fake_readiness(_db, product):
+        evaluated_product_ids.append(product.id)
+        return {
+            "readiness_status": "monitor_only",
+            "readiness_score": 50,
+            "missing_inputs": ["demand_history"],
+            "demand_source": "none",
+        }
+
+    monkeypatch.setattr(
+        "app.services.demand_history_reconciliation.evaluate_product_readiness",
+        fake_readiness,
+    )
+
+    response = client.get("/api/demand-history-reconciliation/products?search=3020")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["product_id"] == exact.id
+    assert evaluated_product_ids == [exact.id]
+    assert other.id not in evaluated_product_ids
+
+
 def test_manual_supplier_cleanup_search_prefers_exact_product_id(client, db_session):
     exact = _orderpro_product(db_session, product_id=3020, name="Cleanup Exact", sku="CLEANUP-EXACT")
     _orderpro_product(db_session, product_id=4300, name="Cleanup Numeric SKU", sku="3020")
@@ -175,6 +204,40 @@ def test_manual_supplier_cleanup_search_does_not_partially_match_identifier_fiel
     assert payload["items"] == []
 
 
+def test_manual_supplier_cleanup_search_builds_only_matching_candidate_rows(client, db_session, monkeypatch):
+    exact = _orderpro_product(db_session, product_id=3020, name="Cleanup Exact", sku="CLEANUP-EXACT")
+    other = _orderpro_product(db_session, product_id=4300, name="Cleanup Other", sku="CLEANUP-OTHER")
+    built_product_ids = []
+
+    def fake_cleanup_row(_db, product):
+        built_product_ids.append(product.id)
+        return {
+            "product_id": product.id,
+            "orderpro_id": product.orderpro_id,
+            "orderpro_sku": product.orderpro_sku,
+            "product_name": product.name,
+            "barcode": product.barcode,
+            "description": product.description,
+            "current_stock": 0,
+            "demand_history_available": False,
+            "open_customer_demand": 0,
+            "cost_price": None,
+            "priority_score": 0,
+            "existing_suggested_supplier_id": None,
+        }
+
+    monkeypatch.setattr("app.services.manual_supplier_cleanup._cleanup_row_for_product", fake_cleanup_row)
+
+    response = client.get("/api/manual-supplier-cleanup/candidates?search=3020")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["product_id"] == exact.id
+    assert built_product_ids == [exact.id]
+    assert other.id not in built_product_ids
+
+
 def test_seasonal_products_search_prefers_exact_product_id(client, db_session):
     exact = _orderpro_product(db_session, product_id=3020, name="Seasonal Exact", sku="SEASONAL-EXACT")
     _orderpro_product(db_session, product_id=4400, name="Seasonal Numeric SKU", sku="3020")
@@ -200,6 +263,35 @@ def test_seasonal_products_search_does_not_partially_match_identifier_fields(cli
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_forecast_readiness_search_audits_only_matching_products(client, db_session, monkeypatch):
+    exact = _orderpro_product(db_session, product_id=3020, name="Readiness Exact", sku="READINESS-EXACT")
+    other = _orderpro_product(db_session, product_id=4400, name="Readiness Other", sku="READINESS-OTHER")
+    audited_product_ids = []
+
+    def fake_audit(_db, product):
+        audited_product_ids.append(product.id)
+        return {
+            "product_id": product.id,
+            "orderpro_sku": product.orderpro_sku,
+            "product_name": product.name,
+            "blocking_issues": [],
+            "warning_issues": [],
+            "missing_inputs": [],
+            "moq_source": "product_record",
+            "cost_source": "missing",
+            "seasonality_readiness_status": None,
+        }
+
+    monkeypatch.setattr("app.services.seasonality_backtesting.audit_product_forecast_inputs", fake_audit)
+
+    response = client.get("/products/forecast-readiness?search=3020")
+
+    assert response.status_code == 200
+    assert [row["product_id"] for row in response.json()] == [exact.id]
+    assert audited_product_ids == [exact.id]
+    assert other.id not in audited_product_ids
 
 
 def test_perf_log_is_emitted_for_baseline_endpoint(client, db_session, caplog):

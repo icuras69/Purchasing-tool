@@ -11,7 +11,6 @@ from app.services.seasonality_backtesting import (
     list_forecast_readiness,
 )
 from app.services.perf_logging import perf_timer
-from app.services.product_search import filter_product_rows_by_search
 
 
 router = APIRouter(tags=["forecast-readiness"])
@@ -42,16 +41,9 @@ def list_products_forecast_readiness(
         summary_calculated=True,
     ) as perf:
         try:
-            rows = list_forecast_readiness(db, filter_name=filter)
+            rows = list_forecast_readiness(db, filter_name=filter, search=search)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        rows = filter_product_rows_by_search(
-            rows,
-            search,
-            exact_fields=("orderpro_sku", "barcode", "supplier_sku"),
-            partial_fields=("product_name", "name", "description"),
-            supplier_fields=("supplier_name", "supplier_code"),
-        )
         perf["total"] = len(rows)
         result = rows[offset : offset + limit]
         perf["returned"] = len(result)
