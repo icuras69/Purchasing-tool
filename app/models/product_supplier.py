@@ -7,6 +7,12 @@ from app.db.base import Base
 
 
 class ProductSupplier(Base):
+    """Legacy supplier mapping evidence.
+
+    Production purchasing flows should use Product.supplier_id as the active
+    one-product-one-supplier assignment.
+    """
+
     __tablename__ = "product_suppliers"
     __table_args__ = (
         Index("ix_product_suppliers_product_id", "product_id"),

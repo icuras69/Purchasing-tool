@@ -167,6 +167,61 @@ def test_unknown_supplier_code_not_reported_when_supplier_exists_on_page_two(db_
     assert report["unknown_supplier_codes"] == []
 
 
+def test_product_planning_normalizes_supplier_codes_for_assignment(db_session):
+    supplier = Supplier(
+        name="Supplier One",
+        normalized_name="supplier one",
+        orderpro_id="10",
+        orderpro_code="SUP1",
+        source_system="orderpro",
+    )
+    product = Product(
+        name="Existing Product",
+        source_key="SKU-1",
+        orderpro_id="1",
+        orderpro_sku="SKU-1",
+        supplier_id=None,
+        source_system="orderpro",
+    )
+    db_session.add_all([supplier, product])
+    db_session.flush()
+
+    report = plan_product_sync(
+        db_session,
+        [{"id": 1, "sku": "SKU-1", "name": "Existing Product", "is_active": True}],
+        {"sku-1": {"sku": "sku-1", "supplier_code": " sup1 ", "supplier_sku": "SUP-SKU-1"}},
+        [{"id": 10, "code": "sup1", "name": "Supplier One"}],
+    )
+
+    assert report["summary"]["unknown_supplier_codes"] == 0
+    assert report["summary"]["would_assign_supplier"] == 1
+    assert report["would_assign_supplier"] == [
+        {"sku": "SKU-1", "supplier_code": "SUP1", "local_supplier_id": supplier.id}
+    ]
+    assert report["to_update"][0]["changes"]["supplier_id"]["desired"] == supplier.id
+
+
+def test_supplier_planning_matches_existing_supplier_by_normalized_code(db_session):
+    supplier = Supplier(
+        name="Supplier One",
+        normalized_name="supplier one",
+        orderpro_id="10",
+        orderpro_code="SUP1",
+        source_system="orderpro",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    report = plan_supplier_sync(
+        db_session,
+        [{"id": 10, "code": " sup1 ", "name": "Supplier One"}],
+    )
+
+    assert report["summary"]["already_matching"] == 1
+    assert report["summary"]["to_create"] == 0
+    assert report["already_matching"] == [{"local_id": supplier.id, "orderpro_id": "10", "orderpro_code": "SUP1"}]
+
+
 def test_limited_supplier_pages_marks_unknown_supplier_codes_as_unreliable(db_session):
     report = plan_product_sync(
         db_session,
@@ -381,6 +436,52 @@ def test_orderpro_order_item_matches_product_by_orderpro_id_and_sku_fallback(db_
     assert planned_by_key["line-1"]["product_id"] == product_by_id.id
     assert planned_by_key["line-2"]["product_id"] == product_by_sku.id
     assert report["summary"]["items_missing_product_match"] == 0
+
+
+def test_orderpro_order_item_sku_fallback_is_normalized(db_session):
+    product_by_sku = Product(name="By SKU", orderpro_id="101", orderpro_sku="SKU-101")
+    db_session.add(product_by_sku)
+    db_session.flush()
+
+    report = plan_order_sync(
+        db_session,
+        [
+            {
+                "id": 501,
+                "order_number": "SO-501",
+                "items": [
+                    {"id": "line-1", "product": {"sku": " sku-101 "}, "qty_ordered": "3.000", "qty_shipped": "3.000"},
+                ],
+            }
+        ],
+    )
+
+    assert report["order_items_to_create"][0]["product_id"] == product_by_sku.id
+    assert report["summary"]["items_missing_product_match"] == 0
+
+
+def test_orderpro_inventory_planning_sku_fallback_is_normalized(db_session):
+    product = Product(name="Product", source_key="SKU-1", orderpro_id="1", orderpro_sku="SKU-1")
+    warehouse = Warehouse(orderpro_id="W1", name="Main Warehouse", source_system="orderpro")
+    db_session.add_all([product, warehouse])
+    db_session.flush()
+
+    report = plan_inventory_sync(
+        db_session,
+        [
+            {
+                "product_id": 999,
+                "product": {"sku": " sku-1 "},
+                "warehouse_id": "W1",
+                "location_id": "L1",
+                "qty": 5,
+            },
+        ],
+    )
+
+    assert report["summary"]["rows_missing_product_match"] == 0
+    assert report["inventory_positions_to_create"][0]["product_id"] == product.id
+    assert report["total_stock_by_local_product_id"][str(product.id)] == 5
 
 
 def test_orderpro_order_dry_run_reports_missing_product_match(db_session):

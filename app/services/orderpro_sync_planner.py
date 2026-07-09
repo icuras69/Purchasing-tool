@@ -15,6 +15,17 @@ from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.warehouse import Warehouse
 from app.services.orderpro_client import OrderProClient, extract_records, next_page_number
+from app.services.product_identity import (
+    normalize_orderpro_id,
+    normalize_product_code,
+    one_by_identity_key,
+)
+from app.services.supplier_identity import (
+    normalize_supplier_code,
+    normalize_supplier_name,
+    normalize_supplier_orderpro_id,
+    one_by_supplier_key,
+)
 
 
 PRODUCT_FIELDS = (
@@ -100,7 +111,7 @@ def load_product_csv(path: str | Path) -> dict[str, dict[str, Any]]:
     with csv_path.open(newline="", encoding="utf-8-sig") as csv_file:
         reader = csv.DictReader(csv_file)
         for row in reader:
-            sku = clean_text(row.get("sku"))
+            sku = normalize_product_code(row.get("sku"))
             if sku:
                 rows_by_sku[sku] = row
     return rows_by_sku
@@ -203,16 +214,9 @@ def apply_inventory_sync(
     synced_at: datetime,
 ) -> dict[str, Any]:
     sync_time = sync_time_without_timezone(synced_at)
-    product_by_orderpro_id = {
-        str(row.orderpro_id): row
-        for row in db.query(Product).all()
-        if row.orderpro_id
-    }
-    product_by_sku = {
-        row.orderpro_sku: row
-        for row in db.query(Product).all()
-        if row.orderpro_sku
-    }
+    products = db.query(Product).all()
+    product_by_orderpro_id = one_by_identity_key(products, "orderpro_id", normalize_orderpro_id)
+    product_by_sku = one_by_identity_key(products, "orderpro_sku", normalize_product_code)
     warehouse_by_orderpro_id = {
         str(row.orderpro_id): row
         for row in db.query(Warehouse).all()
@@ -232,9 +236,9 @@ def apply_inventory_sync(
     current_stock_by_product_id: dict[int, float] = defaultdict(float)
 
     for row in inventory:
-        orderpro_product_id = clean_text(row.get("product_id"))
+        orderpro_product_id = normalize_orderpro_id(row.get("product_id"))
         product_payload = row.get("product") if isinstance(row.get("product"), dict) else {}
-        nested_sku = clean_text(product_payload.get("sku"))
+        nested_sku = normalize_product_code(product_payload.get("sku"))
         product = (product_by_orderpro_id.get(orderpro_product_id) if orderpro_product_id else None) or (
             product_by_sku.get(nested_sku) if nested_sku else None
         )
@@ -343,16 +347,9 @@ def apply_order_sync(
     synced_at: datetime,
 ) -> dict[str, Any]:
     sync_time = sync_time_without_timezone(synced_at)
-    product_by_orderpro_id = {
-        str(row.orderpro_id): row
-        for row in db.query(Product).all()
-        if row.orderpro_id
-    }
-    product_by_sku = {
-        row.orderpro_sku: row
-        for row in db.query(Product).all()
-        if row.orderpro_sku
-    }
+    products = db.query(Product).all()
+    product_by_orderpro_id = one_by_identity_key(products, "orderpro_id", normalize_orderpro_id)
+    product_by_sku = one_by_identity_key(products, "orderpro_sku", normalize_product_code)
     orders_by_orderpro_id = {
         str(row.orderpro_id): row
         for row in db.query(OrderProOrder).all()
@@ -456,10 +453,10 @@ def apply_supplier_sync(
     synced_at: datetime,
 ) -> dict[str, Any]:
     local_suppliers = db.query(Supplier).all()
-    by_orderpro_id = {str(row.orderpro_id): row for row in local_suppliers if row.orderpro_id}
-    by_code = {row.orderpro_code: row for row in local_suppliers if row.orderpro_code}
+    by_orderpro_id = one_by_supplier_key(local_suppliers, "orderpro_id", normalize_supplier_orderpro_id)
+    by_code = one_by_supplier_key(local_suppliers, "orderpro_code", normalize_supplier_code)
     by_normalized_name = {
-        normalize_name(row.normalized_name or row.name): row
+        normalize_supplier_name(row.normalized_name or row.name): row
         for row in local_suppliers
         if row.normalized_name or row.name
     }
@@ -471,8 +468,8 @@ def apply_supplier_sync(
     missing_identity = []
 
     for row in suppliers:
-        orderpro_id = clean_text(row.get("id"))
-        code = clean_text(row.get("code"))
+        orderpro_id = normalize_supplier_orderpro_id(row.get("id"))
+        code = normalize_supplier_code(row.get("code"))
         if not orderpro_id and not code:
             missing_identity.append({"name": clean_text(row.get("name"))})
             continue
@@ -482,12 +479,12 @@ def apply_supplier_sync(
         local = (by_orderpro_id.get(orderpro_id) if orderpro_id else None) or (by_code.get(code) if code else None)
         matched_by_name = False
         if local is None:
-            local = by_normalized_name.get(normalize_name(desired["name"]))
+            local = by_normalized_name.get(normalize_supplier_name(desired["name"]))
             matched_by_name = local is not None
         if local is None:
             local = Supplier(
                 **desired,
-                normalized_name=normalize_name(desired["name"]),
+                normalized_name=normalize_supplier_name(desired["name"]),
             )
             db.add(local)
             db.flush()
@@ -496,7 +493,7 @@ def apply_supplier_sync(
                 by_orderpro_id[orderpro_id] = local
             if code:
                 by_code[code] = local
-            by_normalized_name[normalize_name(local.normalized_name or local.name)] = local
+            by_normalized_name[normalize_supplier_name(local.normalized_name or local.name)] = local
             continue
 
         desired = safe_supplier_update_fields(db, local, desired)
@@ -504,7 +501,7 @@ def apply_supplier_sync(
         if changes:
             for field, value in desired.items():
                 setattr(local, field, value)
-            local.normalized_name = normalize_name(local.name)
+            local.normalized_name = normalize_supplier_name(local.name)
             update_row = {"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_code": code, "changed_fields": sorted(changes)}
             if matched_by_name:
                 update_row["match_type"] = "name"
@@ -547,12 +544,17 @@ def apply_product_sync(
 ) -> dict[str, Any]:
     local_products = db.query(Product).all()
     local_suppliers = db.query(Supplier).all()
-    local_by_orderpro_id = {str(row.orderpro_id): row for row in local_products if row.orderpro_id}
-    local_by_sku = {row.orderpro_sku: row for row in local_products if row.orderpro_sku}
-    supplier_by_code = {row.orderpro_code: row for row in local_suppliers if row.orderpro_code}
-    orderpro_supplier_codes = {clean_text(row.get("code")) for row in suppliers if clean_text(row.get("code"))}
-    orderpro_product_ids = {clean_text(row.get("id")) for row in products if clean_text(row.get("id"))}
-    orderpro_skus = {clean_text(row.get("sku")) for row in products if clean_text(row.get("sku"))}
+    local_by_orderpro_id = one_by_identity_key(local_products, "orderpro_id", normalize_orderpro_id)
+    local_by_sku = one_by_identity_key(local_products, "orderpro_sku", normalize_product_code)
+    supplier_by_code = one_by_supplier_key(local_suppliers, "orderpro_code", normalize_supplier_code)
+    orderpro_supplier_codes = {normalize_supplier_code(row.get("code")) for row in suppliers if normalize_supplier_code(row.get("code"))}
+    orderpro_product_ids = {normalize_orderpro_id(row.get("id")) for row in products if normalize_orderpro_id(row.get("id"))}
+    orderpro_skus = {normalize_product_code(row.get("sku")) for row in products if normalize_product_code(row.get("sku"))}
+    product_csv_by_sku = {
+        normalize_product_code(key): value
+        for key, value in product_csv_rows.items()
+        if normalize_product_code(key)
+    }
 
     created = []
     updated = []
@@ -564,10 +566,10 @@ def apply_product_sync(
     deactivated = []
 
     for row in products:
-        orderpro_id = clean_text(row.get("id"))
-        sku = clean_text(row.get("sku"))
-        csv_row = product_csv_rows.get(sku or "")
-        supplier_code = clean_text(csv_row.get("supplier_code")) if csv_row else None
+        orderpro_id = normalize_orderpro_id(row.get("id"))
+        sku = normalize_product_code(row.get("sku"))
+        csv_row = product_csv_by_sku.get(sku or "")
+        supplier_code = normalize_supplier_code(csv_row.get("supplier_code")) if csv_row else None
         supplier_sku = clean_text(csv_row.get("supplier_sku")) if csv_row else None
 
         if not csv_row:
@@ -611,9 +613,9 @@ def apply_product_sync(
 
     if mark_missing_inactive:
         for product in db.query(Product).filter(Product.source_system == "orderpro").all():
-            if product.orderpro_id and str(product.orderpro_id) in orderpro_product_ids:
+            if product.orderpro_id and normalize_orderpro_id(product.orderpro_id) in orderpro_product_ids:
                 continue
-            if product.orderpro_sku and product.orderpro_sku in orderpro_skus:
+            if product.orderpro_sku and normalize_product_code(product.orderpro_sku) in orderpro_skus:
                 continue
             if product.is_active:
                 product.is_active = False
@@ -658,15 +660,15 @@ def apply_product_sync(
 
 def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str, Any]:
     local_suppliers = db.query(Supplier).all()
-    by_orderpro_id = {str(row.orderpro_id): row for row in local_suppliers if row.orderpro_id}
-    by_code = {row.orderpro_code: row for row in local_suppliers if row.orderpro_code}
+    by_orderpro_id = one_by_supplier_key(local_suppliers, "orderpro_id", normalize_supplier_orderpro_id)
+    by_code = one_by_supplier_key(local_suppliers, "orderpro_code", normalize_supplier_code)
     by_normalized_name = {
-        normalize_name(row.normalized_name or row.name): row
+        normalize_supplier_name(row.normalized_name or row.name): row
         for row in local_suppliers
         if row.normalized_name or row.name
     }
-    orderpro_ids = {clean_text(row.get("id")) for row in suppliers if clean_text(row.get("id"))}
-    orderpro_codes = {clean_text(row.get("code")) for row in suppliers if clean_text(row.get("code"))}
+    orderpro_ids = {normalize_supplier_orderpro_id(row.get("id")) for row in suppliers if normalize_supplier_orderpro_id(row.get("id"))}
+    orderpro_codes = {normalize_supplier_code(row.get("code")) for row in suppliers if normalize_supplier_code(row.get("code"))}
 
     to_create = []
     to_update = []
@@ -675,8 +677,8 @@ def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str
     missing_identity = []
 
     for row in suppliers:
-        orderpro_id = clean_text(row.get("id"))
-        code = clean_text(row.get("code"))
+        orderpro_id = normalize_supplier_orderpro_id(row.get("id"))
+        code = normalize_supplier_code(row.get("code"))
         if not orderpro_id and not code:
             missing_identity.append({"name": clean_text(row.get("name"))})
             continue
@@ -685,7 +687,7 @@ def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str
         local = (by_orderpro_id.get(orderpro_id) if orderpro_id else None) or (by_code.get(code) if code else None)
         matched_by = "identity" if local is not None else None
         if local is None:
-            local = by_normalized_name.get(normalize_name(desired["name"]))
+            local = by_normalized_name.get(normalize_supplier_name(desired["name"]))
             matched_by = "name" if local is not None else None
         if local is None:
             to_create.append(desired)
@@ -705,8 +707,8 @@ def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str
         {"local_id": row.id, "name": row.name, "orderpro_id": row.orderpro_id, "orderpro_code": row.orderpro_code}
         for row in local_suppliers
         if (
-            (row.orderpro_id and str(row.orderpro_id) not in orderpro_ids)
-            or (row.orderpro_code and row.orderpro_code not in orderpro_codes)
+            (row.orderpro_id and normalize_supplier_orderpro_id(row.orderpro_id) not in orderpro_ids)
+            or (row.orderpro_code and normalize_supplier_code(row.orderpro_code) not in orderpro_codes)
         )
     ]
 
@@ -741,10 +743,10 @@ def plan_product_sync(
 ) -> dict[str, Any]:
     local_products = db.query(Product).all()
     local_suppliers = db.query(Supplier).all()
-    local_by_orderpro_id = {str(row.orderpro_id): row for row in local_products if row.orderpro_id}
-    local_by_sku = {row.orderpro_sku: row for row in local_products if row.orderpro_sku}
-    local_supplier_by_code = {row.orderpro_code: row for row in local_suppliers if row.orderpro_code}
-    orderpro_supplier_codes = {clean_text(row.get("code")) for row in suppliers if clean_text(row.get("code"))}
+    local_by_orderpro_id = one_by_identity_key(local_products, "orderpro_id", normalize_orderpro_id)
+    local_by_sku = one_by_identity_key(local_products, "orderpro_sku", normalize_product_code)
+    local_supplier_by_code = one_by_supplier_key(local_suppliers, "orderpro_code", normalize_supplier_code)
+    orderpro_supplier_codes = {normalize_supplier_code(row.get("code")) for row in suppliers if normalize_supplier_code(row.get("code"))}
 
     to_create = []
     to_update = []
@@ -758,12 +760,17 @@ def plan_product_sync(
     field_limit_violations = []
     would_assign_supplier = []
     without_supplier = []
+    product_csv_by_sku = {
+        normalize_product_code(key): value
+        for key, value in product_csv_rows.items()
+        if normalize_product_code(key)
+    }
 
     for row in products:
-        orderpro_id = clean_text(row.get("id"))
-        sku = clean_text(row.get("sku"))
-        csv_row = product_csv_rows.get(sku or "")
-        supplier_code = clean_text(csv_row.get("supplier_code")) if csv_row else None
+        orderpro_id = normalize_orderpro_id(row.get("id"))
+        sku = normalize_product_code(row.get("sku"))
+        csv_row = product_csv_by_sku.get(sku or "")
+        supplier_code = normalize_supplier_code(csv_row.get("supplier_code")) if csv_row else None
         supplier_sku = clean_text(csv_row.get("supplier_sku")) if csv_row else None
 
         if not csv_row:
@@ -862,13 +869,13 @@ def plan_inventory_sync(
     local_warehouses = db.query(Warehouse).all()
     local_positions = db.query(InventoryPosition).all()
 
-    product_by_orderpro_id = {str(row.orderpro_id): row for row in local_products if row.orderpro_id}
-    product_by_sku = {row.orderpro_sku: row for row in local_products if row.orderpro_sku}
+    product_by_orderpro_id = one_by_identity_key(local_products, "orderpro_id", normalize_orderpro_id)
+    product_by_sku = one_by_identity_key(local_products, "orderpro_sku", normalize_product_code)
     planned_product_by_orderpro_id = {
-        clean_text(row.get("id")): row for row in (planned_products or []) if clean_text(row.get("id"))
+        normalize_orderpro_id(row.get("id")): row for row in (planned_products or []) if normalize_orderpro_id(row.get("id"))
     }
     planned_product_by_sku = {
-        clean_text(row.get("sku")): row for row in (planned_products or []) if clean_text(row.get("sku"))
+        normalize_product_code(row.get("sku")): row for row in (planned_products or []) if normalize_product_code(row.get("sku"))
     }
     warehouse_by_orderpro_id = {str(row.orderpro_id): row for row in local_warehouses if row.orderpro_id}
 
@@ -889,9 +896,9 @@ def plan_inventory_sync(
     warehouse_updates_seen: set[str] = set()
 
     for row in inventory:
-        orderpro_product_id = clean_text(row.get("product_id"))
+        orderpro_product_id = normalize_orderpro_id(row.get("product_id"))
         product_payload = row.get("product") if isinstance(row.get("product"), dict) else {}
-        nested_sku = clean_text(product_payload.get("sku"))
+        nested_sku = normalize_product_code(product_payload.get("sku"))
         product = (product_by_orderpro_id.get(orderpro_product_id) if orderpro_product_id else None) or (
             product_by_sku.get(nested_sku) if nested_sku else None
         )
@@ -994,8 +1001,8 @@ def plan_inventory_sync(
 def plan_order_sync(db: Session, orders: list[dict[str, Any]]) -> dict[str, Any]:
     local_products = db.query(Product).all()
     local_orders = db.query(OrderProOrder).all()
-    product_by_orderpro_id = {str(row.orderpro_id): row for row in local_products if row.orderpro_id}
-    product_by_sku = {row.orderpro_sku: row for row in local_products if row.orderpro_sku}
+    product_by_orderpro_id = one_by_identity_key(local_products, "orderpro_id", normalize_orderpro_id)
+    product_by_sku = one_by_identity_key(local_products, "orderpro_sku", normalize_product_code)
     order_by_orderpro_id = {str(row.orderpro_id): row for row in local_orders if row.orderpro_id}
 
     orders_to_create = []
@@ -1127,8 +1134,8 @@ def orders_not_requested() -> dict[str, Any]:
 
 def desired_supplier_fields(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        "orderpro_id": clean_text(row.get("id")),
-        "orderpro_code": clean_text(row.get("code")),
+        "orderpro_id": normalize_supplier_orderpro_id(row.get("id")),
+        "orderpro_code": normalize_supplier_code(row.get("code")),
         "name": clean_text(row.get("name")) or "Unnamed Supplier",
         "email": clean_text(row.get("email")),
         "phone": clean_text(row.get("phone")),
@@ -1374,8 +1381,8 @@ def resolve_order_item_product(
     product_by_orderpro_id: dict[str, Product],
     product_by_sku: dict[str, Product],
 ) -> Product | None:
-    orderpro_product_id = order_item_product_id(item_row)
-    sku = order_item_sku(item_row)
+    orderpro_product_id = normalize_orderpro_id(order_item_product_id(item_row))
+    sku = normalize_product_code(order_item_sku(item_row))
     return (product_by_orderpro_id.get(orderpro_product_id) if orderpro_product_id else None) or (
         product_by_sku.get(sku) if sku else None
     )

@@ -5,6 +5,8 @@ from app.db.base import Base
 
 
 class ProductMasterItem(Base):
+    """Legacy master item evidence used for migration and diagnostics."""
+
     __tablename__ = "product_master_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
