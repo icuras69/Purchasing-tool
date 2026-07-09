@@ -8,8 +8,11 @@ from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
 from app.models.purchase_order import PurchaseOrder
 from app.models.recommendation import Recommendation
-from app.services.forecasting import build_forecast
 from app.services.forecast_input_reconciliation import profile_or_effective_inputs
+from app.services.recommendation_audit import (
+    explain_product_recommendation,
+    validate_product_can_create_reorder_recommendation,
+)
 from app.services.purchase_order_drafting import (
     recalculate_purchase_order_total,
     snapshot_purchase_order_line,
@@ -53,10 +56,18 @@ def create_reorder_recommendation_for_product(
     if not product:
         raise RecommendationError("Product not found.", status_code=404)
 
-    forecast = build_forecast(db, product)
+    explanation = explain_product_recommendation(db, product.id)
+    if explanation is None:
+        raise RecommendationError("Product not found.", status_code=404)
+    try:
+        validate_product_can_create_reorder_recommendation(explanation)
+    except ValueError as error:
+        raise RecommendationError(str(error)) from error
+
+    forecast = explanation["forecast_snapshot"]
     supplier_context = forecast.get("supplier_context") or {}
-    if supplier_context.get("mapping_source") == "missing":
-        raise RecommendationError("Product is missing an OrderPro supplier mapping.")
+    if supplier_context.get("mapping_source") != "orderpro_product_supplier":
+        raise RecommendationError("Product is missing a canonical supplier assignment.")
 
     quantity = recommended_quantity(forecast, product)
     effective_inputs = profile_or_effective_inputs(db, product)

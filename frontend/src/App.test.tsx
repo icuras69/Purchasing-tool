@@ -774,7 +774,15 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
     forecast_snapshot: {
       recommended_action: "order_now",
       risk_level: "high",
+      current_stock: 1,
+      eligible_order_count: 4,
+      units_sold_in_window: 18,
+      avg_daily_usage: 0.6,
+      lead_time_days_used: 4,
+      days_until_stockout: 1.67,
       reorder_point: 12,
+      input_blocking_issues: [],
+      input_warning_issues: ["missing_pack_size"],
       explanation: "Stock is below reorder point.",
     },
     supplier_context_snapshot: {
@@ -3077,6 +3085,9 @@ describe("App mapping review workflow", () => {
 
     expect(await screen.findByText("Recommendation 900")).toBeInTheDocument();
     const detail = screen.getByLabelText("Recommendation details");
+    expect(within(detail).getAllByText("Mapped Product").length).toBeGreaterThan(0);
+    expect(within(detail).getByText("18.26")).toBeInTheDocument();
+    expect(within(detail).getByText("missing_pack_size")).toBeInTheDocument();
     expect(within(detail).getAllByText("Stock is below reorder point.").length).toBeGreaterThan(0);
     expect(screen.getByText("ACME-1")).toBeInTheDocument();
     expect(screen.getByText("Acme Product Pack")).toBeInTheDocument();

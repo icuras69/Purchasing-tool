@@ -1,8 +1,11 @@
+from datetime import date
+
 from app.models.product import Product
 from app.models.product_master_item import ProductMasterItem
 from app.models.product_supplier import ProductSupplier
 from app.models.product_supplier_assignment_review import ProductSupplierAssignmentReview
 from app.models.supplier import Supplier
+from app.models.usage_history import UsageHistory
 from app.services.direct_supplier_repair import plan_direct_supplier_repair, save_direct_supplier_repair_report
 from app.services.forecasting import build_forecast
 from app.services.recommendations import create_reorder_recommendation_for_product
@@ -310,6 +313,15 @@ def test_product_3020_style_case_promotes_and_unblocks_forecast_and_recommendati
         sales_price=255.5,
         match_status="matched",
         match_method="exact_barcode",
+    )
+    db_session.add(
+        UsageHistory(
+            product_id=product_obj.id,
+            date=date(2025, 6, 3),
+            qty_used=6,
+            net_qty=6,
+            source_system="test",
+        )
     )
     db_session.commit()
 

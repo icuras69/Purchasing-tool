@@ -259,11 +259,11 @@ def test_recommendation_without_supplier_mapping_is_blocked_safely(client, db_se
     response = client.post(f"/recommendations/reorder/{product.id}")
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Product is missing an OrderPro supplier mapping."
+    assert response.json()["detail"] == "Product is missing a canonical supplier assignment."
     assert db_session.query(Recommendation).count() == 0
 
 
-def test_legacy_supplier_text_creates_reviewable_recommendation_without_structured_mapping(client, db_session):
+def test_legacy_supplier_text_does_not_create_actionable_recommendation_without_supplier_id(client, db_session):
     product = Product(
         name="Legacy Supplier Recommendation Product",
         supplier="Legacy Supplier Text",
@@ -285,13 +285,108 @@ def test_legacy_supplier_text_creates_reviewable_recommendation_without_structur
     )
     db_session.commit()
 
-    payload = create_recommendation(client, product.id)
+    response = client.post(f"/recommendations/reorder/{product.id}")
 
-    assert payload["supplier_id"] is None
-    assert payload["recommended_supplier_name"] == "Legacy Supplier Text"
-    assert payload["supplier_context_snapshot"]["mapping_source"] == "legacy_product"
-    assert payload["supplier_context_snapshot"]["needs_supplier_mapping"] is True
-    assert "Structured OrderPro supplier mapping is missing" in payload["reason"]
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Product is missing a canonical supplier assignment."
+    assert db_session.query(Recommendation).count() == 0
+
+
+def test_reorder_recommendation_requires_demand_signal(client, db_session):
+    supplier = Supplier(
+        name="No Demand Supplier",
+        normalized_name="NO DEMAND SUPPLIER",
+        orderpro_id="supplier-no-demand",
+        orderpro_code="NO-DEMAND",
+        lead_time_days=4,
+    )
+    product = Product(
+        name="No Demand Product",
+        orderpro_id="no-demand-product",
+        orderpro_sku="NO-DEMAND",
+        source_system="orderpro",
+        supplier_record=supplier,
+        current_stock=0,
+        safety_stock=10,
+        min_order_qty=1,
+        cost_price=5.0,
+    )
+    db_session.add_all([supplier, product])
+    db_session.commit()
+
+    response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Product is missing demand history or open demand."
+    assert db_session.query(Recommendation).count() == 0
+
+
+def test_explain_recommendation_for_actionable_low_stock_product(client, db_session):
+    product, supplier, _mapping = seed_recommendation_product(db_session)
+
+    response = client.get(f"/recommendations/explain?product_id={product.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["product_id"] == product.id
+    assert payload["product_name"] == product.name
+    assert payload["supplier_id"] == supplier.id
+    assert payload["supplier_name"] == supplier.name
+    assert payload["status"] == "actionable"
+    assert payload["recommended_quantity"] > 0
+    assert payload["current_stock"] == product.current_stock
+    assert payload["demand_rows"] == 1
+    assert payload["monthly_average_demand"] > 0
+    assert payload["lead_time_days"] == supplier.lead_time_days
+    assert payload["blockers"] == []
+    assert any("supplier assigned" in reason for reason in payload["reasons"])
+    assert any("demand history" in reason for reason in payload["reasons"])
+
+
+def test_explain_recommendation_for_blocked_product_lists_blockers(client, db_session):
+    product = Product(name="Blocked Recommendation Product", current_stock=None)
+    db_session.add(product)
+    db_session.commit()
+
+    response = client.get(f"/recommendations/explain?product_id={product.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "blocked"
+    assert "Missing supplier" in payload["blockers"]
+    assert "No demand history" in payload["blockers"]
+    assert "Missing lead time" in payload["blockers"]
+    assert payload["recommended_quantity"] == 0
+
+
+def test_recommendation_audit_flags_suspicious_stored_recommendation(client, db_session):
+    product = Product(name="Suspicious Stored Recommendation Product", current_stock=10)
+    db_session.add(product)
+    db_session.flush()
+    db_session.add(
+        Recommendation(
+            product_id=product.id,
+            recommended_qty=1,
+            risk_level="medium",
+            recommendation_type="reorder",
+            status="pending_review",
+            reason="Legacy recommendation created before supplier cleanup.",
+            generated_by="test",
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/recommendations/audit")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["recommendations_evaluated"] == 1
+    assert payload["summary"]["suspicious_recommendations"] == 1
+    item = payload["items"][0]
+    assert item["product_id"] == product.id
+    assert item["explanation_status"] == "blocked"
+    assert "Actionable recommendation is missing supplier" in item["suspicious_issues"]
+    assert "Actionable recommendation has no demand history" in item["suspicious_issues"]
 
 
 def test_rejected_product_supplier_is_not_used_for_recommendation(client, db_session):

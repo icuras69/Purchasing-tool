@@ -402,6 +402,22 @@ function snapshotValue(snapshot: Record<string, unknown> | null | undefined, key
   return "-";
 }
 
+function snapshotListValue(snapshot: Record<string, unknown> | null | undefined, key: string): string {
+  const value = snapshot?.[key];
+  if (Array.isArray(value)) {
+    return value.length ? value.map(String).join(", ") : "-";
+  }
+  return snapshotValue(snapshot, key);
+}
+
+function monthlyDemandFromSnapshot(snapshot: Record<string, unknown> | null | undefined): string {
+  const avgDailyUsage = snapshot?.avg_daily_usage;
+  if (typeof avgDailyUsage !== "number") {
+    return "-";
+  }
+  return String(Math.round(avgDailyUsage * 30.4375 * 100) / 100);
+}
+
 function formatDate(value: string | null | undefined): string {
   if (!value) {
     return "-";
@@ -2408,6 +2424,18 @@ function RecommendationDetail({
       </section>
       <dl className="detail-list">
         <div>
+          <dt>Product ID</dt>
+          <dd>{recommendation.product_id}</dd>
+        </div>
+        <div>
+          <dt>Product</dt>
+          <dd>{formatValue(recommendation.product_name)}</dd>
+        </div>
+        <div>
+          <dt>Supplier</dt>
+          <dd>{formatValue(recommendation.supplier_name ?? recommendation.recommended_supplier_name)}</dd>
+        </div>
+        <div>
           <dt>Status</dt>
           <dd>
             <span className={recommendationStatusClassName(recommendation.status)}>
@@ -2477,6 +2505,30 @@ function RecommendationDetail({
             <dd>{snapshotValue(forecastSnapshot, "risk_level")}</dd>
           </div>
           <div>
+            <dt>Current stock</dt>
+            <dd>{snapshotValue(forecastSnapshot, "current_stock")}</dd>
+          </div>
+          <div>
+            <dt>Demand rows</dt>
+            <dd>{snapshotValue(forecastSnapshot, "eligible_order_count")}</dd>
+          </div>
+          <div>
+            <dt>Recent demand</dt>
+            <dd>{snapshotValue(forecastSnapshot, "units_sold_in_window")}</dd>
+          </div>
+          <div>
+            <dt>Average monthly demand</dt>
+            <dd>{monthlyDemandFromSnapshot(forecastSnapshot)}</dd>
+          </div>
+          <div>
+            <dt>Lead time</dt>
+            <dd>{snapshotValue(forecastSnapshot, "lead_time_days_used")}</dd>
+          </div>
+          <div>
+            <dt>Days of cover</dt>
+            <dd>{snapshotValue(forecastSnapshot, "days_until_stockout")}</dd>
+          </div>
+          <div>
             <dt>Reorder point</dt>
             <dd>{snapshotValue(forecastSnapshot, "reorder_point")}</dd>
           </div>
@@ -2495,6 +2547,14 @@ function RecommendationDetail({
           <div>
             <dt>Explanation</dt>
             <dd>{snapshotValue(forecastSnapshot, "explanation")}</dd>
+          </div>
+          <div>
+            <dt>Blockers</dt>
+            <dd>{snapshotListValue(forecastSnapshot, "input_blocking_issues")}</dd>
+          </div>
+          <div>
+            <dt>Warnings</dt>
+            <dd>{snapshotListValue(forecastSnapshot, "input_warning_issues")}</dd>
           </div>
         </dl>
       </section>

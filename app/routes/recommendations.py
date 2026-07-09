@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
@@ -21,6 +21,10 @@ from app.services.recommendations import (
     convert_recommendation_to_draft_po,
     create_reorder_recommendation_for_product,
     reject_recommendation,
+)
+from app.services.recommendation_audit import (
+    audit_existing_recommendations,
+    explain_product_recommendation,
 )
 from app.services.perf_logging import perf_timer
 
@@ -91,6 +95,22 @@ def list_recommendations(db: Session = Depends(get_db)):
         recommendations = recommendation_query(db).order_by(Recommendation.id.asc()).all()
         perf["returned"] = len(recommendations)
         return [serialize_recommendation(recommendation) for recommendation in recommendations]
+
+
+@router.get("/audit")
+def audit_recommendations(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return audit_existing_recommendations(db, limit=limit)
+
+
+@router.get("/explain")
+def explain_recommendation(product_id: int = Query(..., ge=1), db: Session = Depends(get_db)):
+    explanation = explain_product_recommendation(db, product_id)
+    if explanation is None:
+        raise HTTPException(status_code=404, detail="Product not found.")
+    return explanation
 
 
 @router.get("/{recommendation_id}", response_model=RecommendationResponse)
