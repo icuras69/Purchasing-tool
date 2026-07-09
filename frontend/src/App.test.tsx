@@ -1194,9 +1194,14 @@ describe("App mapping review workflow", () => {
     render(<App />);
 
     expect(screen.getByRole("button", { name: "Products" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Suggested demo flow")).toBeInTheDocument();
+    expect(
+      screen.getByText("Search and review the current product catalogue using our internal Product ID."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Search Product ID 3020 in Products.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Unmapped Products" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Weak Mappings" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Supplier Mappings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Supplier Mapping" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Supplier Forecast" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Forecast Readiness" })).toBeInTheDocument();
@@ -1620,7 +1625,7 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("Summer: 33")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Seasonality is advisory and does not automatically change recommended purchase quantity.",
+        "Review seasonal sales patterns that may affect purchasing decisions. Seasonality is advisory and does not automatically change recommended purchase quantity.",
       ),
     ).toBeInTheDocument();
   });
@@ -1923,7 +1928,7 @@ describe("App mapping review workflow", () => {
     await userEvent.click(screen.getByLabelText("Select Selectable Product for draft PO"));
 
     expect(screen.getByText("1 selected")).toBeInTheDocument();
-    expect(screen.getByText("7 · Selectable Product · Draft Supplier")).toBeInTheDocument();
+    expect(screen.getByText("Product ID 7 - Selectable Product - Draft Supplier")).toBeInTheDocument();
     expect(screen.getByText("OrderPro supplier IDs in selection: 6")).toBeInTheDocument();
   });
 
@@ -2047,7 +2052,7 @@ describe("App mapping review workflow", () => {
     vi.mocked(fetchProductSuppliers).mockResolvedValue([mockSupplierMapping()]);
 
     render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mapping" }));
 
     expect(await screen.findByText("Mapped Product")).toBeInTheDocument();
     expect(screen.getByText("Acme Supplies")).toBeInTheDocument();
@@ -2069,7 +2074,7 @@ describe("App mapping review workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Weak Mappings" }));
     expect(await screen.findByText("No weak mappings found.")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mapping" }));
     expect(await screen.findByText("No supplier mappings found.")).toBeInTheDocument();
   });
 
@@ -2091,7 +2096,7 @@ describe("App mapping review workflow", () => {
     await userEvent.type(screen.getByLabelText("Product ID"), "1");
     await userEvent.click(screen.getByRole("button", { name: "Fetch Forecast" }));
 
-    expect(await screen.findByText("Mapped Product (1)")).toBeInTheDocument();
+    expect(await screen.findByText("Mapped Product")).toBeInTheDocument();
     expect(screen.getByText("Acme Supplies")).toBeInTheDocument();
     expect(screen.getByText("ACME-1")).toBeInTheDocument();
     expect(screen.getByText("Acme Product Pack")).toBeInTheDocument();
@@ -2264,7 +2269,7 @@ describe("App mapping review workflow", () => {
     vi.mocked(fetchProductSuppliers).mockResolvedValue([mockSupplierMapping({ is_preferred: false })]);
 
     render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mapping" }));
     await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
@@ -2276,7 +2281,7 @@ describe("App mapping review workflow", () => {
     vi.mocked(fetchProductSuppliers).mockResolvedValue([mockSupplierMapping({ is_preferred: false })]);
 
     render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mapping" }));
     await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "Reject" }));
 
@@ -2288,7 +2293,7 @@ describe("App mapping review workflow", () => {
     vi.mocked(fetchProductSuppliers).mockResolvedValue([mockSupplierMapping({ is_preferred: false })]);
 
     render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mapping" }));
     await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "Set Preferred" }));
 
@@ -2335,7 +2340,7 @@ describe("App mapping review workflow", () => {
     ]);
 
     render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "Supplier Mappings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Mapping" }));
 
     const rejected = await screen.findByText("rejected");
     expect(rejected).toHaveClass("rejected");
@@ -3054,7 +3059,7 @@ describe("App mapping review workflow", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
 
-    expect(await screen.findByText("Mapped Product (1)")).toBeInTheDocument();
+    expect(await screen.findByText("Mapped Product")).toBeInTheDocument();
     expect(screen.getByText("pending_review")).toBeInTheDocument();
     expect(screen.getByText("6")).toBeInTheDocument();
     expect(screen.getByText("57")).toBeInTheDocument();
@@ -3067,7 +3072,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
 
     expect(await screen.findByText("Recommendation 900")).toBeInTheDocument();
@@ -3086,7 +3091,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
 
     expect(await screen.findByRole("button", { name: "Generate AI Explanation" })).toBeInTheDocument();
@@ -3103,7 +3108,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
 
@@ -3122,7 +3127,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
 
@@ -3143,7 +3148,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
 
@@ -3164,7 +3169,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
 
@@ -3182,7 +3187,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await userEvent.click(await screen.findByRole("button", { name: "Generate AI Explanation" }));
 
@@ -3198,7 +3203,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await userEvent.click(await screen.findByRole("button", { name: "Accept" }));
 
@@ -3211,7 +3216,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await userEvent.type(await screen.findByLabelText("Reject reason"), "Too early");
     await userEvent.click(screen.getByRole("button", { name: "Reject" }));
@@ -3230,7 +3235,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await userEvent.click(await screen.findByRole("button", { name: "Convert to Draft PO" }));
 
@@ -3247,7 +3252,7 @@ describe("App mapping review workflow", () => {
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
-    await screen.findByText("Mapped Product (1)");
+    await screen.findByText("Mapped Product");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
     await screen.findByText("Recommendation 900");
 

@@ -127,18 +127,18 @@ interface ResourceState<T> {
 
 const tabs: Array<{ id: TabId; label: string }> = [
   { id: "products", label: "Products" },
-  { id: "unmapped", label: "Unmapped Products" },
-  { id: "weak", label: "Weak Mappings" },
-  { id: "mappings", label: "Supplier Mappings" },
+  { id: "mappings", label: "Supplier Mapping" },
+  { id: "supplier-cleanup", label: "Supplier Cleanup" },
+  { id: "demand-history", label: "Demand History" },
+  { id: "forecast-readiness", label: "Forecast Readiness" },
   { id: "forecast", label: "Forecast" },
   { id: "supplier-forecast", label: "Supplier Forecast" },
-  { id: "forecast-readiness", label: "Forecast Readiness" },
-  { id: "demand-history", label: "Demand History" },
-  { id: "supplier-assignment-review", label: "Supplier Assignment Review" },
-  { id: "supplier-cleanup", label: "Supplier Cleanup" },
   { id: "seasonality", label: "Seasonality" },
-  { id: "purchase-orders", label: "Purchase Orders" },
   { id: "recommendations", label: "Recommendations" },
+  { id: "purchase-orders", label: "Purchase Orders" },
+  { id: "supplier-assignment-review", label: "Supplier Assignment Review" },
+  { id: "unmapped", label: "Unmapped Products" },
+  { id: "weak", label: "Weak Mappings" },
 ];
 
 const monthNames = [
@@ -788,7 +788,7 @@ function PurchasingApp({
       <header className="app-header">
         <div>
           <h1>Purchasing AI</h1>
-          <p>Product supplier mapping review</p>
+          <p>Inventory, supplier readiness, demand history, recommendations, and draft purchase orders.</p>
         </div>
         <div className="auth-status">
           <span>{admin.email || "Admin"}</span>
@@ -821,8 +821,26 @@ function PurchasingApp({
         ))}
       </nav>
 
+      <section className="detail-panel" aria-label="Suggested demo flow">
+        <strong>Suggested demo flow:</strong>
+        <ol>
+          <li>Search Product ID 3020 in Products.</li>
+          <li>Confirm supplier assignment.</li>
+          <li>Review demand history coverage.</li>
+          <li>Check forecast readiness.</li>
+          <li>Review recommendation.</li>
+          <li>Create or review a purchase order.</li>
+        </ol>
+      </section>
+
       {activeTab === "products" && (
         <div className="review-stack">
+          <section className="panel-heading" aria-label="Products overview">
+            <div>
+              <h2>Products</h2>
+              <p>Search and review the current product catalogue using our internal Product ID.</p>
+            </div>
+          </section>
           <DraftPoFromProductsPanel
             onViewPurchaseOrder={handleViewGeneratedPo}
             products={products.data}
@@ -877,22 +895,30 @@ function PurchasingApp({
       )}
 
       {activeTab === "mappings" && (
-        <SupplierMappingsTable
-          actionError={mappingActionError}
-          actionMappingId={actionMappingId}
-          mappings={filteredSupplierMappings}
-          onConfirm={(mappingId) =>
-            runMappingAction(mappingId, () => confirmProductSupplier(mappingId))
-          }
-          onReject={handleReject}
-          onSetPreferred={(mappingId) =>
-            runMappingAction(mappingId, () => setPreferredProductSupplier(mappingId))
-          }
-          onUnsetPreferred={(mappingId) =>
-            runMappingAction(mappingId, () => unsetPreferredProductSupplier(mappingId))
-          }
-          resource={supplierMappings}
-        />
+        <div className="review-stack">
+          <section className="panel-heading" aria-label="Supplier mapping overview">
+            <div>
+              <h2>Supplier Mapping</h2>
+              <p>Check which supplier is assigned to each product before forecasting and purchasing.</p>
+            </div>
+          </section>
+          <SupplierMappingsTable
+            actionError={mappingActionError}
+            actionMappingId={actionMappingId}
+            mappings={filteredSupplierMappings}
+            onConfirm={(mappingId) =>
+              runMappingAction(mappingId, () => confirmProductSupplier(mappingId))
+            }
+            onReject={handleReject}
+            onSetPreferred={(mappingId) =>
+              runMappingAction(mappingId, () => setPreferredProductSupplier(mappingId))
+            }
+            onUnsetPreferred={(mappingId) =>
+              runMappingAction(mappingId, () => unsetPreferredProductSupplier(mappingId))
+            }
+            resource={supplierMappings}
+          />
+        </div>
       )}
 
       {activeTab === "forecast" && <ForecastPanel />}
@@ -1110,7 +1136,7 @@ function DraftPoFromProductsPanel({
         <div className="selected-products">
           {selectedProducts.map((product) => (
             <span className="selected-pill" key={product.id}>
-              {product.id} · {product.name} · {supplierDisplayName(product)}
+              Product ID {product.id} - {product.name} - {supplierDisplayName(product)}
             </span>
           ))}
         </div>
@@ -1572,6 +1598,7 @@ function SupplierMappingsTable({
       <table>
         <thead>
           <tr>
+            <th>Product ID</th>
             <th>Product name</th>
             <th>Supplier name</th>
             <th>Supplier SKU</th>
@@ -1586,6 +1613,7 @@ function SupplierMappingsTable({
         <tbody>
           {mappings.map((mapping) => (
             <tr className={mapping.match_status === "rejected" ? "row-rejected" : undefined} key={mapping.id}>
+              <td>{mapping.product_id}</td>
               <td>{formatValue(mapping.product_name)}</td>
               <td>{formatValue(mapping.supplier_name)}</td>
               <td>{formatValue(mapping.supplier_sku)}</td>
@@ -1697,6 +1725,12 @@ function ForecastPanel() {
 
   return (
     <section className="forecast-view" aria-label="Product forecast">
+      <section className="panel-heading" aria-label="Forecast overview">
+        <div>
+          <h2>Forecast</h2>
+          <p>Load a single product forecast by Product ID and review the reorder calculation.</p>
+        </div>
+      </section>
       <form className="forecast-form" onSubmit={handleSubmit}>
         <label className="search-label">
           <span>Product ID</span>
@@ -1727,10 +1761,12 @@ function ForecastDetails({ forecast }: { forecast: ForecastResponse }) {
         <h2>Forecast</h2>
         <dl className="detail-list">
           <div>
+            <dt>Product ID</dt>
+            <dd>{forecast.product_id}</dd>
+          </div>
+          <div>
             <dt>Product</dt>
-            <dd>
-              {forecast.product_name} ({forecast.product_id})
-            </dd>
+            <dd>{forecast.product_name}</dd>
           </div>
           <div>
             <dt>Current stock</dt>
@@ -2116,6 +2152,12 @@ function RecommendationsPanel() {
 
   return (
     <div className="review-stack">
+      <section className="panel-heading" aria-label="Recommendations overview">
+        <div>
+          <h2>Recommendations</h2>
+          <p>See suggested reorder quantities based on stock, demand history, and supplier lead time.</p>
+        </div>
+      </section>
       <section className="detail-panel" aria-label="Create recommendation">
         <h2>Generate Reorder Recommendation</h2>
         <div className="state">
@@ -2188,7 +2230,8 @@ function RecommendationsTable({
       <table>
         <thead>
           <tr>
-            <th>ID</th>
+            <th>Recommendation ID</th>
+            <th>Product ID</th>
             <th>Product</th>
             <th>Supplier</th>
             <th>Qty</th>
@@ -2207,9 +2250,8 @@ function RecommendationsTable({
           {recommendations.map((recommendation) => (
             <tr key={recommendation.id}>
               <td>{recommendation.id}</td>
-              <td>
-                {recommendation.product_name ?? "-"} ({recommendation.product_id})
-              </td>
+              <td>{recommendation.product_id}</td>
+              <td>{recommendation.product_name ?? "-"}</td>
               <td>{formatValue(recommendation.supplier_name)}</td>
               <td>{formatValue(recommendation.recommended_quantity)}</td>
               <td>{formatValue(recommendation.estimated_unit_cost)}</td>
@@ -2541,6 +2583,9 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
   return (
     <section className="detail-panel" aria-label="Supplier forecast">
       <h2>Supplier Forecast</h2>
+      <p className="muted-text">
+        Review supplier-level forecasts and generate draft purchase orders from reorder quantities.
+      </p>
       <form className="mapping-form" onSubmit={handleSubmit}>
         <label>
           <span>Supplier ID</span>
@@ -3034,7 +3079,7 @@ function SupplierAssignmentReviewPanel() {
                   <td>
                     <strong>{row.name}</strong>
                     <div className="muted">
-                      ID {row.product_id} | {formatValue(row.brand)} | {formatValue(row.category)}
+                      Product ID {row.product_id} | {formatValue(row.brand)} | {formatValue(row.category)}
                     </div>
                   </td>
                   <td>{formatValue(row.orderpro_sku)}</td>
@@ -3283,7 +3328,7 @@ function ManualSupplierCleanupPanel() {
         <div>
           <h2>Supplier Cleanup</h2>
           <p>
-            Assign missing product suppliers locally after human review. This does not create suppliers or write back to OrderPro.
+            Review products that are missing supplier assignments and fix blockers. This does not create suppliers or write back to OrderPro.
           </p>
         </div>
         <button className="secondary-button" onClick={() => loadCleanup()} type="button">
@@ -3383,7 +3428,7 @@ function ManualSupplierCleanupPanel() {
                   <td>
                     <strong>{candidate.product_name}</strong>
                     <div className="muted">
-                      ID {candidate.product_id} | {formatValue(candidate.brand)} | {formatValue(candidate.category)}
+                      Product ID {candidate.product_id} | {formatValue(candidate.brand)} | {formatValue(candidate.category)}
                     </div>
                   </td>
                   <td>{formatValue(candidate.current_stock)}</td>
@@ -3594,7 +3639,7 @@ function ForecastReadinessPanel({ onNavigate }: { onNavigate: (tab: TabId) => vo
         <div>
           <h2>Forecast Readiness</h2>
           <p>
-            Deterministic reconciliation only. These inputs explain forecast quality and do not activate seasonality.
+            Check whether each product has the data needed for reliable reorder recommendations.
           </p>
         </div>
         <div className="action-row">
@@ -3732,7 +3777,7 @@ function ForecastReadinessPanel({ onNavigate }: { onNavigate: (tab: TabId) => vo
                   <td>{formatValue(row.sku)}</td>
                   <td>
                     <strong>{row.product_name}</strong>
-                    <div className="muted">ID {row.product_id}</div>
+                    <div className="muted">Product ID {row.product_id}</div>
                   </td>
                   <td>{formatValue(row.supplier_name)}</td>
                   <td>{formatValue(row.current_stock)}</td>
@@ -3901,7 +3946,7 @@ function DemandHistoryPanel() {
         <div>
           <h2>Demand History</h2>
           <p>
-            Inspect local historical demand coverage and import reviewed files with the dry-run CLI.
+            Review imported sales demand from 2022-2025 used by the forecasting engine.
           </p>
         </div>
         <div className="action-row">
@@ -4025,7 +4070,7 @@ function DemandHistoryPanel() {
                   <td>{formatValue(row.sku)}</td>
                   <td>
                     <strong>{row.product_name}</strong>
-                    <div className="muted">ID {row.product_id}</div>
+                    <div className="muted">Product ID {row.product_id}</div>
                     {!row.has_demand_history && <span className="status rejected">Missing history</span>}
                     {row.stale_demand && <span className="status needs-review">Stale demand</span>}
                   </td>
@@ -4063,6 +4108,7 @@ function DemandHistoryPanel() {
             <button className="secondary-button" onClick={() => setSelected(null)} type="button">Close</button>
           </div>
           <dl className="detail-list">
+            <div><dt>Product ID</dt><dd>{selected.product_id}</dd></div>
             <div><dt>SKU</dt><dd>{formatValue(selected.sku)}</dd></div>
             <div><dt>Supplier</dt><dd>{formatValue(selected.supplier_name)}</dd></div>
             <div><dt>Demand source</dt><dd>{demandSourceLabel(selected.demand_source)}</dd></div>
@@ -4261,7 +4307,7 @@ function SeasonalityPanel() {
           <div>
             <h2>Seasonality</h2>
             <p className="muted-text">
-              Seasonality is advisory and does not automatically change recommended purchase quantity.
+              Review seasonal sales patterns that may affect purchasing decisions. Seasonality is advisory and does not automatically change recommended purchase quantity.
             </p>
           </div>
           <label>
@@ -4798,6 +4844,12 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
 
   return (
     <div className="review-stack">
+      <section className="panel-heading" aria-label="Purchase orders overview">
+        <div>
+          <h2>Purchase Orders</h2>
+          <p>Create and manage purchase orders from approved recommendations.</p>
+        </div>
+      </section>
       <CreatePurchaseOrderForm creating={creating} onCreate={handleCreate} />
       <PurchaseOrdersTable
         onSelect={handleSelect}
@@ -5182,6 +5234,7 @@ function PurchaseOrderLinesTable({
       <table>
         <thead>
           <tr>
+            <th>Product ID</th>
             <th>Product</th>
             <th>Legacy ProductSupplier ID</th>
             <th>Supplier SKU</th>
@@ -5200,6 +5253,7 @@ function PurchaseOrderLinesTable({
         <tbody>
           {purchaseOrder.lines.map((line) => (
             <tr key={line.id}>
+              <td>{formatValue(line.product_id)}</td>
               <td>{formatValue(line.product_name ?? line.product_id)}</td>
               <td>{formatValue(line.product_supplier_id)}</td>
               <td>{formatValue(line.supplier_sku)}</td>
