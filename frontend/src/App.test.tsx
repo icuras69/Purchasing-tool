@@ -777,6 +777,11 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
       current_stock: 1,
       eligible_order_count: 4,
       units_sold_in_window: 18,
+      legacy_demand_quantity_mode: "net_qty",
+      demand_policy_status: "recent_or_current",
+      demand_history_end: "2026-07-01",
+      stale_demand_only: false,
+      legacy_demand_negative_or_return_rows: 1,
       avg_daily_usage: 0.6,
       lead_time_days_used: 4,
       days_until_stockout: 1.67,
@@ -3086,6 +3091,9 @@ describe("App mapping review workflow", () => {
     expect(await screen.findByText("Recommendation 900")).toBeInTheDocument();
     const detail = screen.getByLabelText("Recommendation details");
     expect(within(detail).getAllByText("Mapped Product").length).toBeGreaterThan(0);
+    expect(within(detail).getByText("net_qty")).toBeInTheDocument();
+    expect(within(detail).getByText("recent_or_current")).toBeInTheDocument();
+    expect(within(detail).getByText("2026-07-01")).toBeInTheDocument();
     expect(within(detail).getByText("18.26")).toBeInTheDocument();
     expect(within(detail).getByText("missing_pack_size")).toBeInTheDocument();
     expect(within(detail).getAllByText("Stock is below reorder point.").length).toBeGreaterThan(0);

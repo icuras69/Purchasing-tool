@@ -317,7 +317,7 @@ def test_product_3020_style_case_promotes_and_unblocks_forecast_and_recommendati
     db_session.add(
         UsageHistory(
             product_id=product_obj.id,
-            date=date(2025, 6, 3),
+            date=date(2026, 7, 1),
             qty_used=6,
             net_qty=6,
             source_system="test",

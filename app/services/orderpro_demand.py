@@ -32,6 +32,12 @@ class DemandResult:
     units_sold_in_window: float
     eligible_order_count: int
     excluded_order_count: int
+    legacy_quantity_mode: str | None = None
+    legacy_raw_units_in_window: float | None = None
+    legacy_negative_or_return_rows: int = 0
+    legacy_stale_days: int | None = None
+    stale_demand_only: bool = False
+    demand_policy_status: str | None = None
 
 
 def configured_historical_statuses() -> set[str]:

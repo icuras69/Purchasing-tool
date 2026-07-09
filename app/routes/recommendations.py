@@ -24,6 +24,7 @@ from app.services.recommendations import (
 )
 from app.services.recommendation_audit import (
     audit_existing_recommendations,
+    demand_policy_impact,
     explain_product_recommendation,
 )
 from app.services.perf_logging import perf_timer
@@ -111,6 +112,24 @@ def explain_recommendation(product_id: int = Query(..., ge=1), db: Session = Dep
     if explanation is None:
         raise HTTPException(status_code=404, detail="Product not found.")
     return explanation
+
+
+@router.get("/demand-policy-impact")
+def get_demand_policy_impact(
+    lookback_days: str = Query(default="all", pattern="^(90|180|365|all)$"),
+    quantity_mode: str = Query(default="net_qty", pattern="^(qty_used|net_qty)$"),
+    stale_days: int = Query(default=180, ge=1, le=3650),
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    parsed_lookback = -1 if lookback_days == "all" else int(lookback_days)
+    return demand_policy_impact(
+        db,
+        lookback_days=parsed_lookback,
+        quantity_mode=quantity_mode,
+        stale_days=stale_days,
+        limit=limit,
+    )
 
 
 @router.get("/{recommendation_id}", response_model=RecommendationResponse)

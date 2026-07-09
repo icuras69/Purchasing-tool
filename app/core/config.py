@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     orderpro_open_demand_statuses: str = "confirmed,packed,backorder"
     orderpro_excluded_demand_statuses: str = "cancelled"
     orderpro_demand_included_statuses: str = "shipped"
+    legacy_demand_quantity_mode: str = "net_qty"
+    legacy_demand_stale_days: int = 180
+    legacy_demand_lookback_days: int | None = None
+    allow_stale_demand_recommendations: bool = False
     auth_enabled: bool = True
     admin_email: str = ""
     admin_password_hash: str = ""
@@ -48,6 +52,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security_settings(self) -> "Settings":
+        if self.legacy_demand_quantity_mode not in {"net_qty", "qty_used"}:
+            raise ValueError("LEGACY_DEMAND_QUANTITY_MODE must be either 'net_qty' or 'qty_used'.")
+        if self.legacy_demand_stale_days <= 0:
+            raise ValueError("LEGACY_DEMAND_STALE_DAYS must be greater than zero.")
+        if self.legacy_demand_lookback_days is not None and self.legacy_demand_lookback_days <= 0:
+            raise ValueError("LEGACY_DEMAND_LOOKBACK_DAYS must be greater than zero or unset.")
         if not self.debug and self.auth_enabled:
             missing = [
                 name

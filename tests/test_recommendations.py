@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
@@ -7,6 +8,11 @@ from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.recommendation import Recommendation
 from app.models.supplier import Supplier
 from app.models.usage_history import UsageHistory
+from app.services.forecasting import calculate_usage_history_demand, legacy_usage_quantity
+
+
+RECENT_DEMAND_DATE = date(2026, 7, 1)
+STALE_DEMAND_DATE = date(2025, 1, 1)
 
 
 def seed_recommendation_product(
@@ -15,6 +21,7 @@ def seed_recommendation_product(
     match_status: str = "matched",
     product_overrides: dict | None = None,
     mapping_overrides: dict | None = None,
+    supplier_overrides: dict | None = None,
 ):
     product_defaults = {
         "name": "Recommendation Product",
@@ -28,13 +35,15 @@ def seed_recommendation_product(
     }
     product_defaults.update(product_overrides or {})
     product = Product(**product_defaults)
-    supplier = Supplier(
-        name="Recommendation Supplier",
-        normalized_name="RECOMMENDATION SUPPLIER",
-        orderpro_id="supplier-1",
-        orderpro_code="REC-SUP",
-        lead_time_days=4,
-    )
+    supplier_defaults = {
+        "name": "Recommendation Supplier",
+        "normalized_name": "RECOMMENDATION SUPPLIER",
+        "orderpro_id": f"supplier-{product.orderpro_id or product.name}",
+        "orderpro_code": f"REC-SUP-{product.orderpro_id or product.name}",
+        "lead_time_days": 4,
+    }
+    supplier_defaults.update(supplier_overrides or {})
+    supplier = Supplier(**supplier_defaults)
     db_session.add_all([product, supplier])
     db_session.flush()
 
@@ -59,7 +68,7 @@ def seed_recommendation_product(
     db_session.add(
         UsageHistory(
             product_id=product.id,
-            date=date(2026, 1, 1),
+            date=RECENT_DEMAND_DATE,
             qty_used=2,
             net_qty=2,
             source_system="test",
@@ -277,7 +286,7 @@ def test_legacy_supplier_text_does_not_create_actionable_recommendation_without_
     db_session.add(
         UsageHistory(
             product_id=product.id,
-            date=date(2026, 1, 1),
+            date=RECENT_DEMAND_DATE,
             qty_used=2,
             net_qty=2,
             source_system="test",
@@ -335,12 +344,131 @@ def test_explain_recommendation_for_actionable_low_stock_product(client, db_sess
     assert payload["status"] == "actionable"
     assert payload["recommended_quantity"] > 0
     assert payload["current_stock"] == product.current_stock
+    assert payload["demand_quantity_mode"] == "net_qty"
+    assert payload["demand_policy_status"] == "recent_or_current"
+    assert payload["stale_demand_only"] is False
+    assert payload["stale_demand_policy"] == "recent_or_not_legacy"
     assert payload["demand_rows"] == 1
     assert payload["monthly_average_demand"] > 0
     assert payload["lead_time_days"] == supplier.lead_time_days
     assert payload["blockers"] == []
     assert any("supplier assigned" in reason for reason in payload["reasons"])
     assert any("demand history" in reason for reason in payload["reasons"])
+
+
+def test_legacy_net_qty_reduces_returns_in_forecast_demand(db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+    db_session.add(
+        UsageHistory(
+            product_id=product.id,
+            date=date(2026, 7, 2),
+            qty_used=0,
+            qty_returned=1,
+            net_qty=-1,
+            source_system="test",
+        )
+    )
+    db_session.commit()
+
+    demand = calculate_usage_history_demand(db_session, product.id, quantity_mode="net_qty", today=RECENT_DEMAND_DATE)
+    qty_used_demand = calculate_usage_history_demand(db_session, product.id, quantity_mode="qty_used", today=RECENT_DEMAND_DATE)
+
+    assert demand.units_sold_in_window == 1
+    assert demand.legacy_raw_units_in_window == 1
+    assert demand.legacy_negative_or_return_rows == 1
+    assert qty_used_demand.units_sold_in_window == 2
+
+
+def test_missing_net_qty_falls_back_to_qty_used():
+    row = SimpleNamespace(qty_used=7, net_qty=None)
+
+    assert legacy_usage_quantity(row, "net_qty") == 7
+
+
+def test_negative_net_legacy_demand_does_not_create_actionable_reorder(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history.clear()
+    db_session.flush()
+    db_session.add(
+        UsageHistory(
+            product_id=product.id,
+            date=RECENT_DEMAND_DATE,
+            qty_used=0,
+            qty_returned=5,
+            net_qty=-5,
+            source_system="test",
+        )
+    )
+    db_session.commit()
+
+    explain_response = client.get(f"/recommendations/explain?product_id={product.id}")
+    create_response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert explain_response.status_code == 200
+    payload = explain_response.json()
+    assert payload["status"] == "monitor"
+    assert payload["recommended_quantity"] == 0
+    assert "Returns or negative rows affected legacy demand calculation" in payload["warnings"]
+    assert create_response.status_code == 400
+    assert create_response.json()["detail"] == "Product is not currently recommended for reorder."
+
+
+def test_stale_only_legacy_demand_requires_review_but_explains_advisory_quantity(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+
+    explain_response = client.get(f"/recommendations/explain?product_id={product.id}")
+    create_response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert explain_response.status_code == 200
+    payload = explain_response.json()
+    assert payload["status"] == "needs_review"
+    assert payload["readiness_status"] == "partially_ready"
+    assert payload["stale_demand_only"] is True
+    assert payload["stale_demand_policy"] == "manual_review_required"
+    assert payload["recommended_quantity"] > 0
+    assert any(warning.startswith("Stale demand only") for warning in payload["warnings"])
+    assert create_response.status_code == 400
+    assert create_response.json()["detail"] == "Product has stale-only legacy demand and requires manual review."
+
+
+def test_demand_policy_impact_endpoint_reports_stale_and_recent_policy_changes(client, db_session):
+    seed_recommendation_product(db_session)
+    stale_product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={
+            "name": "Stale Demand Product",
+            "orderpro_id": "stale-demand-product",
+            "orderpro_sku": "STALE-DEMAND",
+            "current_stock": 0,
+            "safety_stock": 0,
+        },
+        supplier_overrides={
+            "name": "Stale Demand Supplier",
+            "normalized_name": "STALE DEMAND SUPPLIER",
+            "orderpro_id": "supplier-stale-demand",
+            "orderpro_code": "STALE-SUP",
+        },
+    )
+    stale_product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+
+    response = client.get("/recommendations/demand-policy-impact?lookback_days=180&quantity_mode=net_qty&stale_days=180")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total_products_evaluated"] == 2
+    assert payload["summary"]["actionable_current_policy"] == 1
+    assert payload["summary"]["stale_only_needs_review_count"] == 1
+    assert payload["summary"]["products_where_recommendation_status_changes"] >= 1
+    assert any(example["product_id"] == stale_product.id for example in payload["examples"])
 
 
 def test_explain_recommendation_for_blocked_product_lists_blockers(client, db_session):

@@ -1,7 +1,9 @@
+from datetime import date, datetime, timedelta, timezone
 from math import ceil
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.product import Product
 from app.models.usage_history import UsageHistory
 from app.services.orderpro_demand import (
@@ -23,26 +25,48 @@ def calculate_avg_daily_usage(db: Session, product_id: int) -> float:
     return calculate_usage_history_demand(db, product_id).avg_daily_usage
 
 
-def calculate_usage_history_demand(db: Session, product_id: int) -> DemandResult:
-    usage_rows = (
-        db.query(UsageHistory)
-        .filter(UsageHistory.product_id == product_id)
-        .order_by(UsageHistory.date.asc())
-        .all()
-    )
+def calculate_usage_history_demand(
+    db: Session,
+    product_id: int,
+    *,
+    quantity_mode: str | None = None,
+    lookback_days: int | None = None,
+    stale_days: int | None = None,
+    today: date | None = None,
+) -> DemandResult:
+    mode = normalize_legacy_demand_quantity_mode(quantity_mode)
+    effective_lookback_days = settings.legacy_demand_lookback_days if lookback_days is None else lookback_days
+    if effective_lookback_days is not None and effective_lookback_days < 0:
+        effective_lookback_days = None
+    today_value = today or datetime.now(timezone.utc).date()
+    query = db.query(UsageHistory).filter(UsageHistory.product_id == product_id)
+    if effective_lookback_days is not None:
+        query = query.filter(UsageHistory.date >= today_value - timedelta(days=max(effective_lookback_days - 1, 0)))
+    usage_rows = query.order_by(UsageHistory.date.asc()).all()
 
     if not usage_rows:
         return empty_demand_result("none")
 
-    total_used = sum(row.qty_used for row in usage_rows)
+    raw_total_used = sum(legacy_usage_quantity(row, mode) for row in usage_rows)
+    total_used = max(raw_total_used, 0.0)
     first_day = usage_rows[0].date
     last_day = usage_rows[-1].date
     day_span = max((last_day - first_day).days + 1, 1)
+    effective_stale_days = stale_days or settings.legacy_demand_stale_days
+    stale_only = last_day < today_value - timedelta(days=effective_stale_days)
+    negative_or_return_rows = sum(
+        1
+        for row in usage_rows
+        if legacy_usage_quantity(row, mode) < 0
+        or (row.qty_returned or 0) > 0
+        or (row.qty_used or 0) < 0
+        or (row.net_qty is not None and row.net_qty < 0)
+    )
 
-    return DemandResult(
+    result = DemandResult(
         avg_daily_usage=round(total_used / day_span, 2),
         demand_source="usage_history",
-        demand_lookback_days=None,
+        demand_lookback_days=effective_lookback_days,
         demand_history_start=first_day,
         demand_history_end=last_day,
         observation_days=day_span,
@@ -55,10 +79,43 @@ def calculate_usage_history_demand(db: Session, product_id: int) -> DemandResult
         units_sold_in_window=round(total_used, 2),
         eligible_order_count=len(usage_rows),
         excluded_order_count=0,
+        legacy_quantity_mode=mode,
+        legacy_raw_units_in_window=round(raw_total_used, 2),
+        legacy_negative_or_return_rows=negative_or_return_rows,
+        legacy_stale_days=effective_stale_days,
+        stale_demand_only=stale_only,
+        demand_policy_status="stale_only" if stale_only else "recent_or_current",
     )
+    return result
+
+
+def normalize_legacy_demand_quantity_mode(quantity_mode: str | None) -> str:
+    mode = (quantity_mode or settings.legacy_demand_quantity_mode or "net_qty").strip().lower()
+    if mode not in {"net_qty", "qty_used"}:
+        return "net_qty"
+    return mode
+
+
+def legacy_usage_quantity(row: UsageHistory, quantity_mode: str | None = None) -> float:
+    mode = normalize_legacy_demand_quantity_mode(quantity_mode)
+    if mode == "net_qty" and row.net_qty is not None:
+        return float(row.net_qty or 0)
+    return float(row.qty_used or 0)
 
 
 def resolve_demand_context(db: Session, product: Product) -> DemandResult:
+    return resolve_demand_context_with_policy(db, product)
+
+
+def resolve_demand_context_with_policy(
+    db: Session,
+    product: Product,
+    *,
+    legacy_quantity_mode: str | None = None,
+    legacy_lookback_days: int | None = None,
+    legacy_stale_days: int | None = None,
+    today: date | None = None,
+) -> DemandResult:
     has_orderpro_identity = bool(product.orderpro_id or product.orderpro_sku or product.source_system == "orderpro")
     has_orderpro_rows = product_has_orderpro_history(db, product.id)
 
@@ -67,13 +124,27 @@ def resolve_demand_context(db: Session, product: Product) -> DemandResult:
         if orderpro_result.eligible_order_count > 0 or orderpro_result.total_open_demand > 0:
             return orderpro_result
 
-        legacy_result = calculate_usage_history_demand(db, product.id)
+        legacy_result = calculate_usage_history_demand(
+            db,
+            product.id,
+            quantity_mode=legacy_quantity_mode,
+            lookback_days=legacy_lookback_days,
+            stale_days=legacy_stale_days,
+            today=today,
+        )
         if legacy_result.avg_daily_usage > 0:
             return legacy_result
         if has_orderpro_rows:
             return orderpro_result
 
-    return calculate_usage_history_demand(db, product.id)
+    return calculate_usage_history_demand(
+        db,
+        product.id,
+        quantity_mode=legacy_quantity_mode,
+        lookback_days=legacy_lookback_days,
+        stale_days=legacy_stale_days,
+        today=today,
+    )
 
 
 def resolve_supplier_context(product: Product) -> dict:
@@ -201,7 +272,15 @@ def build_supplier_context_response(supplier_ctx: dict) -> dict:
     }
 
 
-def build_forecast(db: Session, product: Product) -> dict:
+def build_forecast(
+    db: Session,
+    product: Product,
+    *,
+    legacy_quantity_mode: str | None = None,
+    legacy_lookback_days: int | None = None,
+    legacy_stale_days: int | None = None,
+    today: date | None = None,
+) -> dict:
     if product.is_non_inventory:
         return {
             "product_id": product.id,
@@ -280,7 +359,14 @@ def build_forecast(db: Session, product: Product) -> dict:
             "explanation": "This row is classified as non-inventory and should not drive purchasing decisions.",
         }
 
-    demand_ctx = resolve_demand_context(db, product)
+    demand_ctx = resolve_demand_context_with_policy(
+        db,
+        product,
+        legacy_quantity_mode=legacy_quantity_mode,
+        legacy_lookback_days=legacy_lookback_days,
+        legacy_stale_days=legacy_stale_days,
+        today=today,
+    )
     avg_daily_usage = demand_ctx.avg_daily_usage
     supplier_ctx = resolve_supplier_context(product)
     inventory_ctx = resolve_inventory_context(product)
@@ -397,6 +483,12 @@ def build_forecast(db: Session, product: Product) -> dict:
         "avg_daily_usage": avg_daily_usage,
         "demand_source": demand_ctx.demand_source,
         "demand_lookback_days": demand_ctx.demand_lookback_days,
+        "legacy_demand_quantity_mode": getattr(demand_ctx, "legacy_quantity_mode", None),
+        "legacy_demand_raw_units_in_window": getattr(demand_ctx, "legacy_raw_units_in_window", None),
+        "legacy_demand_negative_or_return_rows": getattr(demand_ctx, "legacy_negative_or_return_rows", 0),
+        "legacy_demand_stale_days": getattr(demand_ctx, "legacy_stale_days", None),
+        "stale_demand_only": getattr(demand_ctx, "stale_demand_only", False),
+        "demand_policy_status": getattr(demand_ctx, "demand_policy_status", "orderpro_or_not_applicable"),
         "demand_history_start": demand_ctx.demand_history_start,
         "demand_history_end": demand_ctx.demand_history_end,
         "observation_days": demand_ctx.observation_days,

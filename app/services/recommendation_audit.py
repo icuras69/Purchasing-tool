@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
@@ -16,7 +17,6 @@ from app.services.forecast_input_reconciliation import profile_or_effective_inpu
 from app.services.forecasting import build_forecast
 
 
-STALE_DEMAND_DAYS = 180
 ACTIONABLE_RECOMMENDATION_STATUSES = {"draft", "pending_review", "accepted"}
 
 
@@ -77,6 +77,12 @@ def explain_product_recommendation(
         "current_stock": current_stock,
         "inventory_source": forecast.get("inventory_source"),
         "demand_source": forecast.get("demand_source"),
+        "demand_quantity_mode": forecast.get("legacy_demand_quantity_mode"),
+        "demand_policy_status": forecast.get("demand_policy_status"),
+        "stale_demand_only": bool(forecast.get("stale_demand_only")),
+        "stale_demand_policy": stale_demand_policy_status(forecast),
+        "legacy_demand_raw_units_in_window": forecast.get("legacy_demand_raw_units_in_window"),
+        "legacy_demand_negative_or_return_rows": forecast.get("legacy_demand_negative_or_return_rows"),
         "demand_rows": demand["demand_rows"],
         "last_demand_date": iso_date(demand["last_demand_date"]),
         "recent_demand_units": demand["recent_demand_units"],
@@ -97,7 +103,7 @@ def explain_product_recommendation(
         "reason": forecast.get("explanation"),
         "status": status,
         "confidence": confidence_label(blockers, warnings),
-        "readiness_status": "blocked" if blockers else "ready" if status == "actionable" else "monitor_only",
+        "readiness_status": readiness_status_for_explanation(status, blockers),
         "readiness_score": forecast.get("forecast_readiness_score"),
         "reasons": reasons,
         "blockers": blockers,
@@ -196,10 +202,13 @@ def warnings_for_product(
 ) -> list[str]:
     warnings = []
     last_demand_date = demand["last_demand_date"]
-    if last_demand_date and (today - last_demand_date).days > STALE_DEMAND_DAYS and float(forecast.get("total_open_demand") or 0) <= 0:
-        warnings.append(f"Stale demand only; last demand is older than {STALE_DEMAND_DAYS} days")
+    stale_days = int(forecast.get("legacy_demand_stale_days") or settings.legacy_demand_stale_days)
+    if last_demand_date and (today - last_demand_date).days > stale_days and float(forecast.get("total_open_demand") or 0) <= 0:
+        warnings.append(f"Stale demand only; last demand is older than {stale_days} days")
     if demand["negative_or_return_rows"]:
         warnings.append("Demand history includes returns or negative quantities")
+    if forecast.get("legacy_demand_negative_or_return_rows"):
+        warnings.append("Returns or negative rows affected legacy demand calculation")
     if "missing_cost" in effective_inputs.get("warning_issues", []):
         warnings.append("Missing cost")
     if "fallback_moq" in effective_inputs.get("warning_issues", []):
@@ -214,9 +223,37 @@ def warnings_for_product(
 def explanation_status(blockers: list[str], forecast: dict[str, Any], recommended_qty: float) -> str:
     if blockers:
         return "blocked"
+    if is_stale_demand_only(forecast) and not settings.allow_stale_demand_recommendations and recommended_qty > 0:
+        return "needs_review"
     if forecast.get("recommended_action") == "reorder" and recommended_qty > 0:
         return "actionable"
     return "monitor"
+
+
+def readiness_status_for_explanation(status: str, blockers: list[str]) -> str:
+    if blockers:
+        return "blocked"
+    if status == "actionable":
+        return "ready"
+    if status == "needs_review":
+        return "partially_ready"
+    return "monitor_only"
+
+
+def is_stale_demand_only(forecast: dict[str, Any]) -> bool:
+    return (
+        forecast.get("demand_source") == "usage_history"
+        and bool(forecast.get("stale_demand_only"))
+        and float(forecast.get("total_open_demand") or 0) <= 0
+    )
+
+
+def stale_demand_policy_status(forecast: dict[str, Any]) -> str:
+    if not is_stale_demand_only(forecast):
+        return "recent_or_not_legacy"
+    if settings.allow_stale_demand_recommendations:
+        return "allowed_by_config_with_warning"
+    return "manual_review_required"
 
 
 def reasons_for_product(
@@ -241,6 +278,8 @@ def reasons_for_product(
     if status == "actionable":
         reasons.append("Current stock is below projected demand, open demand, or safety stock requirements")
         reasons.append(f"Recommended reorder quantity is {forecast.get('recommended_qty')}")
+    elif status == "needs_review":
+        reasons.append("Calculated reorder quantity is advisory because the only demand signal is stale legacy demand")
     elif status == "monitor" and not blockers:
         reasons.append("Current stock and inbound stock are sufficient for the forecast inputs")
     return reasons
@@ -355,6 +394,175 @@ def audit_existing_recommendations(db: Session, *, limit: int = 500) -> dict[str
     }
 
 
+def demand_policy_impact(
+    db: Session,
+    *,
+    lookback_days: int | None = None,
+    quantity_mode: str | None = None,
+    stale_days: int | None = None,
+    limit: int = 500,
+    today: date | None = None,
+) -> dict[str, Any]:
+    requested_quantity_mode = normalize_quantity_mode_for_audit(quantity_mode)
+    effective_stale_days = stale_days or settings.legacy_demand_stale_days
+    today_value = today or datetime.now(timezone.utc).date()
+    recent_window = lookback_days if lookback_days is not None else 365
+    products = (
+        db.query(Product)
+        .options(
+            selectinload(Product.supplier_record),
+            selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+            selectinload(Product.inventory_positions),
+            selectinload(Product.forecast_input_profile),
+        )
+        .order_by(Product.id.asc())
+        .limit(limit)
+        .all()
+    )
+
+    items = []
+    current_actionable = 0
+    net_actionable = 0
+    recent_actionable = 0
+    stale_only_actionable = 0
+    stale_only_needs_review = 0
+    quantity_changes = 0
+    status_changes = 0
+
+    for product in products:
+        current = policy_projection(
+            db,
+            product,
+            quantity_mode=settings.legacy_demand_quantity_mode,
+            lookback_days=settings.legacy_demand_lookback_days,
+            stale_days=effective_stale_days,
+            today=today_value,
+        )
+        net_qty = policy_projection(
+            db,
+            product,
+            quantity_mode="net_qty",
+            lookback_days=settings.legacy_demand_lookback_days,
+            stale_days=effective_stale_days,
+            today=today_value,
+        )
+        requested = policy_projection(
+            db,
+            product,
+            quantity_mode=requested_quantity_mode,
+            lookback_days=lookback_days,
+            stale_days=effective_stale_days,
+            today=today_value,
+        )
+        recent = policy_projection(
+            db,
+            product,
+            quantity_mode=requested_quantity_mode,
+            lookback_days=recent_window,
+            stale_days=effective_stale_days,
+            today=today_value,
+        )
+
+        current_actionable += int(current["status"] == "actionable")
+        net_actionable += int(net_qty["status"] == "actionable")
+        recent_actionable += int(recent["status"] == "actionable")
+        stale_only_actionable += int(current["status"] == "actionable" and current["stale_demand_only"])
+        stale_only_needs_review += int(current["status"] == "needs_review" and current["stale_demand_only"])
+        quantity_changed = current["recommended_quantity"] != requested["recommended_quantity"]
+        status_changed = current["status"] != requested["status"]
+        quantity_changes += int(quantity_changed)
+        status_changes += int(status_changed)
+        if quantity_changed or status_changed or current["stale_demand_only"]:
+            items.append(
+                {
+                    "product_id": product.id,
+                    "product_name": product.name,
+                    "supplier_id": product.supplier_id,
+                    "supplier_name": product.supplier_record.name if product.supplier_record else None,
+                    "current_policy": current,
+                    "net_qty_policy": net_qty,
+                    "requested_policy": requested,
+                    "recent_window_policy": recent,
+                    "quantity_changed": quantity_changed,
+                    "status_changed": status_changed,
+                }
+            )
+
+    return {
+        "parameters": {
+            "lookback_days": lookback_days,
+            "quantity_mode": requested_quantity_mode,
+            "stale_days": effective_stale_days,
+            "limit": limit,
+            "recent_window_days": recent_window,
+        },
+        "summary": {
+            "total_products_evaluated": len(products),
+            "actionable_current_policy": current_actionable,
+            "actionable_using_net_qty": net_actionable,
+            "actionable_using_recent_window": recent_actionable,
+            "stale_only_actionable_count": stale_only_actionable,
+            "stale_only_needs_review_count": stale_only_needs_review,
+            "products_where_recommendation_quantity_changes": quantity_changes,
+            "products_where_recommendation_status_changes": status_changes,
+        },
+        "examples": items[:25],
+    }
+
+
+def policy_projection(
+    db: Session,
+    product: Product,
+    *,
+    quantity_mode: str,
+    lookback_days: int | None,
+    stale_days: int,
+    today: date,
+) -> dict[str, Any]:
+    forecast = build_forecast(
+        db,
+        product,
+        legacy_quantity_mode=quantity_mode,
+        legacy_lookback_days=lookback_days,
+        legacy_stale_days=stale_days,
+        today=today,
+    )
+    effective_inputs = profile_or_effective_inputs(db, product)
+    demand = {
+        "demand_rows": int(forecast.get("eligible_order_count") or 0),
+        "last_demand_date": order_date(forecast.get("demand_history_end")),
+        "recent_demand_units": float(forecast.get("units_sold_in_window") or forecast.get("shipped_units_in_window") or 0),
+        "has_demand_history": int(forecast.get("eligible_order_count") or 0) > 0
+        or float(forecast.get("units_sold_in_window") or 0) > 0,
+        "negative_or_return_rows": int(forecast.get("legacy_demand_negative_or_return_rows") or 0),
+    }
+    blockers = blockers_for_product(product, effective_inputs, forecast, demand)
+    warnings = warnings_for_product(effective_inputs, forecast, demand, today)
+    recommended_quantity = float(forecast.get("recommended_qty") or 0)
+    status = explanation_status(blockers, forecast, recommended_quantity)
+    return {
+        "status": status,
+        "readiness_status": readiness_status_for_explanation(status, blockers),
+        "recommended_action": forecast.get("recommended_action"),
+        "recommended_quantity": recommended_quantity,
+        "monthly_average_demand": monthly_average(forecast.get("avg_daily_usage")),
+        "last_demand_date": iso_date(demand["last_demand_date"]),
+        "demand_rows": demand["demand_rows"],
+        "demand_source": forecast.get("demand_source"),
+        "demand_quantity_mode": forecast.get("legacy_demand_quantity_mode"),
+        "demand_lookback_days": forecast.get("demand_lookback_days"),
+        "demand_policy_status": forecast.get("demand_policy_status"),
+        "stale_demand_only": bool(forecast.get("stale_demand_only")),
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+def normalize_quantity_mode_for_audit(quantity_mode: str | None) -> str:
+    mode = (quantity_mode or settings.legacy_demand_quantity_mode or "net_qty").strip().lower()
+    return mode if mode in {"net_qty", "qty_used"} else "net_qty"
+
+
 def validate_product_can_create_reorder_recommendation(explanation: dict[str, Any]) -> None:
     if "Missing supplier" in explanation["blockers"]:
         raise ValueError("Product is missing a canonical supplier assignment.")
@@ -362,6 +570,8 @@ def validate_product_can_create_reorder_recommendation(explanation: dict[str, An
         raise ValueError("Product is missing usable supplier lead time.")
     if "No demand history" in explanation["blockers"]:
         raise ValueError("Product is missing demand history or open demand.")
+    if explanation.get("stale_demand_only") and not settings.allow_stale_demand_recommendations:
+        raise ValueError("Product has stale-only legacy demand and requires manual review.")
     if explanation["status"] != "actionable":
         raise ValueError("Product is not currently recommended for reorder.")
 

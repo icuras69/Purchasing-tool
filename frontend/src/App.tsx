@@ -2517,6 +2517,26 @@ function RecommendationDetail({
             <dd>{snapshotValue(forecastSnapshot, "units_sold_in_window")}</dd>
           </div>
           <div>
+            <dt>Demand quantity mode</dt>
+            <dd>{snapshotValue(forecastSnapshot, "legacy_demand_quantity_mode")}</dd>
+          </div>
+          <div>
+            <dt>Demand policy</dt>
+            <dd>{snapshotValue(forecastSnapshot, "demand_policy_status")}</dd>
+          </div>
+          <div>
+            <dt>Last demand date</dt>
+            <dd>{snapshotValue(forecastSnapshot, "demand_history_end")}</dd>
+          </div>
+          <div>
+            <dt>Stale demand only</dt>
+            <dd>{snapshotValue(forecastSnapshot, "stale_demand_only")}</dd>
+          </div>
+          <div>
+            <dt>Return/negative rows</dt>
+            <dd>{snapshotValue(forecastSnapshot, "legacy_demand_negative_or_return_rows")}</dd>
+          </div>
+          <div>
             <dt>Average monthly demand</dt>
             <dd>{monthlyDemandFromSnapshot(forecastSnapshot)}</dd>
           </div>
