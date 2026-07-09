@@ -15,7 +15,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 import pandas as pd
-from sqlalchemy import func, or_
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.product import Product
@@ -1277,20 +1277,62 @@ def summarize_plan(
 
 
 def get_demand_reconciliation_summary(db: Session) -> dict[str, Any]:
-    items = demand_coverage_rows(db, include_readiness=False)
-    total = len(items)
     today = datetime.now(timezone.utc).date()
+    stale_cutoff = today - timedelta(days=180)
+    recent_cutoff = today - timedelta(days=90)
+    total_products = db.query(func.count(Product.id)).scalar() or 0
+    aggregate = (
+        db.query(
+            func.count(UsageHistory.id).label("total_demand_rows"),
+            func.count(func.distinct(UsageHistory.product_id)).label("products_with_demand_history"),
+            func.min(UsageHistory.date).label("earliest_demand_date"),
+            func.max(UsageHistory.date).label("latest_demand_date"),
+        )
+        .filter(UsageHistory.source_system == SOURCE_SYSTEM)
+        .one()
+    )
+    product_usage = (
+        db.query(
+            UsageHistory.product_id.label("product_id"),
+            func.max(UsageHistory.date).label("latest_demand_date"),
+            func.sum(
+                case(
+                    (UsageHistory.date >= recent_cutoff, UsageHistory.net_qty),
+                    else_=0,
+                )
+            ).label("units_last_90_days"),
+        )
+        .filter(UsageHistory.source_system == SOURCE_SYSTEM)
+        .group_by(UsageHistory.product_id)
+        .subquery()
+    )
+    recent_products = (
+        db.query(func.count())
+        .select_from(product_usage)
+        .filter(product_usage.c.units_last_90_days > 0)
+        .scalar()
+        or 0
+    )
+    stale_products = (
+        db.query(func.count())
+        .select_from(product_usage)
+        .filter(product_usage.c.latest_demand_date < stale_cutoff)
+        .scalar()
+        or 0
+    )
+    products_with_history = int(aggregate.products_with_demand_history or 0)
+    products_without_history = max(int(total_products) - products_with_history, 0)
     return {
-        "total_products": total,
-        "products_with_demand_history": sum(1 for item in items if item["has_demand_history"]),
-        "products_without_demand_history": sum(1 for item in items if not item["has_demand_history"]),
-        "products_with_recent_demand": sum(1 for item in items if item["units_last_90_days"] > 0),
-        "products_with_stale_demand": sum(1 for item in items if item["stale_demand"]),
-        "total_demand_rows": sum(item["demand_row_count"] for item in items),
-        "earliest_demand_date": min((item["earliest_demand_date"] for item in items if item["earliest_demand_date"]), default=None),
-        "latest_demand_date": max((item["latest_demand_date"] for item in items if item["latest_demand_date"]), default=None),
-        "coverage_percentage": round((sum(1 for item in items if item["has_demand_history"]) / total) * 100, 2) if total else 0,
-        "products_blocked_by_missing_demand_history": sum(1 for item in items if not item["has_demand_history"]),
+        "total_products": total_products,
+        "products_with_demand_history": products_with_history,
+        "products_without_demand_history": products_without_history,
+        "products_with_recent_demand": recent_products,
+        "products_with_stale_demand": stale_products,
+        "total_demand_rows": int(aggregate.total_demand_rows or 0),
+        "earliest_demand_date": aggregate.earliest_demand_date.isoformat() if aggregate.earliest_demand_date else None,
+        "latest_demand_date": aggregate.latest_demand_date.isoformat() if aggregate.latest_demand_date else None,
+        "coverage_percentage": round((products_with_history / total_products) * 100, 2) if total_products else 0,
+        "products_blocked_by_missing_demand_history": products_without_history,
         "selected_date": today.isoformat(),
     }
 

@@ -11,7 +11,9 @@ from app.models.supplier import Supplier
 from app.models.usage_history import UsageHistory
 from app.services.demand_history_reconciliation import (
     apply_demand_import,
+    get_demand_reconciliation_summary,
     inspect_demand_file,
+    list_demand_coverage_products,
     plan_demand_import,
     save_ambiguous_review_reports,
     save_demand_report,
@@ -459,6 +461,89 @@ def test_apply_rolls_back_on_failure(tmp_path, db_session, monkeypatch):
     assert db_session.query(UsageHistory).count() == 0
 
 
+def test_demand_history_summary_counts_global_imported_usage_not_current_page(db_session):
+    today = datetime.now().date()
+    supplier = make_supplier(db_session, name="Global Demand Supplier")
+    recent_product = make_product(db_session, orderpro_sku="GLOBAL-RECENT", supplier_id=supplier.id)
+    stale_product = make_product(db_session, orderpro_sku="GLOBAL-STALE", supplier_id=supplier.id)
+    no_history_product = make_product(db_session, orderpro_sku="GLOBAL-MISSING", supplier_id=supplier.id)
+    legacy_history_product = make_product(
+        db_session,
+        name="Legacy Demand Product",
+        source_system="legacy",
+        orderpro_id=None,
+        orderpro_sku=None,
+        source_key="LEGACY-DEMAND",
+    )
+    db_session.add_all(
+        [
+            UsageHistory(
+                product_id=recent_product.id,
+                date=today - timedelta(days=10),
+                qty_used=2,
+                qty_returned=0,
+                net_qty=2,
+                gross_revenue=20,
+                source_system="demand_history_import",
+            ),
+            UsageHistory(
+                product_id=recent_product.id,
+                date=today - timedelta(days=20),
+                qty_used=3,
+                qty_returned=0,
+                net_qty=3,
+                gross_revenue=30,
+                source_system="demand_history_import",
+            ),
+            UsageHistory(
+                product_id=stale_product.id,
+                date=today - timedelta(days=365),
+                qty_used=4,
+                qty_returned=0,
+                net_qty=4,
+                gross_revenue=40,
+                source_system="demand_history_import",
+            ),
+            UsageHistory(
+                product_id=legacy_history_product.id,
+                date=today - timedelta(days=400),
+                qty_used=5,
+                qty_returned=0,
+                net_qty=5,
+                gross_revenue=50,
+                source_system="demand_history_import",
+            ),
+            UsageHistory(
+                product_id=no_history_product.id,
+                date=today - timedelta(days=5),
+                qty_used=9,
+                qty_returned=0,
+                net_qty=9,
+                gross_revenue=90,
+                source_system="legacy",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    first_page = list_demand_coverage_products(db_session, page=1, page_size=1)
+    filtered_page = list_demand_coverage_products(db_session, page=1, page_size=1, search="GLOBAL-RECENT")
+    summary = get_demand_reconciliation_summary(db_session)
+
+    assert first_page["page_size"] == 1
+    assert len(first_page["items"]) == 1
+    assert filtered_page["total"] == 1
+    assert summary["total_products"] == 4
+    assert summary["products_with_demand_history"] == 3
+    assert summary["products_without_demand_history"] == 1
+    assert summary["products_with_recent_demand"] == 1
+    assert summary["products_with_stale_demand"] == 2
+    assert summary["total_demand_rows"] == 4
+    assert summary["earliest_demand_date"] == (today - timedelta(days=400)).isoformat()
+    assert summary["latest_demand_date"] == (today - timedelta(days=10)).isoformat()
+    assert summary["coverage_percentage"] == 75.0
+
+
 def test_coverage_api_export_auth_and_forecast_reuse(client, unauthenticated_client, admin_auth_headers, tmp_path, db_session, monkeypatch):
     supplier = make_supplier(db_session)
     product = make_product(db_session, orderpro_sku="SKU-1", supplier_id=supplier.id, cost_price=5)
@@ -489,7 +574,8 @@ def test_coverage_api_export_auth_and_forecast_reuse(client, unauthenticated_cli
     export = client.get("/api/demand-history-reconciliation/export.csv", params={"has_history": True})
 
     assert summary.status_code == 200
-    assert summary.json()["products_with_demand_history"] == 2
+    assert summary.json()["products_with_demand_history"] == 1
+    assert summary.json()["total_demand_rows"] == 1
     assert rows.status_code == 200
     assert rows.json()["total"] == 2
     assert detail.status_code == 200
