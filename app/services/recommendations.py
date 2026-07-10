@@ -64,7 +64,20 @@ def create_reorder_recommendation_for_product(
     except ValueError as error:
         raise RecommendationError(str(error)) from error
 
-    forecast = explanation["forecast_snapshot"]
+    forecast = dict(explanation["forecast_snapshot"])
+    forecast.update(
+        {
+            "purchase_readiness_status": explanation.get("purchase_readiness_status"),
+            "purchase_readiness_issues": explanation.get("purchase_readiness_issues"),
+            "suggested_cleanup_action": explanation.get("suggested_cleanup_action"),
+            "not_ready_for_po": explanation.get("not_ready_for_po"),
+            "quantity_review_note": explanation.get("quantity_review_note"),
+            "quantity_satisfies_moq": explanation.get("quantity_satisfies_moq"),
+            "quantity_satisfies_pack_size": explanation.get("quantity_satisfies_pack_size"),
+            "quantity_was_raised_to_moq": explanation.get("quantity_was_raised_to_moq"),
+            "quantity_was_rounded_to_pack_size": explanation.get("quantity_was_rounded_to_pack_size"),
+        }
+    )
     supplier_context = forecast.get("supplier_context") or {}
     if supplier_context.get("mapping_source") != "orderpro_product_supplier":
         raise RecommendationError("Product is missing a canonical supplier assignment.")

@@ -24,6 +24,7 @@ from app.services.recommendations import (
 )
 from app.services.recommendation_audit import (
     audit_existing_recommendations,
+    cleanup_candidates,
     demand_policy_impact,
     explain_product_recommendation,
 )
@@ -130,6 +131,14 @@ def get_demand_policy_impact(
         stale_days=stale_days,
         limit=limit,
     )
+
+
+@router.get("/cleanup-candidates")
+def get_cleanup_candidates(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return cleanup_candidates(db, limit=limit)
 
 
 @router.get("/{recommendation_id}", response_model=RecommendationResponse)

@@ -18,6 +18,7 @@ from app.services.forecasting import build_forecast
 
 
 ACTIONABLE_RECOMMENDATION_STATUSES = {"draft", "pending_review", "accepted"}
+EPSILON = 0.000001
 
 
 def load_product_for_recommendation_explanation(db: Session, product_id: int) -> Product | None:
@@ -57,6 +58,14 @@ def explain_product_recommendation(
     blockers = blockers_for_product(product, effective_inputs, forecast, demand)
     warnings = warnings_for_product(effective_inputs, forecast, demand, today_value)
     status = explanation_status(blockers, forecast, recommended_qty)
+    purchase_readiness = purchase_readiness_for_product(
+        status=status,
+        blockers=blockers,
+        warnings=warnings,
+        effective_inputs=effective_inputs,
+        forecast=forecast,
+        recommended_quantity=recommended_qty,
+    )
     reasons = reasons_for_product(product, forecast, demand, blockers, status)
     suspicious_issues = suspicious_issues_for_explanation(
         status=status,
@@ -65,6 +74,7 @@ def explain_product_recommendation(
         forecast=forecast,
         recommended_quantity=recommended_qty,
         minimum_order_quantity=minimum_order_quantity,
+        purchase_readiness=purchase_readiness,
     )
 
     return {
@@ -95,6 +105,17 @@ def explain_product_recommendation(
         "reorder_point": forecast.get("reorder_point"),
         "minimum_order_quantity": minimum_order_quantity,
         "moq_source": effective_inputs.get("moq_source"),
+        "pack_size": effective_inputs.get("pack_size"),
+        "pack_size_source": effective_inputs.get("pack_size_source"),
+        "quantity_satisfies_moq": purchase_readiness["quantity_satisfies_moq"],
+        "quantity_satisfies_pack_size": purchase_readiness["quantity_satisfies_pack_size"],
+        "quantity_was_raised_to_moq": purchase_readiness["quantity_was_raised_to_moq"],
+        "quantity_was_rounded_to_pack_size": purchase_readiness["quantity_was_rounded_to_pack_size"],
+        "quantity_review_note": purchase_readiness["quantity_review_note"],
+        "purchase_readiness_status": purchase_readiness["status"],
+        "purchase_readiness_issues": purchase_readiness["issues"],
+        "suggested_cleanup_action": purchase_readiness["suggested_action"],
+        "not_ready_for_po": purchase_readiness["not_ready_for_po"],
         "incoming_qty": forecast.get("incoming_qty"),
         "recommended_action": forecast.get("recommended_action"),
         "recommended_quantity": recommended_qty,
@@ -109,6 +130,7 @@ def explain_product_recommendation(
         "blockers": blockers,
         "warnings": warnings,
         "suspicious_issues": suspicious_issues,
+        "purchase_readiness": purchase_readiness,
         "forecast_snapshot": forecast,
     }
 
@@ -212,11 +234,13 @@ def warnings_for_product(
     if "missing_cost" in effective_inputs.get("warning_issues", []):
         warnings.append("Missing cost")
     if "fallback_moq" in effective_inputs.get("warning_issues", []):
-        warnings.append("Using fallback MOQ")
+        warnings.append(f"Using fallback MOQ of {effective_inputs.get('min_order_qty')}")
     if "missing_pack_size" in effective_inputs.get("warning_issues", []):
-        warnings.append("Missing pack size")
+        warnings.append("Missing pack size; quantity should be reviewed before PO creation")
     if forecast.get("recommended_action") == "monitor" and float(forecast.get("incoming_qty") or 0) > 0:
         warnings.append("Incoming stock covers the current shortfall")
+    if float(forecast.get("recommended_qty") or 0) > 0:
+        warnings.extend(quantity_adjustment_warnings(effective_inputs, forecast))
     return warnings
 
 
@@ -254,6 +278,196 @@ def stale_demand_policy_status(forecast: dict[str, Any]) -> str:
     if settings.allow_stale_demand_recommendations:
         return "allowed_by_config_with_warning"
     return "manual_review_required"
+
+
+def quantity_adjustment_warnings(effective_inputs: dict[str, Any], forecast: dict[str, Any]) -> list[str]:
+    warnings = []
+    info = quantity_quality_info(effective_inputs, forecast, float(forecast.get("recommended_qty") or 0))
+    if info["quantity_was_raised_to_moq"]:
+        warnings.append(
+            f"Recommended quantity was raised to MOQ {info['minimum_order_quantity']} from raw need {info['raw_recommended_quantity']}"
+        )
+    if info["quantity_was_rounded_to_pack_size"]:
+        warnings.append(
+            f"Recommended quantity was rounded to pack size {info['pack_size']} from {info['pre_pack_quantity']}"
+        )
+    return warnings
+
+
+def quantity_quality_info(
+    effective_inputs: dict[str, Any],
+    forecast: dict[str, Any],
+    recommended_quantity: float,
+) -> dict[str, Any]:
+    minimum_order_quantity = parse_positive(effective_inputs.get("min_order_qty"))
+    pack_size = parse_positive(effective_inputs.get("pack_size"))
+    raw_quantity = max(
+        float(forecast.get("total_required_stock") or 0)
+        - float(forecast.get("current_stock") or 0)
+        - float(forecast.get("incoming_qty") or 0),
+        0.0,
+    )
+    pre_pack_quantity = round(max(raw_quantity, minimum_order_quantity or 0), 6) if raw_quantity > 0 else 0.0
+    quantity_satisfies_moq = (
+        minimum_order_quantity is None
+        or recommended_quantity <= 0
+        or recommended_quantity + EPSILON >= minimum_order_quantity
+    )
+    quantity_satisfies_pack_size = (
+        pack_size is None
+        or recommended_quantity <= 0
+        or is_multiple(recommended_quantity, pack_size)
+    )
+    quantity_was_raised_to_moq = (
+        recommended_quantity > 0
+        and minimum_order_quantity is not None
+        and raw_quantity > 0
+        and raw_quantity + EPSILON < minimum_order_quantity
+        and recommended_quantity + EPSILON >= minimum_order_quantity
+    )
+    quantity_was_rounded_to_pack_size = (
+        recommended_quantity > 0
+        and pack_size is not None
+        and pre_pack_quantity > 0
+        and recommended_quantity > pre_pack_quantity + EPSILON
+        and is_multiple(recommended_quantity, pack_size)
+    )
+    return {
+        "minimum_order_quantity": minimum_order_quantity,
+        "moq_source": effective_inputs.get("moq_source"),
+        "pack_size": pack_size,
+        "pack_size_source": effective_inputs.get("pack_size_source"),
+        "raw_recommended_quantity": round(raw_quantity, 6),
+        "pre_pack_quantity": pre_pack_quantity,
+        "quantity_satisfies_moq": quantity_satisfies_moq,
+        "quantity_satisfies_pack_size": quantity_satisfies_pack_size,
+        "quantity_was_raised_to_moq": quantity_was_raised_to_moq,
+        "quantity_was_rounded_to_pack_size": quantity_was_rounded_to_pack_size,
+    }
+
+
+def purchase_readiness_for_product(
+    *,
+    status: str,
+    blockers: list[str],
+    warnings: list[str],
+    effective_inputs: dict[str, Any],
+    forecast: dict[str, Any],
+    recommended_quantity: float,
+) -> dict[str, Any]:
+    quality = quantity_quality_info(effective_inputs, forecast, recommended_quantity)
+    issues = []
+    if blockers:
+        issues.extend(blockers)
+    if forecast.get("recommended_action") != "reorder":
+        issues.append("Forecast action is not reorder")
+    if recommended_quantity <= 0:
+        issues.append("Non-positive recommendation quantity")
+    if status == "needs_review" or is_stale_demand_only(forecast):
+        issues.append("Stale-only demand requires manual review")
+    if not quality["quantity_satisfies_moq"]:
+        issues.append("Recommended quantity is below MOQ")
+    if not quality["quantity_satisfies_pack_size"]:
+        issues.append("Recommended quantity is not a pack-size multiple")
+    if effective_inputs.get("pack_size") is None and recommended_quantity > 0:
+        issues.append("Missing pack size")
+    if "missing_cost" in effective_inputs.get("warning_issues", []):
+        issues.append("Missing cost")
+    if "fallback_moq" in effective_inputs.get("warning_issues", []):
+        issues.append("Using fallback MOQ")
+    if any("return" in warning.lower() or "negative" in warning.lower() for warning in warnings):
+        issues.append("Returns or negative demand need review")
+    if quality["quantity_was_raised_to_moq"]:
+        issues.append("Quantity was raised to MOQ")
+    if quality["quantity_was_rounded_to_pack_size"]:
+        issues.append("Quantity was rounded to pack size")
+
+    hard_blocked = bool(blockers) or forecast.get("recommended_action") != "reorder" or recommended_quantity <= 0
+    if hard_blocked:
+        readiness_status = "blocked"
+    elif any(
+        issue in issues
+        for issue in {
+            "Missing pack size",
+            "Missing cost",
+            "Using fallback MOQ",
+            "Returns or negative demand need review",
+            "Stale-only demand requires manual review",
+            "Quantity was raised to MOQ",
+            "Quantity was rounded to pack size",
+            "Recommended quantity is below MOQ",
+            "Recommended quantity is not a pack-size multiple",
+        }
+    ):
+        readiness_status = "needs_review"
+    else:
+        readiness_status = "order_ready"
+
+    unique_issues = unique_preserve_order(issues)
+    return {
+        "status": readiness_status,
+        "issues": unique_issues,
+        "suggested_action": suggested_cleanup_action(unique_issues, readiness_status),
+        "not_ready_for_po": readiness_status != "order_ready",
+        "quantity_review_note": quantity_review_note(readiness_status, unique_issues, quality),
+        **quality,
+    }
+
+
+def suggested_cleanup_action(issues: list[str], readiness_status: str) -> str:
+    if readiness_status == "order_ready":
+        return "none"
+    issue_text = " ".join(issues).lower()
+    if "missing supplier" in issue_text or "missing lead time" in issue_text:
+        return "update_after_supplier_fix"
+    if "missing pack size" in issue_text or "pack-size" in issue_text or "pack size" in issue_text:
+        return "update_after_pack_size_fix"
+    if "stale-only" in issue_text or "forecast action is not reorder" in issue_text:
+        return "convert_to_watchlist"
+    if "missing cost" in issue_text or "moq" in issue_text:
+        return "review"
+    return "reject_existing_recommendation" if readiness_status == "blocked" else "review"
+
+
+def quantity_review_note(readiness_status: str, issues: list[str], quality: dict[str, Any]) -> str:
+    if readiness_status == "order_ready":
+        return "Ready for PO using current MOQ and pack-size inputs."
+    if "Missing pack size" in issues:
+        return "Not ready for PO: pack size is missing, so quantity may need manual rounding."
+    if "Recommended quantity is not a pack-size multiple" in issues:
+        return "Not ready for PO: recommended quantity is not a pack-size multiple."
+    if "Quantity was rounded to pack size" in issues:
+        return f"Review before PO: quantity was rounded to pack size {quality['pack_size']}."
+    if "Quantity was raised to MOQ" in issues:
+        return f"Review before PO: quantity was raised to MOQ {quality['minimum_order_quantity']}."
+    if "Stale-only demand requires manual review" in issues:
+        return "Not ready for PO: demand is stale-only and should be reviewed."
+    return "Not ready for PO: review blockers and warnings first."
+
+
+def parse_positive(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def is_multiple(quantity: float, multiple: float) -> bool:
+    if multiple <= 0:
+        return False
+    ratio = quantity / multiple
+    return abs(ratio - round(ratio)) < EPSILON
+
+
+def unique_preserve_order(values: list[str]) -> list[str]:
+    seen = set()
+    unique = []
+    for value in values:
+        if value not in seen:
+            unique.append(value)
+            seen.add(value)
+    return unique
 
 
 def reasons_for_product(
@@ -294,6 +508,7 @@ def suspicious_issues_for_explanation(
     recommended_quantity: float,
     minimum_order_quantity: float | None,
     recommendation_status: str | None = None,
+    purchase_readiness: dict[str, Any] | None = None,
 ) -> list[str]:
     issues = []
     is_actionable = status == "actionable"
@@ -317,6 +532,8 @@ def suspicious_issues_for_explanation(
         issues.append("Recommended quantity is less than MOQ")
     if is_actionable and forecast.get("recommended_action") != "reorder":
         issues.append("Actionable recommendation exists while forecast action is not reorder")
+    if is_actionable and purchase_readiness and purchase_readiness.get("status") != "order_ready":
+        issues.append(f"Actionable recommendation is not purchase-ready: {purchase_readiness.get('status')}")
     if (
         is_actionable
         and forecast.get("recommended_action") == "reorder"
@@ -364,6 +581,7 @@ def audit_existing_recommendations(db: Session, *, limit: int = 500) -> dict[str
             recommended_quantity=float(recommendation.recommended_qty or 0),
             minimum_order_quantity=explanation["minimum_order_quantity"],
             recommendation_status=recommendation.status,
+            purchase_readiness=explanation["purchase_readiness"],
         )
         issue_counter.update(issues)
         items.append(
@@ -377,6 +595,9 @@ def audit_existing_recommendations(db: Session, *, limit: int = 500) -> dict[str
                 "recommended_quantity": recommendation.recommended_qty,
                 "explanation_status": explanation["status"],
                 "forecast_recommended_action": explanation["recommended_action"],
+                "purchase_readiness_status": explanation["purchase_readiness_status"],
+                "purchase_readiness_issues": explanation["purchase_readiness_issues"],
+                "suggested_cleanup_action": explanation["suggested_cleanup_action"],
                 "blockers": explanation["blockers"],
                 "warnings": explanation["warnings"],
                 "suspicious_issues": issues,
@@ -392,6 +613,143 @@ def audit_existing_recommendations(db: Session, *, limit: int = 500) -> dict[str
         },
         "items": items,
     }
+
+
+def cleanup_candidates(db: Session, *, limit: int = 500) -> dict[str, Any]:
+    recommendations = (
+        db.query(Recommendation)
+        .options(
+            selectinload(Recommendation.product).selectinload(Product.supplier_record),
+            selectinload(Recommendation.supplier),
+        )
+        .order_by(Recommendation.id.asc())
+        .limit(limit)
+        .all()
+    )
+    issue_counter: Counter[str] = Counter()
+    action_counter: Counter[str] = Counter()
+    candidates = []
+
+    for recommendation in recommendations:
+        explanation = explain_product_recommendation(db, recommendation.product_id)
+        if explanation is None:
+            issues = ["Product missing"]
+            action = "reject_existing_recommendation"
+            readiness_status = "blocked"
+            product_name = None
+            supplier_name = recommendation.supplier.name if recommendation.supplier else None
+        else:
+            issues = cleanup_issues_for_recommendation(recommendation, explanation)
+            action = cleanup_action_for_recommendation(issues, explanation)
+            readiness_status = explanation["purchase_readiness_status"]
+            product_name = explanation["product_name"]
+            supplier_name = explanation["supplier_name"]
+
+        if not issues:
+            continue
+
+        issue_counter.update(issues)
+        action_counter[action] += 1
+        candidates.append(
+            {
+                "recommendation_id": recommendation.id,
+                "product_id": recommendation.product_id,
+                "product_name": product_name,
+                "supplier_id": recommendation.supplier_id,
+                "supplier_name": supplier_name,
+                "status": recommendation.status,
+                "recommended_quantity": recommendation.recommended_qty,
+                "purchase_readiness_status": readiness_status,
+                "issues": issues,
+                "suggested_action": action,
+            }
+        )
+
+    return {
+        "summary": {
+            "recommendations_evaluated": len(recommendations),
+            "total_candidates": len(candidates),
+            "issue_counts": dict(issue_counter),
+            "suggested_action_counts": dict(action_counter),
+            "limit": limit,
+        },
+        "candidates": candidates,
+    }
+
+
+def cleanup_issues_for_recommendation(recommendation: Recommendation, explanation: dict[str, Any]) -> list[str]:
+    issues = []
+    actionable_existing = recommendation.status in ACTIONABLE_RECOMMENDATION_STATUSES
+    if actionable_existing and explanation.get("stale_demand_only"):
+        issues.append("stale-only actionable existing row")
+    if "Missing supplier" in explanation["blockers"]:
+        issues.append("missing supplier")
+    if "Missing lead time" in explanation["blockers"]:
+        issues.append("missing lead time")
+    if "No demand history" in explanation["blockers"]:
+        issues.append("no demand")
+    if float(recommendation.recommended_qty or 0) <= 0:
+        issues.append("non-positive quantity")
+    minimum_order_quantity = parse_positive(explanation.get("minimum_order_quantity"))
+    if minimum_order_quantity and 0 < float(recommendation.recommended_qty or 0) < minimum_order_quantity:
+        issues.append("quantity below MOQ")
+    if explanation.get("pack_size") is None and float(recommendation.recommended_qty or 0) > 0:
+        issues.append("missing pack size")
+    if "Missing cost" in explanation["warnings"]:
+        issues.append("cost missing")
+    if explanation.get("recommended_action") != "reorder":
+        issues.append("enough stock/no reorder needed")
+    if explanation.get("purchase_readiness_status") != "order_ready":
+        for issue in explanation.get("purchase_readiness_issues", []):
+            cleanup_issue = cleanup_issue_name(issue)
+            if cleanup_issue == "stale-only actionable existing row" and not actionable_existing:
+                cleanup_issue = "stale-only demand review"
+            issues.append(cleanup_issue)
+    return unique_preserve_order(issues)
+
+
+def cleanup_issue_name(issue: str) -> str:
+    issue_lower = issue.lower()
+    if "missing supplier" in issue_lower:
+        return "missing supplier"
+    if "missing lead time" in issue_lower:
+        return "missing lead time"
+    if "no demand" in issue_lower:
+        return "no demand"
+    if "non-positive" in issue_lower:
+        return "non-positive quantity"
+    if "below moq" in issue_lower:
+        return "quantity below MOQ"
+    if "missing pack size" in issue_lower:
+        return "missing pack size"
+    if "missing cost" in issue_lower:
+        return "cost missing"
+    if "forecast action is not reorder" in issue_lower:
+        return "enough stock/no reorder needed"
+    if "stale-only" in issue_lower:
+        return "stale-only actionable existing row"
+    if "raised to moq" in issue_lower:
+        return "quantity raised to MOQ"
+    if "rounded to pack size" in issue_lower or "pack-size multiple" in issue_lower:
+        return "quantity needs pack-size review"
+    if "fallback moq" in issue_lower:
+        return "fallback MOQ"
+    if "returns" in issue_lower or "negative" in issue_lower:
+        return "returns/negative demand review"
+    return issue
+
+
+def cleanup_action_for_recommendation(issues: list[str], explanation: dict[str, Any]) -> str:
+    issue_text = " ".join(issues).lower()
+    if "missing supplier" in issue_text or "missing lead time" in issue_text:
+        return "update_after_supplier_fix"
+    if "missing pack size" in issue_text or "pack-size" in issue_text:
+        return "update_after_pack_size_fix"
+    if "stale-only" in issue_text or "enough stock/no reorder needed" in issue_text:
+        return "convert_to_watchlist"
+    if "non-positive" in issue_text or explanation.get("purchase_readiness_status") == "blocked":
+        return "reject_existing_recommendation"
+    return "review"
 
 
 def demand_policy_impact(

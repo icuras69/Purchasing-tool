@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
+from app.models.product_forecast_input_profile import ProductForecastInputProfile
 from app.models.product_supplier import ProductSupplier
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.recommendation import Recommendation
@@ -76,6 +77,47 @@ def seed_recommendation_product(
     )
     db_session.commit()
     return product, supplier, mapping
+
+
+def add_forecast_profile(
+    db_session,
+    product: Product,
+    *,
+    min_order_qty: float | None = 1,
+    moq_source: str = "product_record",
+    pack_size: float | None = 1,
+    pack_size_source: str = "forecast_input_profile",
+    cost_price: float | None = 5.0,
+    lead_time_days: int | None = 4,
+) -> ProductForecastInputProfile:
+    now = datetime(2026, 7, 1)
+    profile = ProductForecastInputProfile(
+        product_id=product.id,
+        cost_price=cost_price,
+        cost_source="product_record" if cost_price is not None else "missing",
+        cost_confidence="high" if cost_price is not None else "missing",
+        cost_updated_at=None,
+        lead_time_days=lead_time_days,
+        lead_time_source="supplier_record" if lead_time_days is not None else "missing",
+        lead_time_confidence="medium" if lead_time_days is not None else "missing",
+        min_order_qty=min_order_qty,
+        moq_source=moq_source,
+        pack_size=pack_size,
+        pack_size_source=pack_size_source,
+        safety_stock=product.safety_stock,
+        safety_stock_source="product_record",
+        blocking_issues=[],
+        warning_issues=[],
+        readiness_score=100,
+        calculation_version="test",
+        calculated_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db_session.add(profile)
+    db_session.commit()
+    db_session.refresh(product)
+    return profile
 
 
 def create_recommendation(client, product_id: int) -> dict:
@@ -356,6 +398,72 @@ def test_explain_recommendation_for_actionable_low_stock_product(client, db_sess
     assert any("demand history" in reason for reason in payload["reasons"])
 
 
+def test_purchase_readiness_order_ready_with_valid_moq_and_pack_size(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+    add_forecast_profile(db_session, product, min_order_qty=1, pack_size=1)
+
+    response = client.get(f"/recommendations/explain?product_id={product.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "actionable"
+    assert payload["purchase_readiness_status"] == "order_ready"
+    assert payload["not_ready_for_po"] is False
+    assert payload["pack_size"] == 1
+    assert payload["quantity_satisfies_moq"] is True
+    assert payload["quantity_satisfies_pack_size"] is True
+    assert payload["suggested_cleanup_action"] == "none"
+
+
+def test_missing_pack_size_produces_purchase_review_not_order_ready(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+
+    response = client.get(f"/recommendations/explain?product_id={product.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "actionable"
+    assert payload["purchase_readiness_status"] == "needs_review"
+    assert payload["pack_size"] is None
+    assert "Missing pack size" in payload["purchase_readiness_issues"]
+    assert payload["suggested_cleanup_action"] == "update_after_pack_size_fix"
+    assert "Not ready for PO" in payload["quantity_review_note"]
+
+
+def test_quantity_below_moq_is_raised_and_flagged_for_review(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 0},
+    )
+    add_forecast_profile(db_session, product, min_order_qty=10, moq_source="forecast_input_profile", pack_size=1)
+
+    response = client.get(f"/recommendations/explain?product_id={product.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recommended_quantity"] == 10
+    assert payload["minimum_order_quantity"] == 10
+    assert payload["quantity_satisfies_moq"] is True
+    assert payload["quantity_was_raised_to_moq"] is True
+    assert payload["purchase_readiness_status"] == "needs_review"
+    assert "Quantity was raised to MOQ" in payload["purchase_readiness_issues"]
+
+
+def test_quantity_rounded_to_pack_size_is_flagged_for_review(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+    add_forecast_profile(db_session, product, min_order_qty=1, pack_size=5)
+
+    response = client.get(f"/recommendations/explain?product_id={product.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recommended_quantity"] == 20
+    assert payload["quantity_satisfies_pack_size"] is True
+    assert payload["quantity_was_rounded_to_pack_size"] is True
+    assert payload["purchase_readiness_status"] == "needs_review"
+    assert "Quantity was rounded to pack size" in payload["purchase_readiness_issues"]
+
+
 def test_legacy_net_qty_reduces_returns_in_forecast_demand(db_session):
     product, _supplier, _mapping = seed_recommendation_product(db_session)
     db_session.add(
@@ -434,6 +542,8 @@ def test_stale_only_legacy_demand_requires_review_but_explains_advisory_quantity
     assert payload["stale_demand_only"] is True
     assert payload["stale_demand_policy"] == "manual_review_required"
     assert payload["recommended_quantity"] > 0
+    assert payload["purchase_readiness_status"] == "needs_review"
+    assert "Stale-only demand requires manual review" in payload["purchase_readiness_issues"]
     assert any(warning.startswith("Stale demand only") for warning in payload["warnings"])
     assert create_response.status_code == 400
     assert create_response.json()["detail"] == "Product has stale-only legacy demand and requires manual review."
@@ -485,6 +595,8 @@ def test_explain_recommendation_for_blocked_product_lists_blockers(client, db_se
     assert "No demand history" in payload["blockers"]
     assert "Missing lead time" in payload["blockers"]
     assert payload["recommended_quantity"] == 0
+    assert payload["purchase_readiness_status"] == "blocked"
+    assert "Missing supplier" in payload["purchase_readiness_issues"]
 
 
 def test_recommendation_audit_flags_suspicious_stored_recommendation(client, db_session):
@@ -515,6 +627,71 @@ def test_recommendation_audit_flags_suspicious_stored_recommendation(client, db_
     assert item["explanation_status"] == "blocked"
     assert "Actionable recommendation is missing supplier" in item["suspicious_issues"]
     assert "Actionable recommendation has no demand history" in item["suspicious_issues"]
+    assert item["purchase_readiness_status"] == "blocked"
+
+
+def test_cleanup_candidates_endpoint_reports_stale_actionable_existing_row_read_only(client, db_session):
+    product, supplier, _mapping = seed_recommendation_product(db_session)
+    add_forecast_profile(db_session, product, min_order_qty=1, pack_size=1)
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    recommendation = Recommendation(
+        product_id=product.id,
+        supplier_id=supplier.id,
+        recommended_qty=2,
+        risk_level="medium",
+        recommendation_type="reorder",
+        status="pending_review",
+        reason="Existing stale recommendation row.",
+        generated_by="test",
+    )
+    db_session.add(recommendation)
+    db_session.commit()
+    recommendation_id = recommendation.id
+
+    before_count = db_session.query(Recommendation).count()
+    response = client.get("/recommendations/cleanup-candidates")
+    db_session.expire_all()
+    stored = db_session.get(Recommendation, recommendation_id)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert db_session.query(Recommendation).count() == before_count
+    assert stored.status == "pending_review"
+    assert payload["summary"]["total_candidates"] == 1
+    assert payload["summary"]["issue_counts"]["stale-only actionable existing row"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["product_id"] == product.id
+    assert candidate["purchase_readiness_status"] == "needs_review"
+    assert "stale-only actionable existing row" in candidate["issues"]
+    assert candidate["suggested_action"] == "convert_to_watchlist"
+
+
+def test_cleanup_candidates_endpoint_reports_missing_supplier_and_lead_time(client, db_session):
+    product = Product(name="Cleanup Blocked Product", current_stock=0)
+    db_session.add(product)
+    db_session.flush()
+    db_session.add(
+        Recommendation(
+            product_id=product.id,
+            recommended_qty=1,
+            risk_level="medium",
+            recommendation_type="reorder",
+            status="pending_review",
+            reason="Existing unsafe recommendation row.",
+            generated_by="test",
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/recommendations/cleanup-candidates")
+
+    assert response.status_code == 200
+    payload = response.json()
+    candidate = payload["candidates"][0]
+    assert candidate["purchase_readiness_status"] == "blocked"
+    assert "missing supplier" in candidate["issues"]
+    assert "missing lead time" in candidate["issues"]
+    assert candidate["suggested_action"] == "update_after_supplier_fix"
 
 
 def test_rejected_product_supplier_is_not_used_for_recommendation(client, db_session):

@@ -2324,6 +2324,11 @@ function RecommendationDetail({
   const canConvert = recommendation.status === "accepted";
   const supplierSnapshot = recommendation.supplier_context_snapshot;
   const forecastSnapshot = recommendation.forecast_snapshot;
+  const inputSnapshot = recommendation.input_snapshot;
+  const effectiveInputs =
+    inputSnapshot && typeof inputSnapshot.effective_forecast_inputs === "object"
+      ? (inputSnapshot.effective_forecast_inputs as Record<string, unknown>)
+      : null;
 
   return (
     <section className="detail-panel" aria-label="Recommendation details">
@@ -2563,6 +2568,38 @@ function RecommendationDetail({
           <div>
             <dt>Recommended after inbound</dt>
             <dd>{snapshotValue(forecastSnapshot, "recommended_qty_after_inbound")}</dd>
+          </div>
+          <div>
+            <dt>Purchase readiness</dt>
+            <dd>{snapshotValue(forecastSnapshot, "purchase_readiness_status")}</dd>
+          </div>
+          <div>
+            <dt>Not ready for PO</dt>
+            <dd>{snapshotValue(forecastSnapshot, "not_ready_for_po")}</dd>
+          </div>
+          <div>
+            <dt>Cleanup action</dt>
+            <dd>{snapshotValue(forecastSnapshot, "suggested_cleanup_action")}</dd>
+          </div>
+          <div>
+            <dt>Quantity review</dt>
+            <dd>{snapshotValue(forecastSnapshot, "quantity_review_note")}</dd>
+          </div>
+          <div>
+            <dt>MOQ</dt>
+            <dd>
+              {snapshotValue(effectiveInputs, "min_order_qty")} ({snapshotValue(effectiveInputs, "moq_source")})
+            </dd>
+          </div>
+          <div>
+            <dt>Pack size</dt>
+            <dd>
+              {snapshotValue(effectiveInputs, "pack_size")} ({snapshotValue(effectiveInputs, "pack_size_source")})
+            </dd>
+          </div>
+          <div>
+            <dt>Pack rounded</dt>
+            <dd>{snapshotValue(forecastSnapshot, "quantity_was_rounded_to_pack_size")}</dd>
           </div>
           <div>
             <dt>Explanation</dt>

@@ -770,7 +770,14 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
     currency: "USD",
     reason: "Stock is below reorder point.",
     confidence: null,
-    input_snapshot: {},
+    input_snapshot: {
+      effective_forecast_inputs: {
+        min_order_qty: 2,
+        moq_source: "product_record",
+        pack_size: null,
+        pack_size_source: "missing",
+      },
+    },
     forecast_snapshot: {
       recommended_action: "order_now",
       risk_level: "high",
@@ -788,6 +795,11 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
       reorder_point: 12,
       input_blocking_issues: [],
       input_warning_issues: ["missing_pack_size"],
+      purchase_readiness_status: "needs_review",
+      not_ready_for_po: true,
+      suggested_cleanup_action: "update_after_pack_size_fix",
+      quantity_review_note: "Not ready for PO: pack size is missing, so quantity may need manual rounding.",
+      quantity_was_rounded_to_pack_size: false,
       explanation: "Stock is below reorder point.",
     },
     supplier_context_snapshot: {
@@ -3095,6 +3107,10 @@ describe("App mapping review workflow", () => {
     expect(within(detail).getByText("recent_or_current")).toBeInTheDocument();
     expect(within(detail).getByText("2026-07-01")).toBeInTheDocument();
     expect(within(detail).getByText("18.26")).toBeInTheDocument();
+    expect(within(detail).getByText("needs_review")).toBeInTheDocument();
+    expect(within(detail).getByText("update_after_pack_size_fix")).toBeInTheDocument();
+    expect(within(detail).getByText("Not ready for PO: pack size is missing, so quantity may need manual rounding.")).toBeInTheDocument();
+    expect(within(detail).getByText(/2\s*\(product_record\)/)).toBeInTheDocument();
     expect(within(detail).getByText("missing_pack_size")).toBeInTheDocument();
     expect(within(detail).getAllByText("Stock is below reorder point.").length).toBeGreaterThan(0);
     expect(screen.getByText("ACME-1")).toBeInTheDocument();
