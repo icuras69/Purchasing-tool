@@ -27,6 +27,7 @@ from app.services.recommendation_audit import (
     cleanup_candidates,
     demand_policy_impact,
     explain_product_recommendation,
+    stale_demand_review_candidates,
 )
 from app.services.pack_size_audit import pack_size_audit
 from app.services.perf_logging import perf_timer
@@ -140,6 +141,14 @@ def get_cleanup_candidates(
     db: Session = Depends(get_db),
 ):
     return cleanup_candidates(db, limit=limit)
+
+
+@router.get("/stale-demand-review")
+def get_stale_demand_review(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return stale_demand_review_candidates(db, limit=limit)
 
 
 @router.get("/pack-size-audit")

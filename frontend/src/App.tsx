@@ -41,6 +41,7 @@ import {
   getProductSeasonality,
   getPurchaseOrder,
   getRecommendation,
+  getStaleDemandReview,
   getSeasonalProducts,
   getSeasonalitySummary,
   getSupplierForecast,
@@ -77,6 +78,8 @@ import type {
   ManualSupplierCleanupSummary,
   ManualSupplierCleanupSupplier,
   RecommendationLLMExplanation,
+  StaleDemandReviewItem,
+  StaleDemandReviewResponse,
   ProductSeasonalityDetail,
   Product,
   ProductSupplierInput,
@@ -2028,6 +2031,10 @@ function SupplierContextDetails({ context }: { context: ForecastSupplierContext 
 function RecommendationsPanel() {
   const [recommendations, setRecommendations] =
     useState<ResourceState<PurchaseRecommendation>>(initialResource);
+  const [staleDemandReview, setStaleDemandReview] =
+    useState<StaleDemandReviewResponse | null>(null);
+  const [staleDemandLoading, setStaleDemandLoading] = useState(true);
+  const [staleDemandError, setStaleDemandError] = useState<string | null>(null);
   const [selectedRecommendation, setSelectedRecommendation] =
     useState<PurchaseRecommendation | null>(null);
   const [productId, setProductId] = useState("");
@@ -2051,13 +2058,32 @@ function RecommendationsPanel() {
       });
   }, []);
 
+  const loadStaleDemandReview = useCallback((active = true) => {
+    getStaleDemandReview()
+      .then((loadedReview) => {
+        if (active) {
+          setStaleDemandReview(loadedReview);
+          setStaleDemandLoading(false);
+          setStaleDemandError(null);
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setStaleDemandReview(null);
+          setStaleDemandLoading(false);
+          setStaleDemandError(loadError.message);
+        }
+      });
+  }, []);
+
   useEffect(() => {
     let active = true;
     loadRecommendations(active);
+    loadStaleDemandReview(active);
     return () => {
       active = false;
     };
-  }, [loadRecommendations]);
+  }, [loadRecommendations, loadStaleDemandReview]);
 
   async function refreshSelected(recommendationId: number) {
     const loaded = await getRecommendation(recommendationId);
@@ -2192,6 +2218,12 @@ function RecommendationsPanel() {
         {actionError && <div className="state error">Recommendation action failed: {actionError}</div>}
       </section>
 
+      <StaleDemandReviewPanel
+        error={staleDemandError}
+        loading={staleDemandLoading}
+        review={staleDemandReview}
+      />
+
       <RecommendationsTable
         onSelect={handleSelect}
         recommendations={recommendations.data}
@@ -2292,6 +2324,66 @@ function RecommendationsTable({
         </tbody>
       </table>
       {recommendations.length === 0 && <div className="state">No recommendations found.</div>}
+    </section>
+  );
+}
+
+function StaleDemandReviewPanel({
+  error,
+  loading,
+  review,
+}: {
+  error: string | null;
+  loading: boolean;
+  review: StaleDemandReviewResponse | null;
+}) {
+  if (loading) {
+    return <div className="state">Loading stale-demand review...</div>;
+  }
+  if (error) {
+    return <div className="state error">Could not load stale-demand review: {error}</div>;
+  }
+  const items = review?.items ?? [];
+  return (
+    <section className="table-wrap" aria-label="Stale Demand Review">
+      <div className="panel-heading compact">
+        <div>
+          <h2>Stale Demand Review</h2>
+          <p>Demand is stale; manager review required before PO.</p>
+        </div>
+        <span className="badge">{review?.summary.total_candidates ?? 0} candidates</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Product ID</th>
+            <th>Product</th>
+            <th>Supplier</th>
+            <th>Last demand</th>
+            <th>Days stale</th>
+            <th>Current stock</th>
+            <th>Advisory qty</th>
+            <th>Est. cost</th>
+            <th>Suggested action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item: StaleDemandReviewItem) => (
+            <tr key={item.product_id}>
+              <td>{item.product_id}</td>
+              <td>{formatValue(item.product_name)}</td>
+              <td>{formatValue(item.supplier_name)}</td>
+              <td>{formatValue(item.last_demand_date)}</td>
+              <td>{formatValue(item.days_since_last_demand)}</td>
+              <td>{formatValue(item.current_stock)}</td>
+              <td>{formatValue(item.advisory_recommended_quantity)}</td>
+              <td>{formatValue(item.estimated_total_cost)}</td>
+              <td>{formatValue(item.suggested_action)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {items.length === 0 && <div className="state">No stale-demand recommendation candidates found.</div>}
     </section>
   );
 }

@@ -824,3 +824,38 @@ export interface RecommendationLLMExplanation {
   model_name: string;
   prompt_version: string;
 }
+
+export interface StaleDemandReviewItem {
+  product_id: number;
+  product_name: string | null;
+  orderpro_sku: string | null;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  last_demand_date: string | null;
+  days_since_last_demand: number | null;
+  demand_rows: number;
+  monthly_average_demand: number;
+  current_stock: number | null;
+  lead_time_days: number | null;
+  advisory_recommended_quantity: number;
+  estimated_unit_cost: number | null;
+  estimated_total_cost: number | null;
+  blockers: string[];
+  warnings: string[];
+  purchase_readiness_issues: string[];
+  suggested_action: string;
+  stale_demand_policy: string | null;
+  recommendation_status: string | null;
+  purchase_readiness_status: string | null;
+}
+
+export interface StaleDemandReviewResponse {
+  summary: {
+    products_evaluated: number;
+    total_candidates: number;
+    suggested_action_counts: Record<string, number>;
+    skipped_counts: Record<string, number>;
+    limit: number;
+  };
+  items: StaleDemandReviewItem[];
+}

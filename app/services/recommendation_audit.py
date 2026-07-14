@@ -684,11 +684,146 @@ def cleanup_candidates(db: Session, *, limit: int = 500) -> dict[str, Any]:
     }
 
 
+def stale_demand_review_candidates(
+    db: Session,
+    *,
+    limit: int = 500,
+    today: date | None = None,
+) -> dict[str, Any]:
+    today_value = today or datetime.now(timezone.utc).date()
+    products = (
+        db.query(Product)
+        .options(
+            selectinload(Product.supplier_record),
+            selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+            selectinload(Product.inventory_positions),
+            selectinload(Product.forecast_input_profile),
+        )
+        .order_by(Product.id.asc())
+        .limit(limit)
+        .all()
+    )
+    items = []
+    skipped_counter: Counter[str] = Counter()
+    action_counter: Counter[str] = Counter()
+
+    for product in products:
+        explanation = explain_product_recommendation(db, product.id, today=today_value)
+        if explanation is None:
+            skipped_counter["missing_explanation"] += 1
+            continue
+        include, reason = is_stale_demand_review_candidate(explanation)
+        if not include:
+            skipped_counter[reason] += 1
+            continue
+
+        action = stale_demand_review_suggested_action(explanation)
+        action_counter[action] += 1
+        last_demand = parse_iso_date(explanation.get("last_demand_date"))
+        days_since_last_demand = (today_value - last_demand).days if last_demand else None
+        estimated_unit_cost = effective_unit_cost_from_explanation(explanation)
+        recommended_quantity = float(explanation.get("recommended_quantity") or 0)
+        estimated_total_cost = (
+            round(recommended_quantity * estimated_unit_cost, 2)
+            if estimated_unit_cost is not None
+            else None
+        )
+        items.append(
+            {
+                "product_id": explanation["product_id"],
+                "product_name": explanation["product_name"],
+                "orderpro_sku": explanation.get("orderpro_sku"),
+                "supplier_id": explanation.get("supplier_id"),
+                "supplier_name": explanation.get("supplier_name"),
+                "last_demand_date": explanation.get("last_demand_date"),
+                "days_since_last_demand": days_since_last_demand,
+                "demand_rows": explanation.get("demand_rows"),
+                "monthly_average_demand": explanation.get("monthly_average_demand"),
+                "current_stock": explanation.get("current_stock"),
+                "lead_time_days": explanation.get("lead_time_days"),
+                "advisory_recommended_quantity": recommended_quantity,
+                "estimated_unit_cost": estimated_unit_cost,
+                "estimated_total_cost": estimated_total_cost,
+                "blockers": explanation.get("blockers") or [],
+                "warnings": explanation.get("warnings") or [],
+                "purchase_readiness_issues": explanation.get("purchase_readiness_issues") or [],
+                "suggested_action": action,
+                "stale_demand_policy": explanation.get("stale_demand_policy"),
+                "recommendation_status": explanation.get("status"),
+                "purchase_readiness_status": explanation.get("purchase_readiness_status"),
+            }
+        )
+
+    items.sort(
+        key=lambda item: (
+            -(item["advisory_recommended_quantity"] or 0),
+            item["days_since_last_demand"] if item["days_since_last_demand"] is not None else -1,
+            item["product_id"],
+        )
+    )
+    return {
+        "summary": {
+            "products_evaluated": len(products),
+            "total_candidates": len(items),
+            "suggested_action_counts": dict(action_counter),
+            "skipped_counts": dict(skipped_counter),
+            "limit": limit,
+        },
+        "items": items,
+    }
+
+
+def is_stale_demand_review_candidate(explanation: dict[str, Any]) -> tuple[bool, str]:
+    if not explanation.get("stale_demand_only"):
+        return False, "not_stale_only"
+    blockers = set(explanation.get("blockers") or [])
+    real_blockers = blockers - {"Stale-only demand requires manual review"}
+    if real_blockers:
+        return False, "has_hard_blocker"
+    if "Stale-only demand requires manual review" not in set(explanation.get("purchase_readiness_issues") or []):
+        return False, "not_blocked_by_stale_demand"
+    if explanation.get("supplier_id") is None:
+        return False, "missing_supplier"
+    if explanation.get("lead_time_days") is None or float(explanation.get("lead_time_days") or 0) <= 0:
+        return False, "missing_lead_time"
+    if float(explanation.get("recommended_quantity") or 0) <= 0:
+        return False, "non_positive_quantity"
+    if explanation.get("recommended_action") != "reorder":
+        return False, "not_reorder"
+    if explanation.get("purchase_readiness_status") == "order_ready":
+        return False, "already_order_ready"
+    return True, "candidate"
+
+
+def stale_demand_review_suggested_action(explanation: dict[str, Any]) -> str:
+    warnings = " ".join(explanation.get("warnings") or []).lower()
+    if "return" in warnings or "negative" in warnings:
+        return "manual_review"
+    current_stock = float(explanation.get("current_stock") or 0)
+    recommended_quantity = float(explanation.get("recommended_quantity") or 0)
+    if current_stock <= 0 and recommended_quantity > 0:
+        return "approve_one_time_reorder"
+    return "manual_review"
+
+
+def effective_unit_cost_from_explanation(explanation: dict[str, Any]) -> float | None:
+    snapshot = explanation.get("forecast_snapshot") or {}
+    for value in (
+        snapshot.get("cost_price"),
+        snapshot.get("estimated_unit_cost"),
+        snapshot.get("unit_cost"),
+    ):
+        parsed = parse_positive(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def cleanup_issues_for_recommendation(recommendation: Recommendation, explanation: dict[str, Any]) -> list[str]:
     issues = []
     actionable_existing = recommendation.status in ACTIONABLE_RECOMMENDATION_STATUSES
     if actionable_existing and explanation.get("stale_demand_only"):
-        issues.append("stale-only actionable existing row")
+        issues.append("stale_demand_review_required")
     if "Missing supplier" in explanation["blockers"]:
         issues.append("missing supplier")
     if "Missing lead time" in explanation["blockers"]:
@@ -713,7 +848,7 @@ def cleanup_issues_for_recommendation(recommendation: Recommendation, explanatio
     if explanation.get("purchase_readiness_status") != "order_ready":
         for issue in explanation.get("purchase_readiness_issues", []):
             cleanup_issue = cleanup_issue_name(issue)
-            if cleanup_issue == "stale-only actionable existing row" and not actionable_existing:
+            if cleanup_issue == "stale_demand_review_required" and not actionable_existing:
                 cleanup_issue = "stale-only demand review"
             issues.append(cleanup_issue)
     return unique_preserve_order(issues)
@@ -738,7 +873,7 @@ def cleanup_issue_name(issue: str) -> str:
     if "forecast action is not reorder" in issue_lower:
         return "enough stock/no reorder needed"
     if "stale-only" in issue_lower:
-        return "stale-only actionable existing row"
+        return "stale_demand_review_required"
     if "raised to moq" in issue_lower:
         return "quantity raised to MOQ"
     if "rounded to pack size" in issue_lower or "pack-size multiple" in issue_lower:
@@ -756,7 +891,7 @@ def cleanup_action_for_recommendation(issues: list[str], explanation: dict[str, 
         return "update_after_supplier_fix"
     if "missing pack size" in issue_text or "pack-size" in issue_text:
         return "update_after_pack_size_fix" if settings.recommendation_require_pack_size else "review_pack_size_optional"
-    if "stale-only" in issue_text:
+    if "stale-only" in issue_text or "stale_demand_review_required" in issue_text:
         return "review_stale_demand"
     if "enough stock/no reorder needed" in issue_text:
         return "convert_to_watchlist"
@@ -970,6 +1105,19 @@ def confidence_label(blockers: list[str], warnings: list[str]) -> str:
 
 def iso_date(value: date | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def parse_iso_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def order_date(value: Any) -> date | None:

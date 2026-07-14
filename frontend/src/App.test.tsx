@@ -44,6 +44,7 @@ import {
   getProductSeasonality,
   getSeasonalProducts,
   getSeasonalitySummary,
+  getStaleDemandReview,
   getSupplierForecast,
   getPurchaseOrder,
   getRecommendation,
@@ -83,6 +84,7 @@ import type {
   RecommendationLLMExplanation,
   SeasonalProduct,
   SeasonalitySummary,
+  StaleDemandReviewResponse,
   SupplierAssignmentReviewItem,
   SupplierAssignmentReviewSummary,
   SupplierForecastResponse,
@@ -126,6 +128,7 @@ vi.mock("./api", () => ({
   getSeasonalitySummary: vi.fn(),
   getSeasonalProducts: vi.fn(),
   getProductSeasonality: vi.fn(),
+  getStaleDemandReview: vi.fn(),
   getSupplierForecast: vi.fn(),
   createDraftPOFromSupplierForecast: vi.fn(),
   isAuthEnabled: vi.fn(),
@@ -831,6 +834,59 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
   };
 }
 
+function mockStaleDemandReview(
+  overrides: Partial<StaleDemandReviewResponse> = {},
+): StaleDemandReviewResponse {
+  return {
+    summary: {
+      products_evaluated: 0,
+      total_candidates: 0,
+      suggested_action_counts: {},
+      skipped_counts: {},
+      limit: 500,
+    },
+    items: [],
+    ...overrides,
+  };
+}
+
+function mockStaleDemandReviewWithCandidate(): StaleDemandReviewResponse {
+  return mockStaleDemandReview({
+    summary: {
+      products_evaluated: 1,
+      total_candidates: 1,
+      suggested_action_counts: { manual_review: 1 },
+      skipped_counts: {},
+      limit: 500,
+    },
+    items: [
+      {
+        product_id: 3020,
+        product_name: "Stale Product",
+        orderpro_sku: "STALE-3020",
+        supplier_id: 10,
+        supplier_name: "Acme Supplies",
+        last_demand_date: "2025-01-01",
+        days_since_last_demand: 560,
+        demand_rows: 4,
+        monthly_average_demand: 2.5,
+        current_stock: 0,
+        lead_time_days: 4,
+        advisory_recommended_quantity: 6,
+        estimated_unit_cost: 9.5,
+        estimated_total_cost: 57,
+        blockers: [],
+        warnings: ["Stale demand only; last demand is older than 180 days"],
+        purchase_readiness_issues: ["Stale-only demand requires manual review"],
+        suggested_action: "manual_review",
+        stale_demand_policy: "manual_review_required",
+        recommendation_status: "needs_review",
+        purchase_readiness_status: "blocked",
+      },
+    ],
+  });
+}
+
 function mockLLMExplanation(
   overrides: Partial<RecommendationLLMExplanation> = {},
 ): RecommendationLLMExplanation {
@@ -1078,6 +1134,7 @@ beforeEach(() => {
   vi.mocked(getSeasonalitySummary).mockResolvedValue(mockSeasonalitySummary());
   vi.mocked(getSeasonalProducts).mockResolvedValue([]);
   vi.mocked(getProductSeasonality).mockResolvedValue(mockProductSeasonalityDetail());
+  vi.mocked(getStaleDemandReview).mockResolvedValue(mockStaleDemandReview());
   vi.mocked(getSupplierForecast).mockResolvedValue(mockSupplierForecast());
   vi.mocked(generateRecommendationLLMExplanation).mockResolvedValue(mockLLMExplanation());
   vi.mocked(createProductSupplier).mockResolvedValue(mockSupplierMapping());
@@ -3074,6 +3131,19 @@ describe("App mapping review workflow", () => {
         "Recommendations are advisory. Converting a recommendation only creates a draft purchase order. It does not approve or issue it.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("recommendations tab displays stale-demand review candidates", async () => {
+    vi.mocked(getStaleDemandReview).mockResolvedValue(mockStaleDemandReviewWithCandidate());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    expect(await screen.findByRole("heading", { name: "Stale Demand Review" })).toBeInTheDocument();
+    expect(screen.getByText("Demand is stale; manager review required before PO.")).toBeInTheDocument();
+    expect(screen.getByText("Stale Product")).toBeInTheDocument();
+    expect(screen.getByText("3020")).toBeInTheDocument();
+    expect(screen.getByText("manual_review")).toBeInTheDocument();
   });
 
   it("generate recommendation calls the reorder endpoint", async () => {

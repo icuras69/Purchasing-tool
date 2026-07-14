@@ -617,6 +617,96 @@ def test_stale_only_legacy_demand_requires_review_but_explains_advisory_quantity
     assert create_response.json()["detail"] == "Product has stale-only legacy demand and requires manual review."
 
 
+def test_stale_demand_review_lists_stale_reorder_candidate_read_only(client, db_session):
+    product, supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    product_count = db_session.query(Product).count()
+    recommendation_count = db_session.query(Recommendation).count()
+
+    response = client.get("/recommendations/stale-demand-review")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert db_session.query(Product).count() == product_count
+    assert db_session.query(Recommendation).count() == recommendation_count
+    assert payload["summary"]["total_candidates"] == 1
+    item = payload["items"][0]
+    assert item["product_id"] == product.id
+    assert item["supplier_id"] == supplier.id
+    assert item["last_demand_date"] == STALE_DEMAND_DATE.isoformat()
+    assert item["days_since_last_demand"] > 180
+    assert item["demand_rows"] == 1
+    assert item["monthly_average_demand"] > 0
+    assert item["current_stock"] == 0
+    assert item["lead_time_days"] == supplier.lead_time_days
+    assert item["advisory_recommended_quantity"] > 0
+    assert "Stale-only demand requires manual review" in item["purchase_readiness_issues"]
+    assert item["suggested_action"] in {"manual_review", "approve_one_time_reorder"}
+
+
+def test_stale_demand_review_excludes_recent_demand_product(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+
+    response = client.get("/recommendations/stale-demand-review")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total_candidates"] == 0
+    assert all(item["product_id"] != product.id for item in payload["items"])
+
+
+def test_stale_demand_review_excludes_missing_supplier_blocker(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.supplier_id = None
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.add(
+        Recommendation(
+            product_id=product.id,
+            recommended_qty=2,
+            risk_level="medium",
+            recommendation_type="reorder",
+            status="pending_review",
+            reason="Existing stale recommendation with missing supplier.",
+            generated_by="test",
+        )
+    )
+    db_session.commit()
+
+    review_response = client.get("/recommendations/stale-demand-review")
+    cleanup_response = client.get("/recommendations/cleanup-candidates")
+
+    assert review_response.status_code == 200
+    assert review_response.json()["summary"]["total_candidates"] == 0
+    assert cleanup_response.status_code == 200
+    cleanup_item = cleanup_response.json()["candidates"][0]
+    assert cleanup_item["product_id"] == product.id
+    assert "missing supplier" in cleanup_item["issues"]
+    assert cleanup_item["suggested_action"] == "update_after_supplier_fix"
+
+
+def test_stale_demand_review_excludes_zero_advisory_quantity(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 100, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+
+    response = client.get("/recommendations/stale-demand-review")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total_candidates"] == 0
+    assert all(item["product_id"] != product.id for item in payload["items"])
+
+
 def test_demand_policy_impact_endpoint_reports_stale_and_recent_policy_changes(client, db_session):
     seed_recommendation_product(db_session)
     stale_product, _supplier, _mapping = seed_recommendation_product(
@@ -726,11 +816,11 @@ def test_cleanup_candidates_endpoint_reports_stale_actionable_existing_row_read_
     assert db_session.query(Recommendation).count() == before_count
     assert stored.status == "pending_review"
     assert payload["summary"]["total_candidates"] == 1
-    assert payload["summary"]["issue_counts"]["stale-only actionable existing row"] == 1
+    assert payload["summary"]["issue_counts"]["stale_demand_review_required"] == 1
     candidate = payload["candidates"][0]
     assert candidate["product_id"] == product.id
     assert candidate["purchase_readiness_status"] == "blocked"
-    assert "stale-only actionable existing row" in candidate["issues"]
+    assert "stale_demand_review_required" in candidate["issues"]
     assert candidate["suggested_action"] == "review_stale_demand"
 
 
