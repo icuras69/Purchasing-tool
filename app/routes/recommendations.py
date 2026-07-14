@@ -28,6 +28,7 @@ from app.services.recommendation_audit import (
     demand_policy_impact,
     explain_product_recommendation,
 )
+from app.services.pack_size_audit import pack_size_audit
 from app.services.perf_logging import perf_timer
 
 
@@ -139,6 +140,14 @@ def get_cleanup_candidates(
     db: Session = Depends(get_db),
 ):
     return cleanup_candidates(db, limit=limit)
+
+
+@router.get("/pack-size-audit")
+def get_pack_size_audit(
+    sample_limit: int = Query(default=25, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    return pack_size_audit(db, sample_limit=sample_limit)
 
 
 @router.get("/{recommendation_id}", response_model=RecommendationResponse)
