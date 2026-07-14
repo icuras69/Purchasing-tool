@@ -76,6 +76,11 @@ def create_reorder_recommendation_for_product(
             "quantity_satisfies_pack_size": explanation.get("quantity_satisfies_pack_size"),
             "quantity_was_raised_to_moq": explanation.get("quantity_was_raised_to_moq"),
             "quantity_was_rounded_to_pack_size": explanation.get("quantity_was_rounded_to_pack_size"),
+            "pack_size_required": explanation.get("pack_size_required"),
+            "cost_required": explanation.get("cost_required"),
+            "cost_status": explanation.get("cost_status"),
+            "stale_demand_policy": explanation.get("stale_demand_policy"),
+            "stale_demand_recommendations_allowed": explanation.get("stale_demand_recommendations_allowed"),
         }
     )
     supplier_context = forecast.get("supplier_context") or {}
@@ -176,8 +181,10 @@ def input_snapshot(
             "moq_source": effective_inputs.get("moq_source", forecast.get("moq_source")),
             "pack_size": effective_inputs.get("pack_size", forecast.get("pack_size")),
             "pack_size_source": effective_inputs.get("pack_size_source", forecast.get("pack_size_source")),
+            "pack_size_required": forecast.get("pack_size_required"),
             "safety_stock": effective_inputs.get("safety_stock", forecast.get("safety_stock_used")),
             "safety_stock_source": effective_inputs.get("safety_stock_source", forecast.get("safety_stock_source")),
+            "cost_required": forecast.get("cost_required"),
         },
         "orderpro_product_supplier": {
             "supplier_id": product.supplier_id,

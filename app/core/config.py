@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     legacy_demand_stale_days: int = 180
     legacy_demand_lookback_days: int | None = None
     allow_stale_demand_recommendations: bool = False
+    recommendation_require_pack_size: bool = False
+    recommendation_require_cost: bool = False
+    recommendation_allow_stale_demand: bool = False
     auth_enabled: bool = True
     admin_email: str = ""
     admin_password_hash: str = ""

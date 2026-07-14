@@ -772,10 +772,14 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
     confidence: null,
     input_snapshot: {
       effective_forecast_inputs: {
+        cost_price: 9.5,
+        cost_source: "orderpro_product_cost",
         min_order_qty: 2,
         moq_source: "product_record",
         pack_size: null,
         pack_size_source: "missing",
+        pack_size_required: false,
+        cost_required: false,
       },
     },
     forecast_snapshot: {
@@ -795,11 +799,15 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
       reorder_point: 12,
       input_blocking_issues: [],
       input_warning_issues: ["missing_pack_size"],
-      purchase_readiness_status: "needs_review",
-      not_ready_for_po: true,
-      suggested_cleanup_action: "update_after_pack_size_fix",
-      quantity_review_note: "Not ready for PO: pack size is missing, so quantity may need manual rounding.",
+      purchase_readiness_status: "order_ready",
+      not_ready_for_po: false,
+      suggested_cleanup_action: "none",
+      quantity_review_note: "Ready for PO using current MOQ and pack-size inputs.",
       quantity_was_rounded_to_pack_size: false,
+      pack_size_required: false,
+      cost_required: false,
+      stale_demand_policy: "recent_or_not_legacy",
+      stale_demand_recommendations_allowed: false,
       explanation: "Stock is below reorder point.",
     },
     supplier_context_snapshot: {
@@ -3107,10 +3115,13 @@ describe("App mapping review workflow", () => {
     expect(within(detail).getByText("recent_or_current")).toBeInTheDocument();
     expect(within(detail).getByText("2026-07-01")).toBeInTheDocument();
     expect(within(detail).getByText("18.26")).toBeInTheDocument();
-    expect(within(detail).getByText("needs_review")).toBeInTheDocument();
-    expect(within(detail).getByText("update_after_pack_size_fix")).toBeInTheDocument();
-    expect(within(detail).getByText("Not ready for PO: pack size is missing, so quantity may need manual rounding.")).toBeInTheDocument();
+    expect(within(detail).getByText("order_ready")).toBeInTheDocument();
+    expect(within(detail).getByText("Ready for PO using current MOQ and pack-size inputs.")).toBeInTheDocument();
+    expect(within(detail).getByText("Pack size required")).toBeInTheDocument();
+    expect(within(detail).getByText("Cost required")).toBeInTheDocument();
+    expect(within(detail).getByText("Stale-demand policy")).toBeInTheDocument();
     expect(within(detail).getByText(/2\s*\(product_record\)/)).toBeInTheDocument();
+    expect(within(detail).getByText(/9\.5\s*\(orderpro_product_cost\)/)).toBeInTheDocument();
     expect(within(detail).getByText("missing_pack_size")).toBeInTheDocument();
     expect(within(detail).getAllByText("Stock is below reorder point.").length).toBeGreaterThan(0);
     expect(screen.getByText("ACME-1")).toBeInTheDocument();

@@ -208,7 +208,7 @@ def test_simulation_does_not_mark_stale_only_product_order_ready_after_pack_fix(
     assert summary["products_simulated"] == 1
     assert summary["would_become_order_ready"] == 0
     assert summary["stale_demand_still_needs_review"] == 1
-    assert item["simulated_purchase_readiness"] == "needs_review"
+    assert item["simulated_purchase_readiness"] == "blocked"
 
 
 def test_pack_size_audit_endpoint_is_read_only(client, db_session):

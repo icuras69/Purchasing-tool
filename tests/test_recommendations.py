@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
+from app.core.config import settings
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_forecast_input_profile import ProductForecastInputProfile
@@ -415,7 +416,7 @@ def test_purchase_readiness_order_ready_with_valid_moq_and_pack_size(client, db_
     assert payload["suggested_cleanup_action"] == "none"
 
 
-def test_missing_pack_size_produces_purchase_review_not_order_ready(client, db_session):
+def test_missing_pack_size_is_advisory_when_pack_size_not_required(client, db_session):
     product, _supplier, _mapping = seed_recommendation_product(db_session)
 
     response = client.get(f"/recommendations/explain?product_id={product.id}")
@@ -423,11 +424,78 @@ def test_missing_pack_size_produces_purchase_review_not_order_ready(client, db_s
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "actionable"
-    assert payload["purchase_readiness_status"] == "needs_review"
+    assert payload["purchase_readiness_status"] == "order_ready"
+    assert payload["not_ready_for_po"] is False
     assert payload["pack_size"] is None
+    assert payload["pack_size_required"] is False
+    assert "Missing pack size" not in payload["purchase_readiness_issues"]
+    assert any("Missing pack size" in warning for warning in payload["warnings"])
+    assert payload["suggested_cleanup_action"] == "none"
+    assert payload["quantity_review_note"] == "Ready for PO using current MOQ and pack-size inputs."
+
+
+def test_missing_pack_size_blocks_when_pack_size_required(monkeypatch, client, db_session):
+    monkeypatch.setattr(settings, "recommendation_require_pack_size", True)
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+
+    explain_response = client.get(f"/recommendations/explain?product_id={product.id}")
+    create_response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert explain_response.status_code == 200
+    payload = explain_response.json()
+    assert payload["purchase_readiness_status"] == "blocked"
+    assert payload["pack_size_required"] is True
     assert "Missing pack size" in payload["purchase_readiness_issues"]
     assert payload["suggested_cleanup_action"] == "update_after_pack_size_fix"
-    assert "Not ready for PO" in payload["quantity_review_note"]
+    assert "pack size is required" in payload["quantity_review_note"]
+    assert create_response.status_code == 400
+    assert create_response.json()["detail"] == "Product is missing required pack size."
+
+
+def test_create_recommendation_allows_optional_missing_pack_size(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+
+    response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["forecast_snapshot"]["purchase_readiness_status"] == "order_ready"
+    assert payload["forecast_snapshot"]["pack_size_required"] is False
+    assert payload["forecast_snapshot"]["not_ready_for_po"] is False
+
+
+def test_missing_cost_warns_when_cost_not_required(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session, product_overrides={"cost_price": None})
+
+    explain_response = client.get(f"/recommendations/explain?product_id={product.id}")
+    create_response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert explain_response.status_code == 200
+    payload = explain_response.json()
+    assert payload["cost_required"] is False
+    assert payload["cost_status"] == "missing"
+    assert payload["purchase_readiness_status"] == "needs_review"
+    assert "Missing cost" in payload["purchase_readiness_issues"]
+    assert payload["suggested_cleanup_action"] == "review_missing_cost"
+    assert create_response.status_code == 201
+    assert create_response.json()["estimated_unit_cost"] is None
+
+
+def test_missing_cost_blocks_when_cost_required(monkeypatch, client, db_session):
+    monkeypatch.setattr(settings, "recommendation_require_cost", True)
+    product, _supplier, _mapping = seed_recommendation_product(db_session, product_overrides={"cost_price": None})
+
+    explain_response = client.get(f"/recommendations/explain?product_id={product.id}")
+    create_response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert explain_response.status_code == 200
+    payload = explain_response.json()
+    assert payload["cost_required"] is True
+    assert payload["cost_status"] == "missing"
+    assert payload["purchase_readiness_status"] == "blocked"
+    assert "Missing cost" in payload["purchase_readiness_issues"]
+    assert create_response.status_code == 400
+    assert create_response.json()["detail"] == "Product is missing required cost."
 
 
 def test_quantity_below_moq_is_raised_and_flagged_for_review(client, db_session):
@@ -542,7 +610,7 @@ def test_stale_only_legacy_demand_requires_review_but_explains_advisory_quantity
     assert payload["stale_demand_only"] is True
     assert payload["stale_demand_policy"] == "manual_review_required"
     assert payload["recommended_quantity"] > 0
-    assert payload["purchase_readiness_status"] == "needs_review"
+    assert payload["purchase_readiness_status"] == "blocked"
     assert "Stale-only demand requires manual review" in payload["purchase_readiness_issues"]
     assert any(warning.startswith("Stale demand only") for warning in payload["warnings"])
     assert create_response.status_code == 400
@@ -661,9 +729,32 @@ def test_cleanup_candidates_endpoint_reports_stale_actionable_existing_row_read_
     assert payload["summary"]["issue_counts"]["stale-only actionable existing row"] == 1
     candidate = payload["candidates"][0]
     assert candidate["product_id"] == product.id
-    assert candidate["purchase_readiness_status"] == "needs_review"
+    assert candidate["purchase_readiness_status"] == "blocked"
     assert "stale-only actionable existing row" in candidate["issues"]
-    assert candidate["suggested_action"] == "convert_to_watchlist"
+    assert candidate["suggested_action"] == "review_stale_demand"
+
+
+def test_cleanup_candidates_exclude_optional_missing_pack_size_only(client, db_session):
+    product, supplier, _mapping = seed_recommendation_product(db_session)
+    recommendation = Recommendation(
+        product_id=product.id,
+        supplier_id=supplier.id,
+        recommended_qty=2,
+        risk_level="medium",
+        recommendation_type="reorder",
+        status="pending_review",
+        reason="Existing recommendation with optional missing pack size.",
+        generated_by="test",
+    )
+    db_session.add(recommendation)
+    db_session.commit()
+
+    response = client.get("/recommendations/cleanup-candidates")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total_candidates"] == 0
+    assert payload["candidates"] == []
 
 
 def test_cleanup_candidates_endpoint_reports_missing_supplier_and_lead_time(client, db_session):

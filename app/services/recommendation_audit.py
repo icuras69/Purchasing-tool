@@ -21,6 +21,10 @@ ACTIONABLE_RECOMMENDATION_STATUSES = {"draft", "pending_review", "accepted"}
 EPSILON = 0.000001
 
 
+def stale_demand_recommendations_allowed() -> bool:
+    return bool(settings.recommendation_allow_stale_demand or settings.allow_stale_demand_recommendations)
+
+
 def load_product_for_recommendation_explanation(db: Session, product_id: int) -> Product | None:
     return (
         db.query(Product)
@@ -91,6 +95,7 @@ def explain_product_recommendation(
         "demand_policy_status": forecast.get("demand_policy_status"),
         "stale_demand_only": bool(forecast.get("stale_demand_only")),
         "stale_demand_policy": stale_demand_policy_status(forecast),
+        "stale_demand_recommendations_allowed": stale_demand_recommendations_allowed(),
         "legacy_demand_raw_units_in_window": forecast.get("legacy_demand_raw_units_in_window"),
         "legacy_demand_negative_or_return_rows": forecast.get("legacy_demand_negative_or_return_rows"),
         "demand_rows": demand["demand_rows"],
@@ -107,6 +112,9 @@ def explain_product_recommendation(
         "moq_source": effective_inputs.get("moq_source"),
         "pack_size": effective_inputs.get("pack_size"),
         "pack_size_source": effective_inputs.get("pack_size_source"),
+        "pack_size_required": settings.recommendation_require_pack_size,
+        "cost_required": settings.recommendation_require_cost,
+        "cost_status": "available" if effective_inputs.get("cost_price") is not None else "missing",
         "quantity_satisfies_moq": purchase_readiness["quantity_satisfies_moq"],
         "quantity_satisfies_pack_size": purchase_readiness["quantity_satisfies_pack_size"],
         "quantity_was_raised_to_moq": purchase_readiness["quantity_was_raised_to_moq"],
@@ -236,7 +244,10 @@ def warnings_for_product(
     if "fallback_moq" in effective_inputs.get("warning_issues", []):
         warnings.append(f"Using fallback MOQ of {effective_inputs.get('min_order_qty')}")
     if "missing_pack_size" in effective_inputs.get("warning_issues", []):
-        warnings.append("Missing pack size; quantity should be reviewed before PO creation")
+        if settings.recommendation_require_pack_size:
+            warnings.append("Missing required pack size")
+        else:
+            warnings.append("Missing pack size; no order multiple is applied unless reviewed")
     if forecast.get("recommended_action") == "monitor" and float(forecast.get("incoming_qty") or 0) > 0:
         warnings.append("Incoming stock covers the current shortfall")
     if float(forecast.get("recommended_qty") or 0) > 0:
@@ -247,7 +258,7 @@ def warnings_for_product(
 def explanation_status(blockers: list[str], forecast: dict[str, Any], recommended_qty: float) -> str:
     if blockers:
         return "blocked"
-    if is_stale_demand_only(forecast) and not settings.allow_stale_demand_recommendations and recommended_qty > 0:
+    if is_stale_demand_only(forecast) and not stale_demand_recommendations_allowed() and recommended_qty > 0:
         return "needs_review"
     if forecast.get("recommended_action") == "reorder" and recommended_qty > 0:
         return "actionable"
@@ -275,7 +286,7 @@ def is_stale_demand_only(forecast: dict[str, Any]) -> bool:
 def stale_demand_policy_status(forecast: dict[str, Any]) -> str:
     if not is_stale_demand_only(forecast):
         return "recent_or_not_legacy"
-    if settings.allow_stale_demand_recommendations:
+    if stale_demand_recommendations_allowed():
         return "allowed_by_config_with_warning"
     return "manual_review_required"
 
@@ -356,54 +367,44 @@ def purchase_readiness_for_product(
     recommended_quantity: float,
 ) -> dict[str, Any]:
     quality = quantity_quality_info(effective_inputs, forecast, recommended_quantity)
-    issues = []
+    hard_issues = []
+    review_issues = []
     if blockers:
-        issues.extend(blockers)
+        hard_issues.extend(blockers)
     if forecast.get("recommended_action") != "reorder":
-        issues.append("Forecast action is not reorder")
+        hard_issues.append("Forecast action is not reorder")
     if recommended_quantity <= 0:
-        issues.append("Non-positive recommendation quantity")
-    if status == "needs_review" or is_stale_demand_only(forecast):
-        issues.append("Stale-only demand requires manual review")
+        hard_issues.append("Non-positive recommendation quantity")
+    if is_stale_demand_only(forecast) and not stale_demand_recommendations_allowed():
+        hard_issues.append("Stale-only demand requires manual review")
     if not quality["quantity_satisfies_moq"]:
-        issues.append("Recommended quantity is below MOQ")
+        review_issues.append("Recommended quantity is below MOQ")
     if not quality["quantity_satisfies_pack_size"]:
-        issues.append("Recommended quantity is not a pack-size multiple")
-    if effective_inputs.get("pack_size") is None and recommended_quantity > 0:
-        issues.append("Missing pack size")
+        review_issues.append("Recommended quantity is not a pack-size multiple")
+    if effective_inputs.get("pack_size") is None and recommended_quantity > 0 and settings.recommendation_require_pack_size:
+        hard_issues.append("Missing pack size")
     if "missing_cost" in effective_inputs.get("warning_issues", []):
-        issues.append("Missing cost")
+        if settings.recommendation_require_cost:
+            hard_issues.append("Missing cost")
+        else:
+            review_issues.append("Missing cost")
     if "fallback_moq" in effective_inputs.get("warning_issues", []):
-        issues.append("Using fallback MOQ")
+        review_issues.append("Using fallback MOQ")
     if any("return" in warning.lower() or "negative" in warning.lower() for warning in warnings):
-        issues.append("Returns or negative demand need review")
+        review_issues.append("Returns or negative demand need review")
     if quality["quantity_was_raised_to_moq"]:
-        issues.append("Quantity was raised to MOQ")
+        review_issues.append("Quantity was raised to MOQ")
     if quality["quantity_was_rounded_to_pack_size"]:
-        issues.append("Quantity was rounded to pack size")
+        review_issues.append("Quantity was rounded to pack size")
 
-    hard_blocked = bool(blockers) or forecast.get("recommended_action") != "reorder" or recommended_quantity <= 0
-    if hard_blocked:
+    if hard_issues:
         readiness_status = "blocked"
-    elif any(
-        issue in issues
-        for issue in {
-            "Missing pack size",
-            "Missing cost",
-            "Using fallback MOQ",
-            "Returns or negative demand need review",
-            "Stale-only demand requires manual review",
-            "Quantity was raised to MOQ",
-            "Quantity was rounded to pack size",
-            "Recommended quantity is below MOQ",
-            "Recommended quantity is not a pack-size multiple",
-        }
-    ):
+    elif review_issues:
         readiness_status = "needs_review"
     else:
         readiness_status = "order_ready"
 
-    unique_issues = unique_preserve_order(issues)
+    unique_issues = unique_preserve_order(hard_issues + review_issues)
     return {
         "status": readiness_status,
         "issues": unique_issues,
@@ -421,10 +422,14 @@ def suggested_cleanup_action(issues: list[str], readiness_status: str) -> str:
     if "missing supplier" in issue_text or "missing lead time" in issue_text:
         return "update_after_supplier_fix"
     if "missing pack size" in issue_text or "pack-size" in issue_text or "pack size" in issue_text:
-        return "update_after_pack_size_fix"
-    if "stale-only" in issue_text or "forecast action is not reorder" in issue_text:
+        return "update_after_pack_size_fix" if settings.recommendation_require_pack_size else "review_pack_size_optional"
+    if "stale-only" in issue_text:
+        return "review_stale_demand"
+    if "forecast action is not reorder" in issue_text:
         return "convert_to_watchlist"
-    if "missing cost" in issue_text or "moq" in issue_text:
+    if "missing cost" in issue_text:
+        return "review_missing_cost"
+    if "moq" in issue_text:
         return "review"
     return "reject_existing_recommendation" if readiness_status == "blocked" else "review"
 
@@ -433,7 +438,9 @@ def quantity_review_note(readiness_status: str, issues: list[str], quality: dict
     if readiness_status == "order_ready":
         return "Ready for PO using current MOQ and pack-size inputs."
     if "Missing pack size" in issues:
-        return "Not ready for PO: pack size is missing, so quantity may need manual rounding."
+        if settings.recommendation_require_pack_size:
+            return "Not ready for PO: pack size is required by the current recommendation policy."
+        return "Review before PO: pack size is optional and missing, so no pack multiple was applied."
     if "Recommended quantity is not a pack-size multiple" in issues:
         return "Not ready for PO: recommended quantity is not a pack-size multiple."
     if "Quantity was rounded to pack size" in issues:
@@ -693,7 +700,11 @@ def cleanup_issues_for_recommendation(recommendation: Recommendation, explanatio
     minimum_order_quantity = parse_positive(explanation.get("minimum_order_quantity"))
     if minimum_order_quantity and 0 < float(recommendation.recommended_qty or 0) < minimum_order_quantity:
         issues.append("quantity below MOQ")
-    if explanation.get("pack_size") is None and float(recommendation.recommended_qty or 0) > 0:
+    if (
+        settings.recommendation_require_pack_size
+        and explanation.get("pack_size") is None
+        and float(recommendation.recommended_qty or 0) > 0
+    ):
         issues.append("missing pack size")
     if "Missing cost" in explanation["warnings"]:
         issues.append("cost missing")
@@ -744,9 +755,13 @@ def cleanup_action_for_recommendation(issues: list[str], explanation: dict[str, 
     if "missing supplier" in issue_text or "missing lead time" in issue_text:
         return "update_after_supplier_fix"
     if "missing pack size" in issue_text or "pack-size" in issue_text:
-        return "update_after_pack_size_fix"
-    if "stale-only" in issue_text or "enough stock/no reorder needed" in issue_text:
+        return "update_after_pack_size_fix" if settings.recommendation_require_pack_size else "review_pack_size_optional"
+    if "stale-only" in issue_text:
+        return "review_stale_demand"
+    if "enough stock/no reorder needed" in issue_text:
         return "convert_to_watchlist"
+    if "cost missing" in issue_text:
+        return "review_missing_cost"
     if "non-positive" in issue_text or explanation.get("purchase_readiness_status") == "blocked":
         return "reject_existing_recommendation"
     return "review"
@@ -928,8 +943,12 @@ def validate_product_can_create_reorder_recommendation(explanation: dict[str, An
         raise ValueError("Product is missing usable supplier lead time.")
     if "No demand history" in explanation["blockers"]:
         raise ValueError("Product is missing demand history or open demand.")
-    if explanation.get("stale_demand_only") and not settings.allow_stale_demand_recommendations:
+    if explanation.get("stale_demand_only") and not stale_demand_recommendations_allowed():
         raise ValueError("Product has stale-only legacy demand and requires manual review.")
+    if explanation.get("cost_required") and explanation.get("cost_status") == "missing":
+        raise ValueError("Product is missing required cost.")
+    if explanation.get("pack_size_required") and explanation.get("pack_size") is None:
+        raise ValueError("Product is missing required pack size.")
     if explanation["status"] != "actionable":
         raise ValueError("Product is not currently recommended for reorder.")
 

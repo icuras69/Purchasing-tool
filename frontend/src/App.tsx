@@ -2586,6 +2586,18 @@ function RecommendationDetail({
             <dd>{snapshotValue(forecastSnapshot, "quantity_review_note")}</dd>
           </div>
           <div>
+            <dt>Pack size required</dt>
+            <dd>{snapshotValue(forecastSnapshot, "pack_size_required")}</dd>
+          </div>
+          <div>
+            <dt>Cost required</dt>
+            <dd>{snapshotValue(forecastSnapshot, "cost_required")}</dd>
+          </div>
+          <div>
+            <dt>Stale-demand policy</dt>
+            <dd>{snapshotValue(forecastSnapshot, "stale_demand_policy")}</dd>
+          </div>
+          <div>
             <dt>MOQ</dt>
             <dd>
               {snapshotValue(effectiveInputs, "min_order_qty")} ({snapshotValue(effectiveInputs, "moq_source")})
@@ -2595,6 +2607,12 @@ function RecommendationDetail({
             <dt>Pack size</dt>
             <dd>
               {snapshotValue(effectiveInputs, "pack_size")} ({snapshotValue(effectiveInputs, "pack_size_source")})
+            </dd>
+          </div>
+          <div>
+            <dt>Cost</dt>
+            <dd>
+              {snapshotValue(effectiveInputs, "cost_price")} ({snapshotValue(effectiveInputs, "cost_source")})
             </dd>
           </div>
           <div>
