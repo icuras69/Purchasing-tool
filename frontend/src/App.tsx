@@ -15,6 +15,8 @@ import {
   createReorderRecommendation,
   exportPurchaseOrderCsv,
   exportManagerApprovedStaleQueueCsv,
+  exportRecommendationCleanupCandidatesCsv,
+  exportRecommendationReviewSummaryCsv,
   exportStaleDemandReviewCsv,
   fetchProductForecast,
   fetchProductSuppliers,
@@ -45,6 +47,7 @@ import {
   getProductSeasonality,
   getPurchaseOrder,
   getRecommendation,
+  getRecommendationReviewSummary,
   getStaleDemandReview,
   getSeasonalProducts,
   getSeasonalitySummary,
@@ -85,6 +88,7 @@ import type {
   ManagerApprovedStaleQueueItem,
   ManagerApprovedStaleQueueResponse,
   RecommendationLLMExplanation,
+  RecommendationReviewSummaryResponse,
   StaleDemandReviewItem,
   StaleDemandReviewResponse,
   ProductSeasonalityDetail,
@@ -2054,16 +2058,23 @@ function SupplierContextDetails({ context }: { context: ForecastSupplierContext 
 function RecommendationsPanel() {
   const [recommendations, setRecommendations] =
     useState<ResourceState<PurchaseRecommendation>>(initialResource);
+  const [reviewSummary, setReviewSummary] =
+    useState<RecommendationReviewSummaryResponse | null>(null);
   const [staleDemandReview, setStaleDemandReview] =
     useState<StaleDemandReviewResponse | null>(null);
   const [managerApprovedQueue, setManagerApprovedQueue] =
     useState<ManagerApprovedStaleQueueResponse | null>(null);
+  const [reviewSummaryLoading, setReviewSummaryLoading] = useState(true);
   const [staleDemandLoading, setStaleDemandLoading] = useState(true);
   const [managerApprovedQueueLoading, setManagerApprovedQueueLoading] = useState(true);
+  const [reviewSummaryError, setReviewSummaryError] = useState<string | null>(null);
   const [staleDemandError, setStaleDemandError] = useState<string | null>(null);
   const [managerApprovedQueueError, setManagerApprovedQueueError] = useState<string | null>(null);
+  const [reviewSummarySuccess, setReviewSummarySuccess] = useState<string | null>(null);
   const [staleDemandSuccess, setStaleDemandSuccess] = useState<string | null>(null);
   const [managerApprovedQueueSuccess, setManagerApprovedQueueSuccess] = useState<string | null>(null);
+  const [exportingReviewSummary, setExportingReviewSummary] = useState(false);
+  const [exportingCleanupCandidates, setExportingCleanupCandidates] = useState(false);
   const [exportingStaleDemand, setExportingStaleDemand] = useState(false);
   const [exportingManagerApprovedQueue, setExportingManagerApprovedQueue] = useState(false);
   const [staleDemandDecisionDrafts, setStaleDemandDecisionDrafts] =
@@ -2089,6 +2100,24 @@ function RecommendationsPanel() {
       .catch((loadError: Error) => {
         if (active) {
           setRecommendations({ data: [], loading: false, error: loadError.message });
+        }
+      });
+  }, []);
+
+  const loadReviewSummary = useCallback((active = true) => {
+    getRecommendationReviewSummary()
+      .then((loadedSummary) => {
+        if (active) {
+          setReviewSummary(loadedSummary);
+          setReviewSummaryLoading(false);
+          setReviewSummaryError(null);
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setReviewSummary(null);
+          setReviewSummaryLoading(false);
+          setReviewSummaryError(loadError.message);
         }
       });
   }, []);
@@ -2132,12 +2161,13 @@ function RecommendationsPanel() {
   useEffect(() => {
     let active = true;
     loadRecommendations(active);
+    loadReviewSummary(active);
     loadStaleDemandReview(active);
     loadManagerApprovedQueue(active);
     return () => {
       active = false;
     };
-  }, [loadRecommendations, loadManagerApprovedQueue, loadStaleDemandReview]);
+  }, [loadManagerApprovedQueue, loadRecommendations, loadReviewSummary, loadStaleDemandReview]);
 
   async function refreshSelected(recommendationId: number) {
     const loaded = await getRecommendation(recommendationId);
@@ -2274,6 +2304,7 @@ function RecommendationsPanel() {
         notes: draft.notes || null,
       });
       setStaleDemandSuccess(`Saved stale-demand decision for Product ID ${item.product_id}.`);
+      loadReviewSummary();
       loadStaleDemandReview();
       loadManagerApprovedQueue();
     } catch (loadError) {
@@ -2295,6 +2326,36 @@ function RecommendationsPanel() {
       setStaleDemandError((loadError as Error).message);
     } finally {
       setExportingStaleDemand(false);
+    }
+  }
+
+  async function handleExportReviewSummary() {
+    setExportingReviewSummary(true);
+    setReviewSummaryError(null);
+    setReviewSummarySuccess(null);
+    try {
+      const exported = await exportRecommendationReviewSummaryCsv();
+      downloadBlob(exported.blob, exported.filename ?? "recommendation_review_summary.csv");
+      setReviewSummarySuccess("Recommendation review summary CSV exported.");
+    } catch (loadError) {
+      setReviewSummaryError((loadError as Error).message);
+    } finally {
+      setExportingReviewSummary(false);
+    }
+  }
+
+  async function handleExportCleanupCandidates() {
+    setExportingCleanupCandidates(true);
+    setReviewSummaryError(null);
+    setReviewSummarySuccess(null);
+    try {
+      const exported = await exportRecommendationCleanupCandidatesCsv();
+      downloadBlob(exported.blob, exported.filename ?? "recommendation_cleanup_candidates.csv");
+      setReviewSummarySuccess("Recommendation cleanup candidates CSV exported.");
+    } catch (loadError) {
+      setReviewSummaryError((loadError as Error).message);
+    } finally {
+      setExportingCleanupCandidates(false);
     }
   }
 
@@ -2330,6 +2391,7 @@ function RecommendationsPanel() {
       setManagerApprovedQueueSuccess(
         `Created pending review recommendation ${created.id} for Product ID ${item.product_id}.`,
       );
+      loadReviewSummary();
       loadRecommendations();
       loadManagerApprovedQueue();
     } catch (loadError) {
@@ -2347,6 +2409,22 @@ function RecommendationsPanel() {
           <p>See suggested reorder quantities based on stock, demand history, and supplier lead time.</p>
         </div>
       </section>
+
+      <ManagerReviewSummaryPanel
+        error={reviewSummaryError}
+        exportingCleanup={exportingCleanupCandidates}
+        exportingManagerQueue={exportingManagerApprovedQueue}
+        exportingStaleReview={exportingStaleDemand}
+        exportingSummary={exportingReviewSummary}
+        loading={reviewSummaryLoading}
+        onExportCleanup={handleExportCleanupCandidates}
+        onExportManagerQueue={handleExportManagerApprovedQueue}
+        onExportStaleReview={handleExportStaleDemandReview}
+        onExportSummary={handleExportReviewSummary}
+        success={reviewSummarySuccess}
+        summary={reviewSummary}
+      />
+
       <section className="detail-panel" aria-label="Create recommendation">
         <h2>Generate Reorder Recommendation</h2>
         <div className="state">
@@ -2491,6 +2569,89 @@ function RecommendationsTable({
       {recommendations.length === 0 && <div className="state">No recommendations found.</div>}
     </section>
   );
+}
+
+function ManagerReviewSummaryPanel({
+  error,
+  exportingCleanup,
+  exportingManagerQueue,
+  exportingStaleReview,
+  exportingSummary,
+  loading,
+  onExportCleanup,
+  onExportManagerQueue,
+  onExportStaleReview,
+  onExportSummary,
+  success,
+  summary,
+}: {
+  error: string | null;
+  exportingCleanup: boolean;
+  exportingManagerQueue: boolean;
+  exportingStaleReview: boolean;
+  exportingSummary: boolean;
+  loading: boolean;
+  onExportCleanup: () => void;
+  onExportManagerQueue: () => void;
+  onExportStaleReview: () => void;
+  onExportSummary: () => void;
+  success: string | null;
+  summary: RecommendationReviewSummaryResponse | null;
+}) {
+  const counts = summary?.summary;
+  return (
+    <section className="detail-panel" aria-label="Manager Review Summary">
+      <div className="section-header">
+        <h2>Manager Review Summary</h2>
+        <div className="action-row">
+          <button disabled={exportingSummary} onClick={onExportSummary} type="button">
+            {exportingSummary ? "Exporting..." : "Review Summary CSV"}
+          </button>
+          <button disabled={exportingStaleReview} onClick={onExportStaleReview} type="button">
+            {exportingStaleReview ? "Exporting..." : "Stale Demand Review CSV"}
+          </button>
+          <button disabled={exportingManagerQueue} onClick={onExportManagerQueue} type="button">
+            {exportingManagerQueue ? "Exporting..." : "Manager-Approved Queue CSV"}
+          </button>
+          <button disabled={exportingCleanup} onClick={onExportCleanup} type="button">
+            {exportingCleanup ? "Exporting..." : "Cleanup Candidates CSV"}
+          </button>
+        </div>
+      </div>
+      {loading && <div className="state">Loading manager review summary...</div>}
+      {error && <div className="state error">Could not load manager review summary: {error}</div>}
+      {success && <div className="state success">{success}</div>}
+      {counts && (
+        <>
+          <dl className="summary-grid">
+            <SummaryCard label="Total recommendations" value={counts.total_existing_recommendations} />
+            <SummaryCard label="Pending review" value={counts.pending_review_recommendations} />
+            <SummaryCard label="Accepted" value={counts.accepted_recommendations} />
+            <SummaryCard label="Rejected" value={counts.rejected_recommendations} />
+            <SummaryCard label="Stale-demand candidates" value={counts.stale_demand_candidates} />
+            <SummaryCard label="Manager-approved stale" value={counts.manager_approved_stale_queue_count} />
+            <SummaryCard label="Cleanup candidates" value={counts.cleanup_candidates_count} />
+            <SummaryCard label="Ready for manual review" value={counts.recommendations_ready_for_manual_review} />
+            <SummaryCard label="Blocked or unsafe" value={counts.recommendations_blocked_from_po_conversion} />
+          </dl>
+          <div className="state">{managerReviewGuidance(counts)}</div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function managerReviewGuidance(summary: RecommendationReviewSummaryResponse["summary"]): string {
+  if (summary.cleanup_candidates_count > 0 || summary.recommendations_blocked_from_po_conversion > 0) {
+    return "There are cleanup candidates that should be reviewed before PO conversion.";
+  }
+  if (summary.manager_approved_stale_queue_count > 0) {
+    return "Review manager-approved stale candidates before creating pending recommendations.";
+  }
+  if (summary.stale_demand_candidates > 0) {
+    return "Review stale-demand candidates and record manager decisions before recommendation creation.";
+  }
+  return "No manager-approved stale candidates are waiting for review.";
 }
 
 function StaleDemandReviewPanel({

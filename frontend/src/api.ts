@@ -33,6 +33,7 @@ import type {
   StaleDemandReviewDecision,
   StaleDemandReviewResponse,
   ProductSeasonalityDetail,
+  RecommendationReviewSummaryResponse,
   RecommendationAcceptRequest,
   RecommendationConvertResponse,
   RecommendationRejectRequest,
@@ -681,6 +682,13 @@ export function cancelPurchaseOrder(poId: number): Promise<PurchaseOrder> {
 
 export function listRecommendations(): Promise<PurchaseRecommendation[]> {
   return fetchJson<PurchaseRecommendation[]>("/recommendations", "recommendations");
+}
+
+export function getRecommendationReviewSummary(): Promise<RecommendationReviewSummaryResponse> {
+  return fetchJson<RecommendationReviewSummaryResponse>(
+    "/recommendations/review-summary",
+    "recommendation review summary",
+  );
 }
 
 export function getStaleDemandReview(decision = "all"): Promise<StaleDemandReviewResponse> {

@@ -19,6 +19,8 @@ import {
   createReorderRecommendation,
   exportManagerApprovedStaleQueueCsv,
   exportPurchaseOrderCsv,
+  exportRecommendationCleanupCandidatesCsv,
+  exportRecommendationReviewSummaryCsv,
   exportStaleDemandReviewCsv,
   fetchProductForecast,
   fetchProductSuppliers,
@@ -52,6 +54,7 @@ import {
   getSupplierForecast,
   getPurchaseOrder,
   getRecommendation,
+  getRecommendationReviewSummary,
   isAuthEnabled,
   issuePurchaseOrder,
   loginAdmin,
@@ -88,6 +91,7 @@ import type {
   PurchaseOrder,
   PurchaseRecommendation,
   RecommendationLLMExplanation,
+  RecommendationReviewSummaryResponse,
   SeasonalProduct,
   SeasonalitySummary,
   StaleDemandReviewResponse,
@@ -136,6 +140,7 @@ vi.mock("./api", () => ({
   getProductSeasonality: vi.fn(),
   getStaleDemandReview: vi.fn(),
   getManagerApprovedStaleQueue: vi.fn(),
+  getRecommendationReviewSummary: vi.fn(),
   saveStaleDemandReviewDecision: vi.fn(),
   getSupplierForecast: vi.fn(),
   createDraftPOFromSupplierForecast: vi.fn(),
@@ -153,6 +158,8 @@ vi.mock("./api", () => ({
   createManagerApprovedStaleReviewRecommendation: vi.fn(),
   exportStaleDemandReviewCsv: vi.fn(),
   exportManagerApprovedStaleQueueCsv: vi.fn(),
+  exportRecommendationCleanupCandidatesCsv: vi.fn(),
+  exportRecommendationReviewSummaryCsv: vi.fn(),
   acceptRecommendation: vi.fn(),
   rejectRecommendation: vi.fn(),
   convertRecommendationToDraftPO: vi.fn(),
@@ -944,6 +951,30 @@ function mockManagerApprovedStaleQueue(
   };
 }
 
+function mockRecommendationReviewSummary(
+  overrides: Partial<RecommendationReviewSummaryResponse["summary"]> = {},
+): RecommendationReviewSummaryResponse {
+  return {
+    summary: {
+      total_existing_recommendations: 3,
+      pending_review_recommendations: 1,
+      accepted_recommendations: 1,
+      rejected_recommendations: 1,
+      recommendation_status_counts: { pending_review: 1, accepted: 1, rejected: 1 },
+      stale_demand_candidates: 2,
+      stale_demand_decisions_by_type: { manager_approved_one_time: 1 },
+      manager_approved_stale_queue_count: 1,
+      manager_approved_stale_queue_by_safety_status: { ready_for_manual_recommendation: 1 },
+      cleanup_candidates_count: 1,
+      cleanup_candidates_by_issue: { stale_demand_review_required: 1 },
+      recommendations_ready_for_manual_review: 1,
+      recommendations_blocked_from_po_conversion: 1,
+      limit: 500,
+      ...overrides,
+    },
+  };
+}
+
 function mockLLMExplanation(
   overrides: Partial<RecommendationLLMExplanation> = {},
 ): RecommendationLLMExplanation {
@@ -1191,6 +1222,7 @@ beforeEach(() => {
   vi.mocked(getSeasonalitySummary).mockResolvedValue(mockSeasonalitySummary());
   vi.mocked(getSeasonalProducts).mockResolvedValue([]);
   vi.mocked(getProductSeasonality).mockResolvedValue(mockProductSeasonalityDetail());
+  vi.mocked(getRecommendationReviewSummary).mockResolvedValue(mockRecommendationReviewSummary());
   vi.mocked(getStaleDemandReview).mockResolvedValue(mockStaleDemandReview());
   vi.mocked(getManagerApprovedStaleQueue).mockResolvedValue(
     mockManagerApprovedStaleQueue({
@@ -1237,6 +1269,14 @@ beforeEach(() => {
   vi.mocked(exportManagerApprovedStaleQueueCsv).mockResolvedValue({
     blob: new Blob(["csv"], { type: "text/csv" }),
     filename: "manager_approved_stale_queue.csv",
+  });
+  vi.mocked(exportRecommendationReviewSummaryCsv).mockResolvedValue({
+    blob: new Blob(["csv"], { type: "text/csv" }),
+    filename: "recommendation_review_summary.csv",
+  });
+  vi.mocked(exportRecommendationCleanupCandidatesCsv).mockResolvedValue({
+    blob: new Blob(["csv"], { type: "text/csv" }),
+    filename: "recommendation_cleanup_candidates.csv",
   });
   vi.mocked(acceptRecommendation).mockResolvedValue(mockRecommendation({ status: "accepted" }));
   vi.mocked(rejectRecommendation).mockResolvedValue(
@@ -3217,11 +3257,71 @@ describe("App mapping review workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
 
     expect(await screen.findByText("No recommendations found.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Manager Review Summary" })).toBeInTheDocument();
     expect(
       screen.getByText(
         "Recommendations are advisory. Converting a recommendation only creates a draft purchase order. It does not approve or issue it.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("manager review summary displays counts and guidance", async () => {
+    vi.mocked(getRecommendationReviewSummary).mockResolvedValue(
+      mockRecommendationReviewSummary({
+        total_existing_recommendations: 8,
+        pending_review_recommendations: 3,
+        accepted_recommendations: 2,
+        rejected_recommendations: 1,
+        stale_demand_candidates: 4,
+        manager_approved_stale_queue_count: 2,
+        cleanup_candidates_count: 5,
+        recommendations_ready_for_manual_review: 2,
+        recommendations_blocked_from_po_conversion: 5,
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    const panel = await screen.findByRole("region", { name: "Manager Review Summary" });
+    expect(within(panel).getByText("Total recommendations")).toBeInTheDocument();
+    expect(within(panel).getByText("8")).toBeInTheDocument();
+    expect(within(panel).getByText("Pending review")).toBeInTheDocument();
+    expect(within(panel).getByText("3")).toBeInTheDocument();
+    expect(within(panel).getByText("Stale-demand candidates")).toBeInTheDocument();
+    expect(within(panel).getByText("Manager-approved stale")).toBeInTheDocument();
+    expect(within(panel).getByText("Blocked or unsafe")).toBeInTheDocument();
+    expect(
+      within(panel).getByText("There are cleanup candidates that should be reviewed before PO conversion."),
+    ).toBeInTheDocument();
+  });
+
+  it("manager review summary export buttons call CSV helpers", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    const panel = await screen.findByRole("region", { name: "Manager Review Summary" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Review Summary CSV" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "Stale Demand Review CSV" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "Manager-Approved Queue CSV" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "Cleanup Candidates CSV" }));
+
+    expect(exportRecommendationReviewSummaryCsv).toHaveBeenCalled();
+    expect(exportStaleDemandReviewCsv).toHaveBeenCalled();
+    expect(exportManagerApprovedStaleQueueCsv).toHaveBeenCalled();
+    expect(exportRecommendationCleanupCandidatesCsv).toHaveBeenCalled();
+  });
+
+  it("manager review summary failure is non-blocking", async () => {
+    vi.mocked(getRecommendationReviewSummary).mockRejectedValue(new Error("Summary offline"));
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    expect(
+      await screen.findByText("Could not load manager review summary: Summary offline"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("No recommendations found.")).toBeInTheDocument();
   });
 
   it("recommendations tab displays stale-demand review candidates", async () => {

@@ -18,6 +18,7 @@ import {
   getForecastReconciliationProducts,
   getManualSupplierCleanupCandidates,
   getManagerApprovedStaleQueue,
+  getRecommendationReviewSummary,
   getStoredAccessToken,
   getStaleDemandReview,
   isAuthEnabled,
@@ -178,6 +179,43 @@ describe("apiUrl", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/recommendations/manager-approved-stale-queue"),
+      expect.any(Object),
+    );
+  });
+
+  it("fetches recommendation review summary", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          summary: {
+            total_existing_recommendations: 3,
+            pending_review_recommendations: 1,
+            accepted_recommendations: 1,
+            rejected_recommendations: 1,
+            recommendation_status_counts: {},
+            stale_demand_candidates: 2,
+            stale_demand_decisions_by_type: {},
+            manager_approved_stale_queue_count: 1,
+            manager_approved_stale_queue_by_safety_status: {},
+            cleanup_candidates_count: 1,
+            cleanup_candidates_by_issue: {},
+            recommendations_ready_for_manual_review: 1,
+            recommendations_blocked_from_po_conversion: 1,
+            limit: 500,
+          },
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getRecommendationReviewSummary();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/review-summary"),
       expect.any(Object),
     );
   });

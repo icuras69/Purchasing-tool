@@ -921,3 +921,22 @@ export interface ManagerApprovedStaleQueueResponse {
   };
   items: ManagerApprovedStaleQueueItem[];
 }
+
+export interface RecommendationReviewSummaryResponse {
+  summary: {
+    total_existing_recommendations: number;
+    pending_review_recommendations: number;
+    accepted_recommendations: number;
+    rejected_recommendations: number;
+    recommendation_status_counts: Record<string, number>;
+    stale_demand_candidates: number;
+    stale_demand_decisions_by_type: Record<string, number>;
+    manager_approved_stale_queue_count: number;
+    manager_approved_stale_queue_by_safety_status: Record<string, number>;
+    cleanup_candidates_count: number;
+    cleanup_candidates_by_issue: Record<string, number>;
+    recommendations_ready_for_manual_review: number;
+    recommendations_blocked_from_po_conversion: number;
+    limit: number;
+  };
+}
