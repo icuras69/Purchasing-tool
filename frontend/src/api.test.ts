@@ -5,7 +5,11 @@ import {
   clearStoredAccessToken,
   exportDemandHistoryCsv,
   exportForecastReconciliationCsv,
+  exportManagerApprovedStaleQueueCsv,
   exportPurchaseOrderCsv,
+  exportRecommendationCleanupCandidatesCsv,
+  exportRecommendationReviewSummaryCsv,
+  exportStaleDemandReviewCsv,
   fetchProducts,
   createManagerApprovedStaleReviewRecommendation,
   getDemandHistoryProduct,
@@ -198,6 +202,42 @@ describe("apiUrl", () => {
         body: JSON.stringify({ created_by: "manual" }),
       }),
     );
+  });
+
+  it("downloads recommendation review CSV exports", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(new Response("csv", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/csv",
+          "Content-Disposition": 'attachment; filename="recommendations.csv"',
+        },
+      })),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const staleExport = await exportStaleDemandReviewCsv();
+    await exportManagerApprovedStaleQueueCsv();
+    await exportRecommendationCleanupCandidatesCsv();
+    await exportRecommendationReviewSummaryCsv();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/stale-demand-review/export.csv?decision=all"),
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/manager-approved-stale-queue/export.csv"),
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/cleanup-candidates/export.csv"),
+      expect.any(Object),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/review-summary/export.csv"),
+      expect.any(Object),
+    );
+    expect(staleExport.filename).toBe("recommendations.csv");
   });
 
   it("defaults authentication to enabled unless explicitly disabled", () => {

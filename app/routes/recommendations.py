@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, selectinload
 
@@ -25,11 +25,16 @@ from app.services.recommendations import (
 )
 from app.services.recommendation_audit import (
     audit_existing_recommendations,
+    build_cleanup_candidates_csv,
+    build_manager_approved_stale_queue_csv,
+    build_recommendation_review_summary_csv,
+    build_stale_demand_review_csv,
     cleanup_candidates,
     demand_policy_impact,
     explain_product_recommendation,
     list_stale_demand_review_decisions,
     manager_approved_stale_queue,
+    recommendation_review_summary,
     save_stale_demand_review_decision,
     serialize_stale_demand_review_decision,
     stale_demand_review_candidates,
@@ -159,6 +164,38 @@ def get_cleanup_candidates(
     return cleanup_candidates(db, limit=limit)
 
 
+@router.get("/review-summary")
+def get_recommendation_review_summary(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return recommendation_review_summary(db, limit=limit)
+
+
+def csv_response(exported):
+    return Response(
+        content=exported.content,
+        media_type=exported.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{exported.filename}"'},
+    )
+
+
+@router.get("/review-summary/export.csv")
+def export_recommendation_review_summary_csv(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return csv_response(build_recommendation_review_summary_csv(db, limit=limit))
+
+
+@router.get("/cleanup-candidates/export.csv")
+def export_cleanup_candidates_csv(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return csv_response(build_cleanup_candidates_csv(db, limit=limit))
+
+
 @router.get("/stale-demand-review")
 def get_stale_demand_review(
     limit: int = Query(default=500, ge=1, le=2000),
@@ -170,6 +207,21 @@ def get_stale_demand_review(
 ):
     try:
         return stale_demand_review_candidates(db, limit=limit, decision_filter=decision)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/stale-demand-review/export.csv")
+def export_stale_demand_review_csv(
+    limit: int = Query(default=500, ge=1, le=2000),
+    decision: str = Query(
+        default="all",
+        pattern="^(unreviewed|manager_approved_one_time|watchlist|rejected_stale|wait_for_recent_demand|all)$",
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return csv_response(build_stale_demand_review_csv(db, limit=limit, decision_filter=decision))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -188,6 +240,14 @@ def get_manager_approved_stale_queue(
     db: Session = Depends(get_db),
 ):
     return manager_approved_stale_queue(db, limit=limit)
+
+
+@router.get("/manager-approved-stale-queue/export.csv")
+def export_manager_approved_stale_queue_csv(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return csv_response(build_manager_approved_stale_queue_csv(db, limit=limit))
 
 
 @router.post("/manager-approved-stale-queue/{product_id}/create-review-recommendation", response_model=RecommendationResponse)

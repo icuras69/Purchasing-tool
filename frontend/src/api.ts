@@ -690,6 +690,13 @@ export function getStaleDemandReview(decision = "all"): Promise<StaleDemandRevie
   );
 }
 
+export function exportStaleDemandReviewCsv(): Promise<{ blob: Blob; filename: string | null }> {
+  return fetchBlob(
+    "/recommendations/stale-demand-review/export.csv?decision=all",
+    "stale demand review CSV",
+  );
+}
+
 export function saveStaleDemandReviewDecision(
   productId: number,
   payload: StaleDemandDecisionRequest,
@@ -708,6 +715,27 @@ export function getManagerApprovedStaleQueue(): Promise<ManagerApprovedStaleQueu
   return fetchJson<ManagerApprovedStaleQueueResponse>(
     "/recommendations/manager-approved-stale-queue",
     "manager-approved stale queue",
+  );
+}
+
+export function exportManagerApprovedStaleQueueCsv(): Promise<{ blob: Blob; filename: string | null }> {
+  return fetchBlob(
+    "/recommendations/manager-approved-stale-queue/export.csv",
+    "manager-approved stale queue CSV",
+  );
+}
+
+export function exportRecommendationCleanupCandidatesCsv(): Promise<{ blob: Blob; filename: string | null }> {
+  return fetchBlob(
+    "/recommendations/cleanup-candidates/export.csv",
+    "recommendation cleanup candidates CSV",
+  );
+}
+
+export function exportRecommendationReviewSummaryCsv(): Promise<{ blob: Blob; filename: string | null }> {
+  return fetchBlob(
+    "/recommendations/review-summary/export.csv",
+    "recommendation review summary CSV",
   );
 }
 

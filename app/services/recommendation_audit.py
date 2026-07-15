@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import io
 from collections import Counter
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -26,6 +29,14 @@ ALLOWED_STALE_DEMAND_DECISIONS = {
     "wait_for_recent_demand",
 }
 EPSILON = 0.000001
+FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+@dataclass(frozen=True)
+class RecommendationCsvExport:
+    content: bytes
+    filename: str
+    content_type: str = "text/csv; charset=utf-8"
 
 
 def stale_demand_recommendations_allowed() -> bool:
@@ -683,6 +694,8 @@ def cleanup_candidates(db: Session, *, limit: int = 500) -> dict[str, Any]:
                 "purchase_readiness_status": readiness_status,
                 "issues": issues,
                 "suggested_action": action,
+                "blockers": explanation.get("blockers") if explanation else [],
+                "warnings": explanation.get("warnings") if explanation else [],
             }
         )
 
@@ -696,6 +709,187 @@ def cleanup_candidates(db: Session, *, limit: int = 500) -> dict[str, Any]:
         },
         "candidates": candidates,
     }
+
+
+def recommendation_review_summary(db: Session, *, limit: int = 500) -> dict[str, Any]:
+    status_rows = db.query(Recommendation.status, func.count(Recommendation.id)).group_by(Recommendation.status).all()
+    recommendation_status_counts = {status or "unknown": int(count) for status, count in status_rows}
+    total_recommendations = sum(recommendation_status_counts.values())
+    stale_review = stale_demand_review_candidates(db, limit=limit, decision_filter="all")
+    decisions = list_stale_demand_review_decisions(db, limit=limit)
+    manager_queue = manager_approved_stale_queue(db, limit=limit)
+    cleanup = cleanup_candidates(db, limit=limit)
+    queue_status_counts = manager_queue["summary"]["safety_status_counts"]
+    cleanup_issue_counts = cleanup["summary"]["issue_counts"]
+    return {
+        "summary": {
+            "total_existing_recommendations": total_recommendations,
+            "pending_review_recommendations": recommendation_status_counts.get("pending_review", 0),
+            "accepted_recommendations": recommendation_status_counts.get("accepted", 0),
+            "rejected_recommendations": recommendation_status_counts.get("rejected", 0),
+            "recommendation_status_counts": recommendation_status_counts,
+            "stale_demand_candidates": stale_review["summary"]["total_candidates"],
+            "stale_demand_decisions_by_type": decisions["summary"]["decision_counts"],
+            "manager_approved_stale_queue_count": manager_queue["summary"]["total_candidates"],
+            "manager_approved_stale_queue_by_safety_status": queue_status_counts,
+            "cleanup_candidates_count": cleanup["summary"]["total_candidates"],
+            "cleanup_candidates_by_issue": cleanup_issue_counts,
+            "recommendations_ready_for_manual_review": queue_status_counts.get("ready_for_manual_recommendation", 0),
+            "recommendations_blocked_from_po_conversion": cleanup["summary"]["total_candidates"]
+            + queue_status_counts.get("blocked", 0),
+            "limit": limit,
+        }
+    }
+
+
+def build_recommendation_review_summary_csv(db: Session, *, limit: int = 500) -> RecommendationCsvExport:
+    summary = recommendation_review_summary(db, limit=limit)["summary"]
+    rows: list[dict[str, Any]] = []
+    for key, value in summary.items():
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                rows.append({"Metric": f"{key}.{nested_key}", "Value": nested_value})
+        else:
+            rows.append({"Metric": key, "Value": value})
+    return build_csv_export(
+        ["Metric", "Value"],
+        rows,
+        f"recommendation_review_summary_{datetime.now(timezone.utc).date().isoformat()}.csv",
+    )
+
+
+def build_stale_demand_review_csv(
+    db: Session,
+    *,
+    limit: int = 500,
+    decision_filter: str = "all",
+) -> RecommendationCsvExport:
+    report = stale_demand_review_candidates(db, limit=limit, decision_filter=decision_filter)
+    rows = [
+        {
+            "Product ID": item.get("product_id"),
+            "Product Name": item.get("product_name"),
+            "Supplier": item.get("supplier_name"),
+            "Last Demand Date": item.get("last_demand_date"),
+            "Days Since Last Demand": item.get("days_since_last_demand"),
+            "Demand Rows": item.get("demand_rows"),
+            "Monthly Average Demand": item.get("monthly_average_demand"),
+            "Current Stock": item.get("current_stock"),
+            "Lead Time": item.get("lead_time_days"),
+            "Advisory Quantity": item.get("advisory_recommended_quantity"),
+            "Estimated Cost": item.get("estimated_total_cost"),
+            "Suggested Action": item.get("suggested_action"),
+            "Review Decision": item.get("review_decision"),
+            "Reviewed By": item.get("reviewed_by"),
+            "Review Notes": item.get("review_notes"),
+        }
+        for item in report["items"]
+    ]
+    return build_csv_export(
+        [
+            "Product ID",
+            "Product Name",
+            "Supplier",
+            "Last Demand Date",
+            "Days Since Last Demand",
+            "Demand Rows",
+            "Monthly Average Demand",
+            "Current Stock",
+            "Lead Time",
+            "Advisory Quantity",
+            "Estimated Cost",
+            "Suggested Action",
+            "Review Decision",
+            "Reviewed By",
+            "Review Notes",
+        ],
+        rows,
+        f"stale_demand_review_{datetime.now(timezone.utc).date().isoformat()}.csv",
+    )
+
+
+def build_manager_approved_stale_queue_csv(db: Session, *, limit: int = 500) -> RecommendationCsvExport:
+    report = manager_approved_stale_queue(db, limit=limit)
+    rows = [
+        {
+            "Product ID": item.get("product_id"),
+            "Product Name": item.get("product_name"),
+            "Supplier": item.get("supplier_name"),
+            "Lead Time": item.get("lead_time_days"),
+            "Current Stock": item.get("current_stock"),
+            "Last Demand Date": item.get("last_demand_date"),
+            "Advisory Quantity": item.get("advisory_recommended_quantity"),
+            "Estimated Unit Cost": item.get("estimated_unit_cost"),
+            "Estimated Total Cost": item.get("estimated_total_cost"),
+            "Reviewed By": item.get("reviewed_by"),
+            "Reviewed At": item.get("reviewed_at"),
+            "Review Notes": item.get("review_notes"),
+            "Safety Status": item.get("safety_status"),
+            "Safety Blockers": join_csv_list(item.get("safety_blockers")),
+            "Warnings": join_csv_list(item.get("warnings")),
+            "Suggested Next Action": item.get("suggested_next_action"),
+        }
+        for item in report["items"]
+    ]
+    return build_csv_export(
+        [
+            "Product ID",
+            "Product Name",
+            "Supplier",
+            "Lead Time",
+            "Current Stock",
+            "Last Demand Date",
+            "Advisory Quantity",
+            "Estimated Unit Cost",
+            "Estimated Total Cost",
+            "Reviewed By",
+            "Reviewed At",
+            "Review Notes",
+            "Safety Status",
+            "Safety Blockers",
+            "Warnings",
+            "Suggested Next Action",
+        ],
+        rows,
+        f"manager_approved_stale_queue_{datetime.now(timezone.utc).date().isoformat()}.csv",
+    )
+
+
+def build_cleanup_candidates_csv(db: Session, *, limit: int = 500) -> RecommendationCsvExport:
+    report = cleanup_candidates(db, limit=limit)
+    rows = [
+        {
+            "Recommendation ID": item.get("recommendation_id"),
+            "Product ID": item.get("product_id"),
+            "Product Name": item.get("product_name"),
+            "Supplier": item.get("supplier_name"),
+            "Status": item.get("status"),
+            "Quantity": item.get("recommended_quantity"),
+            "Issues": join_csv_list(item.get("issues")),
+            "Suggested Action": item.get("suggested_action"),
+            "Purchase Readiness": item.get("purchase_readiness_status"),
+            "Blockers": join_csv_list(item.get("blockers")),
+            "Warnings": join_csv_list(item.get("warnings")),
+        }
+        for item in report["candidates"]
+    ]
+    return build_csv_export(
+        [
+            "Recommendation ID",
+            "Product ID",
+            "Product Name",
+            "Supplier",
+            "Status",
+            "Quantity",
+            "Issues",
+            "Suggested Action",
+            "Purchase Readiness",
+            "Blockers",
+            "Warnings",
+        ],
+        rows,
+        f"recommendation_cleanup_candidates_{datetime.now(timezone.utc).date().isoformat()}.csv",
+    )
 
 
 def stale_demand_review_candidates(
@@ -1114,6 +1308,38 @@ def effective_unit_cost_from_explanation(explanation: dict[str, Any]) -> float |
         if parsed is not None:
             return parsed
     return None
+
+
+def build_csv_export(
+    columns: list[str],
+    rows: list[dict[str, Any]],
+    filename: str,
+) -> RecommendationCsvExport:
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\r\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({column: csv_safe_value(row.get(column)) for column in columns})
+    return RecommendationCsvExport(content=("\ufeff" + handle.getvalue()).encode("utf-8"), filename=filename)
+
+
+def csv_safe_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    if text.startswith(FORMULA_PREFIXES):
+        return f"'{text}"
+    return text
+
+
+def join_csv_list(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, list):
+        return "; ".join(str(item) for item in value)
+    return str(value)
 
 
 def cleanup_issues_for_recommendation(recommendation: Recommendation, explanation: dict[str, Any]) -> list[str]:

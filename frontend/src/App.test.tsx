@@ -17,7 +17,9 @@ import {
   createPurchaseOrder,
   createProductSupplier,
   createReorderRecommendation,
+  exportManagerApprovedStaleQueueCsv,
   exportPurchaseOrderCsv,
+  exportStaleDemandReviewCsv,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
@@ -149,6 +151,8 @@ vi.mock("./api", () => ({
   getRecommendation: vi.fn(),
   createReorderRecommendation: vi.fn(),
   createManagerApprovedStaleReviewRecommendation: vi.fn(),
+  exportStaleDemandReviewCsv: vi.fn(),
+  exportManagerApprovedStaleQueueCsv: vi.fn(),
   acceptRecommendation: vi.fn(),
   rejectRecommendation: vi.fn(),
   convertRecommendationToDraftPO: vi.fn(),
@@ -1226,6 +1230,14 @@ beforeEach(() => {
   vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
   vi.mocked(createReorderRecommendation).mockResolvedValue(mockRecommendation());
   vi.mocked(createManagerApprovedStaleReviewRecommendation).mockResolvedValue(mockRecommendation());
+  vi.mocked(exportStaleDemandReviewCsv).mockResolvedValue({
+    blob: new Blob(["csv"], { type: "text/csv" }),
+    filename: "stale_demand_review.csv",
+  });
+  vi.mocked(exportManagerApprovedStaleQueueCsv).mockResolvedValue({
+    blob: new Blob(["csv"], { type: "text/csv" }),
+    filename: "manager_approved_stale_queue.csv",
+  });
   vi.mocked(acceptRecommendation).mockResolvedValue(mockRecommendation({ status: "accepted" }));
   vi.mocked(rejectRecommendation).mockResolvedValue(
     mockRecommendation({ status: "rejected", rejected_reason: "Too early." }),
@@ -3296,6 +3308,22 @@ describe("App mapping review workflow", () => {
 
     expect(await screen.findByText("Missing supplier")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create review recommendation" })).toBeDisabled();
+  });
+
+  it("recommendation review export buttons call CSV helpers", async () => {
+    vi.mocked(getStaleDemandReview).mockResolvedValue(mockStaleDemandReviewWithCandidate());
+    vi.mocked(getManagerApprovedStaleQueue).mockResolvedValue(mockManagerApprovedStaleQueue());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    const staleSection = await screen.findByRole("region", { name: "Stale Demand Review" });
+    await userEvent.click(within(staleSection).getByRole("button", { name: "Export CSV" }));
+    expect(exportStaleDemandReviewCsv).toHaveBeenCalled();
+
+    const queueSection = await screen.findByRole("region", { name: "Manager-Approved Stale Queue" });
+    await userEvent.click(within(queueSection).getByRole("button", { name: "Export CSV" }));
+    expect(exportManagerApprovedStaleQueueCsv).toHaveBeenCalled();
   });
 
   it("generate recommendation calls the reorder endpoint", async () => {

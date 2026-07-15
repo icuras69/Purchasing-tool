@@ -14,6 +14,8 @@ import {
   createProductSupplier,
   createReorderRecommendation,
   exportPurchaseOrderCsv,
+  exportManagerApprovedStaleQueueCsv,
+  exportStaleDemandReviewCsv,
   fetchProductForecast,
   fetchProductSuppliers,
   fetchProducts,
@@ -2062,6 +2064,8 @@ function RecommendationsPanel() {
   const [managerApprovedQueueError, setManagerApprovedQueueError] = useState<string | null>(null);
   const [staleDemandSuccess, setStaleDemandSuccess] = useState<string | null>(null);
   const [managerApprovedQueueSuccess, setManagerApprovedQueueSuccess] = useState<string | null>(null);
+  const [exportingStaleDemand, setExportingStaleDemand] = useState(false);
+  const [exportingManagerApprovedQueue, setExportingManagerApprovedQueue] = useState(false);
   const [staleDemandDecisionDrafts, setStaleDemandDecisionDrafts] =
     useState<Record<number, StaleDemandDecisionDraft>>({});
   const [savingStaleDecisionProductId, setSavingStaleDecisionProductId] = useState<number | null>(null);
@@ -2279,6 +2283,36 @@ function RecommendationsPanel() {
     }
   }
 
+  async function handleExportStaleDemandReview() {
+    setExportingStaleDemand(true);
+    setStaleDemandError(null);
+    setStaleDemandSuccess(null);
+    try {
+      const exported = await exportStaleDemandReviewCsv();
+      downloadBlob(exported.blob, exported.filename ?? "stale_demand_review.csv");
+      setStaleDemandSuccess("Stale-demand review CSV exported.");
+    } catch (loadError) {
+      setStaleDemandError((loadError as Error).message);
+    } finally {
+      setExportingStaleDemand(false);
+    }
+  }
+
+  async function handleExportManagerApprovedQueue() {
+    setExportingManagerApprovedQueue(true);
+    setManagerApprovedQueueError(null);
+    setManagerApprovedQueueSuccess(null);
+    try {
+      const exported = await exportManagerApprovedStaleQueueCsv();
+      downloadBlob(exported.blob, exported.filename ?? "manager_approved_stale_queue.csv");
+      setManagerApprovedQueueSuccess("Manager-approved stale queue CSV exported.");
+    } catch (loadError) {
+      setManagerApprovedQueueError((loadError as Error).message);
+    } finally {
+      setExportingManagerApprovedQueue(false);
+    }
+  }
+
   async function handleCreateManagerApprovedRecommendation(item: ManagerApprovedStaleQueueItem) {
     if (
       !window.confirm(
@@ -2336,8 +2370,10 @@ function RecommendationsPanel() {
         error={staleDemandError}
         loading={staleDemandLoading}
         onDraftChange={updateStaleDemandDraft}
+        onExport={handleExportStaleDemandReview}
         onSaveDecision={handleSaveStaleDemandDecision}
         review={staleDemandReview}
+        exporting={exportingStaleDemand}
         savingProductId={savingStaleDecisionProductId}
         success={staleDemandSuccess}
       />
@@ -2347,7 +2383,9 @@ function RecommendationsPanel() {
         error={managerApprovedQueueError}
         loading={managerApprovedQueueLoading}
         onCreateRecommendation={handleCreateManagerApprovedRecommendation}
+        onExport={handleExportManagerApprovedQueue}
         queue={managerApprovedQueue}
+        exporting={exportingManagerApprovedQueue}
         success={managerApprovedQueueSuccess}
       />
 
@@ -2458,8 +2496,10 @@ function RecommendationsTable({
 function StaleDemandReviewPanel({
   drafts,
   error,
+  exporting,
   loading,
   onDraftChange,
+  onExport,
   onSaveDecision,
   review,
   savingProductId,
@@ -2467,8 +2507,10 @@ function StaleDemandReviewPanel({
 }: {
   drafts: Record<number, StaleDemandDecisionDraft>;
   error: string | null;
+  exporting: boolean;
   loading: boolean;
   onDraftChange: (productId: number, changes: Partial<StaleDemandDecisionDraft>) => void;
+  onExport: () => void;
   onSaveDecision: (item: StaleDemandReviewItem) => void;
   review: StaleDemandReviewResponse | null;
   savingProductId: number | null;
@@ -2488,7 +2530,12 @@ function StaleDemandReviewPanel({
           <h2>Stale Demand Review</h2>
           <p>Demand is stale; manager review required before PO.</p>
         </div>
-        <span className="badge">{review?.summary.total_candidates ?? 0} candidates</span>
+        <div className="action-row">
+          <span className="badge">{review?.summary.total_candidates ?? 0} candidates</span>
+          <button disabled={exporting} onClick={onExport} type="button">
+            {exporting ? "Exporting..." : "Export CSV"}
+          </button>
+        </div>
       </div>
       {success && <div className="state success">{success}</div>}
       <table>
@@ -2577,15 +2624,19 @@ function StaleDemandReviewPanel({
 function ManagerApprovedStaleQueuePanel({
   creatingProductId,
   error,
+  exporting,
   loading,
   onCreateRecommendation,
+  onExport,
   queue,
   success,
 }: {
   creatingProductId: number | null;
   error: string | null;
+  exporting: boolean;
   loading: boolean;
   onCreateRecommendation: (item: ManagerApprovedStaleQueueItem) => void;
+  onExport: () => void;
   queue: ManagerApprovedStaleQueueResponse | null;
   success: string | null;
 }) {
@@ -2600,7 +2651,12 @@ function ManagerApprovedStaleQueuePanel({
           <h2>Manager-Approved Stale Queue</h2>
           <p>Review stale-demand products approved for one-time recommendation consideration.</p>
         </div>
-        <span className="badge">{queue?.summary.total_candidates ?? 0} approved</span>
+        <div className="action-row">
+          <span className="badge">{queue?.summary.total_candidates ?? 0} approved</span>
+          <button disabled={exporting} onClick={onExport} type="button">
+            {exporting ? "Exporting..." : "Export CSV"}
+          </button>
+        </div>
       </div>
       {error && <div className="state error">Could not load manager-approved stale queue: {error}</div>}
       {success && <div className="state success">{success}</div>}

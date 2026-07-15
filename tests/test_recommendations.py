@@ -1,3 +1,5 @@
+import csv
+import io
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
@@ -16,6 +18,11 @@ from app.services.forecasting import calculate_usage_history_demand, legacy_usag
 
 RECENT_DEMAND_DATE = date(2026, 7, 1)
 STALE_DEMAND_DATE = date(2025, 1, 1)
+
+
+def csv_rows(response):
+    text = response.content.decode("utf-8-sig")
+    return list(csv.DictReader(io.StringIO(text)))
 
 
 def seed_recommendation_product(
@@ -1042,6 +1049,162 @@ def test_manager_approved_stale_create_review_creates_pending_review_without_po_
         .count()
         == 1
     )
+
+
+def test_recommendation_review_summary_counts_decisions_queue_and_cleanup(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    add_forecast_profile(db_session, product, pack_size=1, cost_price=5.0, lead_time_days=4)
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.add(
+        Recommendation(
+            product_id=product.id,
+            supplier_id=product.supplier_id,
+            recommended_qty=3,
+            risk_level="medium",
+            recommendation_type="reorder",
+            status="pending_review",
+            reason="Existing stale recommendation.",
+            generated_by="test",
+        )
+    )
+    db_session.commit()
+    client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "manager_approved_one_time", "reviewed_by": "Maged"},
+    )
+
+    response = client.get("/recommendations/review-summary")
+
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    assert summary["total_existing_recommendations"] == 1
+    assert summary["pending_review_recommendations"] == 1
+    assert summary["stale_demand_decisions_by_type"]["manager_approved_one_time"] == 1
+    assert summary["manager_approved_stale_queue_count"] == 1
+    assert summary["manager_approved_stale_queue_by_safety_status"]["ready_for_manual_recommendation"] == 1
+    assert summary["cleanup_candidates_count"] == 1
+    assert summary["cleanup_candidates_by_issue"]["stale_demand_review_required"] == 1
+
+
+def test_stale_demand_review_csv_export_returns_expected_headers(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+
+    response = client.get("/recommendations/stale-demand-review/export.csv")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "stale_demand_review_" in response.headers["content-disposition"]
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    rows = csv_rows(response)
+    assert rows[0]["Product ID"] == str(product.id)
+    assert rows[0]["Product Name"] == product.name
+    assert "Review Decision" in rows[0]
+    assert "Review Notes" in rows[0]
+
+
+def test_manager_approved_queue_csv_export_returns_expected_headers(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    add_forecast_profile(db_session, product, pack_size=1, cost_price=5.0, lead_time_days=4)
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "manager_approved_one_time", "reviewed_by": "Maged", "notes": "Approved."},
+    )
+
+    response = client.get("/recommendations/manager-approved-stale-queue/export.csv")
+
+    assert response.status_code == 200
+    rows = csv_rows(response)
+    assert rows[0]["Product ID"] == str(product.id)
+    assert rows[0]["Reviewed By"] == "Maged"
+    assert rows[0]["Safety Status"] == "ready_for_manual_recommendation"
+    assert "Safety Blockers" in rows[0]
+    assert "Warnings" in rows[0]
+
+
+def test_cleanup_candidates_csv_export_returns_expected_headers(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.add(
+        Recommendation(
+            product_id=product.id,
+            supplier_id=product.supplier_id,
+            recommended_qty=3,
+            risk_level="medium",
+            recommendation_type="reorder",
+            status="pending_review",
+            reason="Existing stale recommendation.",
+            generated_by="test",
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/recommendations/cleanup-candidates/export.csv")
+
+    assert response.status_code == 200
+    rows = csv_rows(response)
+    assert rows[0]["Product ID"] == str(product.id)
+    assert rows[0]["Recommendation ID"]
+    assert "Issues" in rows[0]
+    assert "Blockers" in rows[0]
+    assert "Warnings" in rows[0]
+
+
+def test_review_summary_csv_export_returns_metric_rows(client, db_session):
+    seed_recommendation_product(db_session)
+
+    response = client.get("/recommendations/review-summary/export.csv")
+
+    assert response.status_code == 200
+    rows = csv_rows(response)
+    assert rows[0] == {"Metric": "total_existing_recommendations", "Value": "0"}
+    metrics = {row["Metric"] for row in rows}
+    assert "stale_demand_candidates" in metrics
+    assert "cleanup_candidates_count" in metrics
+
+
+def test_recommendation_review_exports_are_read_only(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    before_recommendations = db_session.query(Recommendation).count()
+    before_purchase_orders = db_session.query(PurchaseOrder).count()
+
+    for path in (
+        "/recommendations/stale-demand-review/export.csv",
+        "/recommendations/manager-approved-stale-queue/export.csv",
+        "/recommendations/cleanup-candidates/export.csv",
+        "/recommendations/review-summary/export.csv",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200
+
+    assert db_session.query(Recommendation).count() == before_recommendations
+    assert db_session.query(PurchaseOrder).count() == before_purchase_orders
+
+
+def test_recommendation_review_exports_require_authentication_when_enabled(unauthenticated_client, db_session):
+    response = unauthenticated_client.get("/recommendations/review-summary/export.csv")
+
+    assert response.status_code == 401
 
 
 def test_demand_policy_impact_endpoint_reports_stale_and_recent_policy_changes(client, db_session):
