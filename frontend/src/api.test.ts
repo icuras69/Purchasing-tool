@@ -7,11 +7,13 @@ import {
   exportForecastReconciliationCsv,
   exportPurchaseOrderCsv,
   fetchProducts,
+  createManagerApprovedStaleReviewRecommendation,
   getDemandHistoryProduct,
   getDemandHistoryProducts,
   getForecastReconciliationProduct,
   getForecastReconciliationProducts,
   getManualSupplierCleanupCandidates,
+  getManagerApprovedStaleQueue,
   getStoredAccessToken,
   getStaleDemandReview,
   isAuthEnabled,
@@ -143,6 +145,57 @@ describe("apiUrl", () => {
           reviewed_by: "Maged",
           notes: "Wait for more context.",
         }),
+      }),
+    );
+  });
+
+  it("fetches manager-approved stale queue", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          summary: {
+            decisions_evaluated: 0,
+            total_candidates: 0,
+            safety_status_counts: {},
+            suggested_next_action_counts: {},
+            limit: 500,
+          },
+          items: [],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getManagerApprovedStaleQueue();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/manager-approved-stale-queue"),
+      expect.any(Object),
+    );
+  });
+
+  it("creates manager-approved stale review recommendations", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: 15, product_id: 3020, status: "pending_review" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createManagerApprovedStaleReviewRecommendation(3020);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/recommendations/manager-approved-stale-queue/3020/create-review-recommendation",
+      ),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ created_by: "manual" }),
       }),
     );
   });

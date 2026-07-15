@@ -7,6 +7,7 @@ import {
   cancelPurchaseOrder,
   acceptRecommendation,
   convertRecommendationToDraftPO,
+  createManagerApprovedStaleReviewRecommendation,
   createDraftPOFromSupplierForecast,
   createDraftPurchaseOrderFromProducts,
   createPurchaseOrder,
@@ -35,6 +36,7 @@ import {
   getManualSupplierCleanupCandidate,
   getManualSupplierCleanupCandidates,
   getManualSupplierCleanupSummary,
+  getManagerApprovedStaleQueue,
   getStoredAccessToken,
   getSupplierAssignmentReviewItems,
   getSupplierAssignmentReviewSummary,
@@ -78,6 +80,8 @@ import type {
   ManualSupplierCleanupCandidate,
   ManualSupplierCleanupSummary,
   ManualSupplierCleanupSupplier,
+  ManagerApprovedStaleQueueItem,
+  ManagerApprovedStaleQueueResponse,
   RecommendationLLMExplanation,
   StaleDemandReviewItem,
   StaleDemandReviewResponse,
@@ -268,6 +272,16 @@ function recommendationStatusClassName(status: string): string {
   }
   if (status === "pending_review" || status === "draft") {
     return "status pending-approval";
+  }
+  return "status needs-review";
+}
+
+function managerApprovedSafetyClassName(status: string): string {
+  if (status === "ready_for_manual_recommendation") {
+    return "status mapped";
+  }
+  if (status === "blocked") {
+    return "status rejected";
   }
   return "status needs-review";
 }
@@ -2040,12 +2054,18 @@ function RecommendationsPanel() {
     useState<ResourceState<PurchaseRecommendation>>(initialResource);
   const [staleDemandReview, setStaleDemandReview] =
     useState<StaleDemandReviewResponse | null>(null);
+  const [managerApprovedQueue, setManagerApprovedQueue] =
+    useState<ManagerApprovedStaleQueueResponse | null>(null);
   const [staleDemandLoading, setStaleDemandLoading] = useState(true);
+  const [managerApprovedQueueLoading, setManagerApprovedQueueLoading] = useState(true);
   const [staleDemandError, setStaleDemandError] = useState<string | null>(null);
+  const [managerApprovedQueueError, setManagerApprovedQueueError] = useState<string | null>(null);
   const [staleDemandSuccess, setStaleDemandSuccess] = useState<string | null>(null);
+  const [managerApprovedQueueSuccess, setManagerApprovedQueueSuccess] = useState<string | null>(null);
   const [staleDemandDecisionDrafts, setStaleDemandDecisionDrafts] =
     useState<Record<number, StaleDemandDecisionDraft>>({});
   const [savingStaleDecisionProductId, setSavingStaleDecisionProductId] = useState<number | null>(null);
+  const [creatingManagerApprovedProductId, setCreatingManagerApprovedProductId] = useState<number | null>(null);
   const [selectedRecommendation, setSelectedRecommendation] =
     useState<PurchaseRecommendation | null>(null);
   const [productId, setProductId] = useState("");
@@ -2087,14 +2107,33 @@ function RecommendationsPanel() {
       });
   }, []);
 
+  const loadManagerApprovedQueue = useCallback((active = true) => {
+    getManagerApprovedStaleQueue()
+      .then((loadedQueue) => {
+        if (active) {
+          setManagerApprovedQueue(loadedQueue);
+          setManagerApprovedQueueLoading(false);
+          setManagerApprovedQueueError(null);
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setManagerApprovedQueue(null);
+          setManagerApprovedQueueLoading(false);
+          setManagerApprovedQueueError(loadError.message);
+        }
+      });
+  }, []);
+
   useEffect(() => {
     let active = true;
     loadRecommendations(active);
     loadStaleDemandReview(active);
+    loadManagerApprovedQueue(active);
     return () => {
       active = false;
     };
-  }, [loadRecommendations, loadStaleDemandReview]);
+  }, [loadRecommendations, loadManagerApprovedQueue, loadStaleDemandReview]);
 
   async function refreshSelected(recommendationId: number) {
     const loaded = await getRecommendation(recommendationId);
@@ -2232,10 +2271,37 @@ function RecommendationsPanel() {
       });
       setStaleDemandSuccess(`Saved stale-demand decision for Product ID ${item.product_id}.`);
       loadStaleDemandReview();
+      loadManagerApprovedQueue();
     } catch (loadError) {
       setStaleDemandError((loadError as Error).message);
     } finally {
       setSavingStaleDecisionProductId(null);
+    }
+  }
+
+  async function handleCreateManagerApprovedRecommendation(item: ManagerApprovedStaleQueueItem) {
+    if (
+      !window.confirm(
+        `Create a pending review recommendation for Product ID ${item.product_id}? This will not create a purchase order.`,
+      )
+    ) {
+      return;
+    }
+    setCreatingManagerApprovedProductId(item.product_id);
+    setManagerApprovedQueueError(null);
+    setManagerApprovedQueueSuccess(null);
+    try {
+      const created = await createManagerApprovedStaleReviewRecommendation(item.product_id);
+      setSelectedRecommendation(created);
+      setManagerApprovedQueueSuccess(
+        `Created pending review recommendation ${created.id} for Product ID ${item.product_id}.`,
+      );
+      loadRecommendations();
+      loadManagerApprovedQueue();
+    } catch (loadError) {
+      setManagerApprovedQueueError((loadError as Error).message);
+    } finally {
+      setCreatingManagerApprovedProductId(null);
     }
   }
 
@@ -2274,6 +2340,15 @@ function RecommendationsPanel() {
         review={staleDemandReview}
         savingProductId={savingStaleDecisionProductId}
         success={staleDemandSuccess}
+      />
+
+      <ManagerApprovedStaleQueuePanel
+        creatingProductId={creatingManagerApprovedProductId}
+        error={managerApprovedQueueError}
+        loading={managerApprovedQueueLoading}
+        onCreateRecommendation={handleCreateManagerApprovedRecommendation}
+        queue={managerApprovedQueue}
+        success={managerApprovedQueueSuccess}
       />
 
       <RecommendationsTable
@@ -2495,6 +2570,97 @@ function StaleDemandReviewPanel({
         </tbody>
       </table>
       {items.length === 0 && <div className="state">No stale-demand recommendation candidates found.</div>}
+    </section>
+  );
+}
+
+function ManagerApprovedStaleQueuePanel({
+  creatingProductId,
+  error,
+  loading,
+  onCreateRecommendation,
+  queue,
+  success,
+}: {
+  creatingProductId: number | null;
+  error: string | null;
+  loading: boolean;
+  onCreateRecommendation: (item: ManagerApprovedStaleQueueItem) => void;
+  queue: ManagerApprovedStaleQueueResponse | null;
+  success: string | null;
+}) {
+  if (loading) {
+    return <div className="state">Loading manager-approved stale queue...</div>;
+  }
+  const items = queue?.items ?? [];
+  return (
+    <section className="table-wrap" aria-label="Manager-Approved Stale Queue">
+      <div className="panel-heading compact">
+        <div>
+          <h2>Manager-Approved Stale Queue</h2>
+          <p>Review stale-demand products approved for one-time recommendation consideration.</p>
+        </div>
+        <span className="badge">{queue?.summary.total_candidates ?? 0} approved</span>
+      </div>
+      {error && <div className="state error">Could not load manager-approved stale queue: {error}</div>}
+      {success && <div className="state success">{success}</div>}
+      <table>
+        <thead>
+          <tr>
+            <th>Product ID</th>
+            <th>Product</th>
+            <th>Supplier</th>
+            <th>Last demand</th>
+            <th>Advisory qty</th>
+            <th>Reviewed by</th>
+            <th>Decision notes</th>
+            <th>Safety status</th>
+            <th>Next action</th>
+            <th>Create review</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => {
+            const isReady = item.safety_status === "ready_for_manual_recommendation";
+            const isCreating = creatingProductId === item.product_id;
+            return (
+              <tr key={item.product_id}>
+                <td>{item.product_id}</td>
+                <td>{formatValue(item.product_name)}</td>
+                <td>{formatValue(item.supplier_name)}</td>
+                <td>{formatValue(item.last_demand_date)}</td>
+                <td>{formatValue(item.advisory_recommended_quantity)}</td>
+                <td>{formatValue(item.reviewed_by)}</td>
+                <td>{formatValue(item.review_notes)}</td>
+                <td>
+                  <span className={managerApprovedSafetyClassName(item.safety_status)}>
+                    {item.safety_status}
+                  </span>
+                  {item.safety_blockers.length > 0 && (
+                    <div className="muted">{item.safety_blockers.join("; ")}</div>
+                  )}
+                  {item.warnings.length > 0 && (
+                    <div className="muted">{item.warnings.join("; ")}</div>
+                  )}
+                </td>
+                <td>{formatValue(item.suggested_next_action)}</td>
+                <td>
+                  <button
+                    disabled={!isReady || isCreating}
+                    onClick={() => onCreateRecommendation(item)}
+                    type="button"
+                  >
+                    {isCreating ? "Creating..." : "Create review recommendation"}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {items.length === 0 && (
+        <div className="state">No manager-approved stale reorder candidates found.</div>
+      )}
     </section>
   );
 }

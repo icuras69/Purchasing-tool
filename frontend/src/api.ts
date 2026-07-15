@@ -22,6 +22,7 @@ import type {
   ManualSupplierCleanupReviewRequest,
   ManualSupplierCleanupSummary,
   ManualSupplierCleanupSuppliersResponse,
+  ManagerApprovedStaleQueueResponse,
   Product,
   ProductSupplierInput,
   ProductSupplierMapping,
@@ -699,6 +700,26 @@ export function saveStaleDemandReviewDecision(
     {
       method: "POST",
       body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function getManagerApprovedStaleQueue(): Promise<ManagerApprovedStaleQueueResponse> {
+  return fetchJson<ManagerApprovedStaleQueueResponse>(
+    "/recommendations/manager-approved-stale-queue",
+    "manager-approved stale queue",
+  );
+}
+
+export function createManagerApprovedStaleReviewRecommendation(
+  productId: number,
+): Promise<PurchaseRecommendation> {
+  return sendJson<PurchaseRecommendation>(
+    `/recommendations/manager-approved-stale-queue/${productId}/create-review-recommendation`,
+    "manager-approved stale review recommendation",
+    {
+      method: "POST",
+      body: JSON.stringify({ created_by: "manual" }),
     },
   );
 }

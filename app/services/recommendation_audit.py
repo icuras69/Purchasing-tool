@@ -800,6 +800,170 @@ def stale_demand_review_candidates(
     }
 
 
+def manager_approved_stale_queue(
+    db: Session,
+    *,
+    limit: int = 500,
+    today: date | None = None,
+) -> dict[str, Any]:
+    today_value = today or datetime.now(timezone.utc).date()
+    decisions = (
+        db.query(StaleDemandReviewDecision)
+        .options(selectinload(StaleDemandReviewDecision.product))
+        .filter(StaleDemandReviewDecision.decision == "manager_approved_one_time")
+        .order_by(StaleDemandReviewDecision.reviewed_at.desc(), StaleDemandReviewDecision.id.desc())
+        .limit(limit)
+        .all()
+    )
+    items = []
+    status_counter: Counter[str] = Counter()
+    action_counter: Counter[str] = Counter()
+    for decision in decisions:
+        item = manager_approved_stale_queue_item(db, decision, today=today_value)
+        items.append(item)
+        status_counter[item["safety_status"]] += 1
+        action_counter[item["suggested_next_action"]] += 1
+
+    return {
+        "summary": {
+            "decisions_evaluated": len(decisions),
+            "total_candidates": len(items),
+            "safety_status_counts": dict(status_counter),
+            "suggested_next_action_counts": dict(action_counter),
+            "limit": limit,
+        },
+        "items": items,
+    }
+
+
+def manager_approved_stale_queue_item(
+    db: Session,
+    decision: StaleDemandReviewDecision,
+    *,
+    today: date,
+) -> dict[str, Any]:
+    explanation = explain_product_recommendation(db, decision.product_id, today=today)
+    if explanation is None:
+        return {
+            "product_id": decision.product_id,
+            "product_name": None,
+            "orderpro_sku": None,
+            "supplier_id": None,
+            "supplier_name": None,
+            "lead_time_days": None,
+            "current_stock": None,
+            "last_demand_date": None,
+            "days_since_last_demand": None,
+            "advisory_recommended_quantity": 0.0,
+            "estimated_unit_cost": None,
+            "estimated_total_cost": None,
+            "reviewed_by": decision.reviewed_by,
+            "review_notes": decision.notes,
+            "reviewed_at": decision.reviewed_at.isoformat() if decision.reviewed_at else None,
+            "review_decision": decision.decision,
+            "safety_status": "blocked",
+            "safety_blockers": ["Product no longer exists"],
+            "warnings": [],
+            "suggested_next_action": "resolve_hard_blockers",
+            "recommendation_status": None,
+            "purchase_readiness_status": None,
+        }
+
+    last_demand = parse_iso_date(explanation.get("last_demand_date"))
+    days_since_last_demand = (today - last_demand).days if last_demand else None
+    recommended_quantity = float(explanation.get("recommended_quantity") or 0)
+    estimated_unit_cost = effective_unit_cost_from_explanation(explanation)
+    estimated_total_cost = (
+        round(recommended_quantity * estimated_unit_cost, 2)
+        if estimated_unit_cost is not None
+        else None
+    )
+    safety = manager_approved_stale_safety(explanation)
+    return {
+        "product_id": explanation["product_id"],
+        "product_name": explanation["product_name"],
+        "orderpro_sku": explanation.get("orderpro_sku"),
+        "supplier_id": explanation.get("supplier_id"),
+        "supplier_name": explanation.get("supplier_name"),
+        "lead_time_days": explanation.get("lead_time_days"),
+        "current_stock": explanation.get("current_stock"),
+        "last_demand_date": explanation.get("last_demand_date"),
+        "days_since_last_demand": days_since_last_demand,
+        "advisory_recommended_quantity": recommended_quantity,
+        "estimated_unit_cost": estimated_unit_cost,
+        "estimated_total_cost": estimated_total_cost,
+        "reviewed_by": decision.reviewed_by,
+        "review_notes": decision.notes,
+        "reviewed_at": decision.reviewed_at.isoformat() if decision.reviewed_at else None,
+        "review_decision": decision.decision,
+        "safety_status": safety["safety_status"],
+        "safety_blockers": safety["safety_blockers"],
+        "warnings": safety["warnings"],
+        "suggested_next_action": safety["suggested_next_action"],
+        "recommendation_status": explanation.get("status"),
+        "purchase_readiness_status": explanation.get("purchase_readiness_status"),
+    }
+
+
+def manager_approved_stale_safety(explanation: dict[str, Any]) -> dict[str, Any]:
+    blockers = []
+    warnings = [
+        warning
+        for warning in (explanation.get("warnings") or [])
+        if not str(warning).startswith("Stale demand only")
+    ]
+    if explanation.get("review_decision") != "manager_approved_one_time":
+        blockers.append("Latest stale-demand decision is not manager-approved one-time")
+    if "Product is non-inventory" in set(explanation.get("blockers") or []):
+        blockers.append("Product is non-inventory")
+    if "Missing supplier" in set(explanation.get("blockers") or []) or explanation.get("supplier_id") is None:
+        blockers.append("Missing supplier")
+    if "Missing lead time" in set(explanation.get("blockers") or []):
+        blockers.append("Missing lead time")
+    if "No demand history" in set(explanation.get("blockers") or []):
+        blockers.append("No demand history")
+    if float(explanation.get("recommended_quantity") or 0) <= 0:
+        blockers.append("Non-positive recommendation quantity")
+    if explanation.get("recommended_action") != "reorder":
+        blockers.append("Forecast action is not reorder")
+    if not explanation.get("stale_demand_only"):
+        blockers.append("Product is not currently stale-demand-only")
+
+    purchase_issues = list(explanation.get("purchase_readiness_issues") or [])
+    advisory_issues = [
+        issue
+        for issue in purchase_issues
+        if issue not in set(blockers) and issue != "Stale-only demand requires manual review"
+    ]
+    for issue in advisory_issues:
+        if issue not in warnings:
+            warnings.append(issue)
+
+    if blockers:
+        status = "blocked"
+        action = "resolve_hard_blockers"
+    elif warnings:
+        status = "needs_review"
+        action = "review_warnings_before_recommendation"
+    else:
+        status = "ready_for_manual_recommendation"
+        action = "create_review_recommendation"
+    return {
+        "safety_status": status,
+        "safety_blockers": unique_preserve_order(blockers),
+        "warnings": unique_preserve_order(warnings),
+        "suggested_next_action": action,
+    }
+
+
+def validate_manager_approved_stale_queue_item(explanation: dict[str, Any]) -> None:
+    safety = manager_approved_stale_safety(explanation)
+    if safety["safety_status"] != "ready_for_manual_recommendation":
+        reasons = safety["safety_blockers"] or safety["warnings"]
+        detail = "; ".join(reasons) if reasons else "Product is not ready for manual stale-demand recommendation."
+        raise ValueError(detail)
+
+
 def normalize_stale_demand_decision_filter(value: str | None) -> str:
     normalized = (value or "unreviewed").strip().lower()
     allowed = ALLOWED_STALE_DEMAND_DECISIONS | {"unreviewed", "all"}

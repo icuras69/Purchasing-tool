@@ -11,6 +11,7 @@ import {
   approvePurchaseOrder,
   cancelPurchaseOrder,
   convertRecommendationToDraftPO,
+  createManagerApprovedStaleReviewRecommendation,
   createDraftPOFromSupplierForecast,
   createDraftPurchaseOrderFromProducts,
   createPurchaseOrder,
@@ -38,6 +39,7 @@ import {
   getManualSupplierCleanupCandidate,
   getManualSupplierCleanupCandidates,
   getManualSupplierCleanupSummary,
+  getManagerApprovedStaleQueue,
   getStoredAccessToken,
   getSupplierAssignmentReviewItems,
   getSupplierAssignmentReviewSummary,
@@ -77,6 +79,7 @@ import type {
   ManualSupplierCleanupCandidate,
   ManualSupplierCleanupSummary,
   ManualSupplierCleanupSupplier,
+  ManagerApprovedStaleQueueResponse,
   ProductSeasonalityDetail,
   Product,
   ProductSupplierMapping,
@@ -130,6 +133,7 @@ vi.mock("./api", () => ({
   getSeasonalProducts: vi.fn(),
   getProductSeasonality: vi.fn(),
   getStaleDemandReview: vi.fn(),
+  getManagerApprovedStaleQueue: vi.fn(),
   saveStaleDemandReviewDecision: vi.fn(),
   getSupplierForecast: vi.fn(),
   createDraftPOFromSupplierForecast: vi.fn(),
@@ -144,6 +148,7 @@ vi.mock("./api", () => ({
   listRecommendations: vi.fn(),
   getRecommendation: vi.fn(),
   createReorderRecommendation: vi.fn(),
+  createManagerApprovedStaleReviewRecommendation: vi.fn(),
   acceptRecommendation: vi.fn(),
   rejectRecommendation: vi.fn(),
   convertRecommendationToDraftPO: vi.fn(),
@@ -894,6 +899,47 @@ function mockStaleDemandReviewWithCandidate(): StaleDemandReviewResponse {
   });
 }
 
+function mockManagerApprovedStaleQueue(
+  overrides: Partial<ManagerApprovedStaleQueueResponse> = {},
+): ManagerApprovedStaleQueueResponse {
+  return {
+    summary: {
+      decisions_evaluated: 1,
+      total_candidates: 1,
+      safety_status_counts: { ready_for_manual_recommendation: 1 },
+      suggested_next_action_counts: { create_review_recommendation: 1 },
+      limit: 500,
+    },
+    items: [
+      {
+        product_id: 3020,
+        product_name: "Stale Product",
+        orderpro_sku: "STALE-3020",
+        supplier_id: 10,
+        supplier_name: "Acme Supplies",
+        lead_time_days: 4,
+        current_stock: 0,
+        last_demand_date: "2025-01-01",
+        days_since_last_demand: 560,
+        advisory_recommended_quantity: 6,
+        estimated_unit_cost: 9.5,
+        estimated_total_cost: 57,
+        reviewed_by: "Maged",
+        review_notes: "Approved for one-time reorder.",
+        reviewed_at: "2026-07-14T10:00:00",
+        review_decision: "manager_approved_one_time",
+        safety_status: "ready_for_manual_recommendation",
+        safety_blockers: [],
+        warnings: [],
+        suggested_next_action: "create_review_recommendation",
+        recommendation_status: "needs_review",
+        purchase_readiness_status: "partially_ready",
+      },
+    ],
+    ...overrides,
+  };
+}
+
 function mockLLMExplanation(
   overrides: Partial<RecommendationLLMExplanation> = {},
 ): RecommendationLLMExplanation {
@@ -1142,6 +1188,18 @@ beforeEach(() => {
   vi.mocked(getSeasonalProducts).mockResolvedValue([]);
   vi.mocked(getProductSeasonality).mockResolvedValue(mockProductSeasonalityDetail());
   vi.mocked(getStaleDemandReview).mockResolvedValue(mockStaleDemandReview());
+  vi.mocked(getManagerApprovedStaleQueue).mockResolvedValue(
+    mockManagerApprovedStaleQueue({
+      summary: {
+        decisions_evaluated: 0,
+        total_candidates: 0,
+        safety_status_counts: {},
+        suggested_next_action_counts: {},
+        limit: 500,
+      },
+      items: [],
+    }),
+  );
   vi.mocked(saveStaleDemandReviewDecision).mockResolvedValue({
     id: 1,
     product_id: 3020,
@@ -1167,6 +1225,7 @@ beforeEach(() => {
   vi.mocked(listRecommendations).mockResolvedValue([]);
   vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
   vi.mocked(createReorderRecommendation).mockResolvedValue(mockRecommendation());
+  vi.mocked(createManagerApprovedStaleReviewRecommendation).mockResolvedValue(mockRecommendation());
   vi.mocked(acceptRecommendation).mockResolvedValue(mockRecommendation({ status: "accepted" }));
   vi.mocked(rejectRecommendation).mockResolvedValue(
     mockRecommendation({ status: "rejected", rejected_reason: "Too early." }),
@@ -3191,6 +3250,52 @@ describe("App mapping review workflow", () => {
         notes: "Approved for demo.",
       }),
     );
+  });
+
+  it("manager-approved stale queue renders and can create a review recommendation", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(getManagerApprovedStaleQueue).mockResolvedValue(mockManagerApprovedStaleQueue());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    expect(await screen.findByRole("heading", { name: "Manager-Approved Stale Queue" })).toBeInTheDocument();
+    expect(screen.getByText("ready_for_manual_recommendation")).toBeInTheDocument();
+    expect(screen.getByText("Approved for one-time reorder.")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Create review recommendation" }));
+
+    await waitFor(() =>
+      expect(createManagerApprovedStaleReviewRecommendation).toHaveBeenCalledWith(3020),
+    );
+  });
+
+  it("manager-approved stale queue disables create action when safety blocks remain", async () => {
+    vi.mocked(getManagerApprovedStaleQueue).mockResolvedValue(
+      mockManagerApprovedStaleQueue({
+        summary: {
+          decisions_evaluated: 1,
+          total_candidates: 1,
+          safety_status_counts: { blocked: 1 },
+          suggested_next_action_counts: { resolve_hard_blockers: 1 },
+          limit: 500,
+        },
+        items: [
+          {
+            ...mockManagerApprovedStaleQueue().items[0],
+            safety_status: "blocked",
+            safety_blockers: ["Missing supplier"],
+            suggested_next_action: "resolve_hard_blockers",
+          },
+        ],
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    expect(await screen.findByText("Missing supplier")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create review recommendation" })).toBeDisabled();
   });
 
   it("generate recommendation calls the reorder endpoint", async () => {

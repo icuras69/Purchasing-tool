@@ -29,9 +29,11 @@ from app.services.recommendation_audit import (
     demand_policy_impact,
     explain_product_recommendation,
     list_stale_demand_review_decisions,
+    manager_approved_stale_queue,
     save_stale_demand_review_decision,
     serialize_stale_demand_review_decision,
     stale_demand_review_candidates,
+    validate_manager_approved_stale_queue_item,
 )
 from app.services.pack_size_audit import pack_size_audit
 from app.services.perf_logging import perf_timer
@@ -44,6 +46,10 @@ class StaleDemandDecisionRequest(BaseModel):
     decision: str
     reviewed_by: str = Field(..., min_length=1)
     notes: str | None = None
+
+
+class ManagerApprovedStaleCreateRequest(BaseModel):
+    created_by: str | None = None
 
 
 def serialize_recommendation(recommendation: Recommendation) -> dict:
@@ -174,6 +180,50 @@ def get_stale_demand_decisions(
     db: Session = Depends(get_db),
 ):
     return list_stale_demand_review_decisions(db, limit=limit)
+
+
+@router.get("/manager-approved-stale-queue")
+def get_manager_approved_stale_queue(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return manager_approved_stale_queue(db, limit=limit)
+
+
+@router.post("/manager-approved-stale-queue/{product_id}/create-review-recommendation", response_model=RecommendationResponse)
+def create_manager_approved_stale_review_recommendation(
+    product_id: int,
+    payload: ManagerApprovedStaleCreateRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    explanation = explain_product_recommendation(db, product_id)
+    if explanation is None:
+        raise HTTPException(status_code=404, detail="Product not found.")
+    try:
+        validate_manager_approved_stale_queue_item(explanation)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    existing = (
+        recommendation_query(db)
+        .filter(Recommendation.product_id == product_id)
+        .filter(Recommendation.recommendation_type == "reorder")
+        .filter(Recommendation.status.in_(["draft", "pending_review"]))
+        .order_by(Recommendation.id.desc())
+        .first()
+    )
+    if existing:
+        return serialize_recommendation(existing)
+
+    try:
+        recommendation = create_reorder_recommendation_for_product(
+            db,
+            product_id,
+            generated_by=(payload.created_by if payload and payload.created_by else "manager_approved_stale_queue"),
+        )
+    except RecommendationError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.message) from error
+    return serialize_recommendation(load_recommendation(db, recommendation.id))
 
 
 @router.post("/stale-demand-review/{product_id}/decision")

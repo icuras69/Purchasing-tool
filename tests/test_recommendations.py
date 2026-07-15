@@ -838,6 +838,212 @@ def test_non_stale_product_cannot_be_manager_approved_as_stale_reorder(client, d
     assert response.json()["detail"] == "Product is not currently eligible for this stale-demand decision."
 
 
+def test_manager_approved_stale_queue_lists_ready_candidate(client, db_session):
+    product, supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    add_forecast_profile(db_session, product, pack_size=1, cost_price=5.0, lead_time_days=4)
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={
+            "decision": "manager_approved_one_time",
+            "reviewed_by": "Maged",
+            "notes": "One-time review approved.",
+        },
+    )
+
+    response = client.get("/recommendations/manager-approved-stale-queue")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total_candidates"] == 1
+    item = payload["items"][0]
+    assert item["product_id"] == product.id
+    assert item["supplier_id"] == supplier.id
+    assert item["reviewed_by"] == "Maged"
+    assert item["review_notes"] == "One-time review approved."
+    assert item["safety_status"] == "ready_for_manual_recommendation"
+    assert item["safety_blockers"] == []
+    assert item["suggested_next_action"] == "create_review_recommendation"
+
+
+def test_manager_approved_stale_queue_excludes_other_decisions(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    for decision in ("watchlist", "rejected_stale", "wait_for_recent_demand"):
+        client.post(
+            f"/recommendations/stale-demand-review/{product.id}/decision",
+            json={"decision": decision, "reviewed_by": "Maged"},
+        )
+        response = client.get("/recommendations/manager-approved-stale-queue")
+        assert response.status_code == 200
+        assert response.json()["summary"]["total_candidates"] == 0
+
+
+def test_manager_approved_stale_queue_marks_missing_supplier_as_blocked(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    product.supplier_id = None
+    db_session.add(
+        StaleDemandReviewDecision(
+            product_id=product.id,
+            decision="manager_approved_one_time",
+            reviewed_by="Maged",
+            reviewed_at=datetime.utcnow(),
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/recommendations/manager-approved-stale-queue")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["product_id"] == product.id
+    assert item["safety_status"] == "blocked"
+    assert "Missing supplier" in item["safety_blockers"]
+
+
+def test_manager_approved_stale_queue_marks_non_positive_quantity_as_blocked(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 100, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.add(
+        StaleDemandReviewDecision(
+            product_id=product.id,
+            decision="manager_approved_one_time",
+            reviewed_by="Maged",
+            reviewed_at=datetime.utcnow(),
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/recommendations/manager-approved-stale-queue")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["safety_status"] == "blocked"
+    assert "Non-positive recommendation quantity" in item["safety_blockers"]
+    assert "Forecast action is not reorder" in item["safety_blockers"]
+
+
+def test_manager_approved_stale_queue_is_read_only(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.add(
+        StaleDemandReviewDecision(
+            product_id=product.id,
+            decision="manager_approved_one_time",
+            reviewed_by="Maged",
+            reviewed_at=datetime.utcnow(),
+        )
+    )
+    db_session.commit()
+    before_recommendations = db_session.query(Recommendation).count()
+    before_purchase_orders = db_session.query(PurchaseOrder).count()
+
+    response = client.get("/recommendations/manager-approved-stale-queue")
+
+    assert response.status_code == 200
+    assert db_session.query(Recommendation).count() == before_recommendations
+    assert db_session.query(PurchaseOrder).count() == before_purchase_orders
+
+
+def test_manager_approved_stale_create_review_requires_decision(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+
+    response = client.post(
+        f"/recommendations/manager-approved-stale-queue/{product.id}/create-review-recommendation"
+    )
+
+    assert response.status_code == 400
+    assert "Latest stale-demand decision is not manager-approved one-time" in response.json()["detail"]
+
+
+def test_manager_approved_stale_create_review_refuses_non_eligible_product(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 100, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.add(
+        StaleDemandReviewDecision(
+            product_id=product.id,
+            decision="manager_approved_one_time",
+            reviewed_by="Maged",
+            reviewed_at=datetime.utcnow(),
+        )
+    )
+    db_session.commit()
+
+    response = client.post(
+        f"/recommendations/manager-approved-stale-queue/{product.id}/create-review-recommendation"
+    )
+
+    assert response.status_code == 400
+    assert "Non-positive recommendation quantity" in response.json()["detail"]
+
+
+def test_manager_approved_stale_create_review_creates_pending_review_without_po_and_no_duplicates(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    add_forecast_profile(db_session, product, pack_size=1, cost_price=5.0, lead_time_days=4)
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "manager_approved_one_time", "reviewed_by": "Maged"},
+    )
+    before_po_count = db_session.query(PurchaseOrder).count()
+
+    first_response = client.post(
+        f"/recommendations/manager-approved-stale-queue/{product.id}/create-review-recommendation",
+        json={"created_by": "Maged"},
+    )
+    second_response = client.post(
+        f"/recommendations/manager-approved-stale-queue/{product.id}/create-review-recommendation",
+        json={"created_by": "Maged"},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    first_payload = first_response.json()
+    second_payload = second_response.json()
+    assert first_payload["id"] == second_payload["id"]
+    assert first_payload["status"] == "pending_review"
+    assert first_payload["forecast_snapshot"]["review_decision"] == "manager_approved_one_time"
+    assert first_payload["converted_purchase_order_id"] is None
+    assert db_session.query(PurchaseOrder).count() == before_po_count
+    assert (
+        db_session.query(Recommendation)
+        .filter(Recommendation.product_id == product.id)
+        .filter(Recommendation.status == "pending_review")
+        .count()
+        == 1
+    )
+
+
 def test_demand_policy_impact_endpoint_reports_stale_and_recent_policy_changes(client, db_session):
     seed_recommendation_product(db_session)
     stale_product, _supplier, _mapping = seed_recommendation_product(

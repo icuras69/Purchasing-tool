@@ -885,3 +885,39 @@ export interface StaleDemandReviewDecision {
   created_at: string | null;
   updated_at: string | null;
 }
+
+export interface ManagerApprovedStaleQueueItem {
+  product_id: number;
+  product_name: string | null;
+  orderpro_sku: string | null;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  lead_time_days: number | null;
+  current_stock: number | null;
+  last_demand_date: string | null;
+  days_since_last_demand: number | null;
+  advisory_recommended_quantity: number;
+  estimated_unit_cost: number | null;
+  estimated_total_cost: number | null;
+  reviewed_by: string | null;
+  review_notes: string | null;
+  reviewed_at: string | null;
+  review_decision: string | null;
+  safety_status: string;
+  safety_blockers: string[];
+  warnings: string[];
+  suggested_next_action: string;
+  recommendation_status: string | null;
+  purchase_readiness_status: string | null;
+}
+
+export interface ManagerApprovedStaleQueueResponse {
+  summary: {
+    decisions_evaluated: number;
+    total_candidates: number;
+    safety_status_counts: Record<string, number>;
+    suggested_next_action_counts: Record<string, number>;
+    limit: number;
+  };
+  items: ManagerApprovedStaleQueueItem[];
+}
