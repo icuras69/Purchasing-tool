@@ -813,6 +813,31 @@ export interface RecommendationConvertResponse {
   purchase_order: PurchaseOrder;
 }
 
+export interface RecommendationPOReadiness {
+  recommendation_id: number;
+  product_id: number;
+  product_name: string | null;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  recommendation_status: string;
+  recommendation_type: string;
+  recommended_quantity: number;
+  estimated_unit_cost: number | null;
+  estimated_total_cost: number | null;
+  can_create_draft_po: boolean;
+  blockers: string[];
+  warnings: string[];
+  required_manager_decision: string | null;
+  po_supplier_source: string;
+  canonical_supplier_check_result: string;
+  product_supplier_id: number | null;
+  recommendation_supplier_id: number | null;
+  forecast_recommended_action: string | null;
+  stale_demand_only: boolean;
+  review_decision: string | null;
+  purchase_readiness_status: string | null;
+}
+
 export interface RecommendationLLMExplanation {
   suggested_action: string;
   summary: string;

@@ -47,6 +47,7 @@ import {
   getProductSeasonality,
   getPurchaseOrder,
   getRecommendation,
+  getRecommendationPOReadiness,
   getRecommendationReviewSummary,
   getStaleDemandReview,
   getSeasonalProducts,
@@ -97,6 +98,7 @@ import type {
   ProductSupplierMapping,
   PurchaseOrder,
   PurchaseRecommendation,
+  RecommendationPOReadiness,
   AddPurchaseOrderLineRequest,
   CreatePurchaseOrderRequest,
   DraftFromProductsResponse,
@@ -278,6 +280,16 @@ function recommendationStatusClassName(status: string): string {
   }
   if (status === "pending_review" || status === "draft") {
     return "status pending-approval";
+  }
+  return "status needs-review";
+}
+
+function poReadinessStatusClassName(canCreateDraftPo: boolean | null | undefined): string {
+  if (canCreateDraftPo) {
+    return "status mapped";
+  }
+  if (canCreateDraftPo === false) {
+    return "status rejected";
   }
   return "status needs-review";
 }
@@ -2882,6 +2894,115 @@ function ManagerApprovedStaleQueuePanel({
   );
 }
 
+function POReadinessPanel({
+  error,
+  loading,
+  readiness,
+}: {
+  error: string | null;
+  loading: boolean;
+  readiness: RecommendationPOReadiness | null;
+}) {
+  if (loading) {
+    return (
+      <section className="nested-panel" aria-label="PO Readiness">
+        <h3>PO Readiness</h3>
+        <div className="state">Loading PO readiness...</div>
+      </section>
+    );
+  }
+
+  if (error) {
+    return (
+      <section className="nested-panel" aria-label="PO Readiness">
+        <h3>PO Readiness</h3>
+        <div className="state warning">
+          PO readiness unavailable: {error}. Backend validation still applies if conversion is attempted.
+        </div>
+      </section>
+    );
+  }
+
+  if (!readiness) {
+    return (
+      <section className="nested-panel" aria-label="PO Readiness">
+        <h3>PO Readiness</h3>
+        <div className="state warning">PO readiness is unavailable.</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="nested-panel" aria-label="PO Readiness">
+      <h3>PO Readiness</h3>
+      <div className={poReadinessStatusClassName(readiness.can_create_draft_po)}>
+        {readiness.can_create_draft_po ? "Ready to create draft PO" : "Not ready for draft PO"}
+      </div>
+      {!readiness.can_create_draft_po && (
+        <div className="state warning">This recommendation cannot create a draft PO yet.</div>
+      )}
+      <dl className="detail-list">
+        <div>
+          <dt>Product ID</dt>
+          <dd>{formatValue(readiness.product_id)}</dd>
+        </div>
+        <div>
+          <dt>Product</dt>
+          <dd>{formatValue(readiness.product_name)}</dd>
+        </div>
+        <div>
+          <dt>Supplier</dt>
+          <dd>{formatValue(readiness.supplier_name)}</dd>
+        </div>
+        <div>
+          <dt>Supplier source</dt>
+          <dd>{formatValue(readiness.po_supplier_source)}</dd>
+        </div>
+        <div>
+          <dt>Canonical supplier check</dt>
+          <dd>{formatValue(readiness.canonical_supplier_check_result)}</dd>
+        </div>
+        <div>
+          <dt>Recommended quantity</dt>
+          <dd>{formatValue(readiness.recommended_quantity)}</dd>
+        </div>
+        <div>
+          <dt>Estimated unit cost</dt>
+          <dd>{formatValue(readiness.estimated_unit_cost)}</dd>
+        </div>
+        <div>
+          <dt>Estimated total cost</dt>
+          <dd>{formatValue(readiness.estimated_total_cost)}</dd>
+        </div>
+        <div>
+          <dt>Required manager decision</dt>
+          <dd>{formatValue(readiness.required_manager_decision)}</dd>
+        </div>
+      </dl>
+      {readiness.blockers.length > 0 && (
+        <div className="state error">
+          <strong>Blockers:</strong>
+          <ul>
+            {readiness.blockers.map((blocker) => (
+              <li key={blocker}>{blocker}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {readiness.warnings.length > 0 && (
+        <div className="state warning">
+          <strong>Warnings:</strong>
+          <ul>
+            {readiness.warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function RecommendationDetail({
   loadingAction,
   llmExplanation,
@@ -2905,9 +3026,14 @@ function RecommendationDetail({
   recommendation: PurchaseRecommendation;
   rejectReason: string;
 }) {
+  const [poReadiness, setPoReadiness] = useState<RecommendationPOReadiness | null>(null);
+  const [poReadinessLoading, setPoReadinessLoading] = useState(true);
+  const [poReadinessError, setPoReadinessError] = useState<string | null>(null);
   const canAccept = recommendation.status === "pending_review" || recommendation.status === "draft";
   const canReject = recommendation.status !== "rejected" && recommendation.status !== "converted_to_po";
   const canConvert = recommendation.status === "accepted";
+  const conversionBlocked = poReadiness?.can_create_draft_po === false;
+  const conversionDisabled = loadingAction || poReadinessLoading || conversionBlocked;
   const supplierSnapshot = recommendation.supplier_context_snapshot;
   const forecastSnapshot = recommendation.forecast_snapshot;
   const inputSnapshot = recommendation.input_snapshot;
@@ -2915,6 +3041,30 @@ function RecommendationDetail({
     inputSnapshot && typeof inputSnapshot.effective_forecast_inputs === "object"
       ? (inputSnapshot.effective_forecast_inputs as Record<string, unknown>)
       : null;
+
+  useEffect(() => {
+    let active = true;
+    setPoReadiness(null);
+    setPoReadinessLoading(true);
+    setPoReadinessError(null);
+    getRecommendationPOReadiness(recommendation.id)
+      .then((loadedReadiness) => {
+        if (active) {
+          setPoReadiness(loadedReadiness);
+          setPoReadinessLoading(false);
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setPoReadiness(null);
+          setPoReadinessLoading(false);
+          setPoReadinessError(loadError.message);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [recommendation.id, recommendation.status, recommendation.updated_at]);
 
   return (
     <section className="detail-panel" aria-label="Recommendation details">
@@ -2947,8 +3097,8 @@ function RecommendationDetail({
             </>
           )}
           {canConvert && (
-            <button disabled={loadingAction} onClick={() => onConvert(recommendation)} type="button">
-              Convert to Draft PO
+            <button disabled={conversionDisabled} onClick={() => onConvert(recommendation)} type="button">
+              {poReadinessLoading ? "Checking PO Readiness..." : "Convert to Draft PO"}
             </button>
           )}
         </div>
@@ -2956,6 +3106,11 @@ function RecommendationDetail({
       <div className="state warning">
         Advisory only. Draft purchase orders still require human approval before issuing.
       </div>
+      <POReadinessPanel
+        error={poReadinessError}
+        loading={poReadinessLoading}
+        readiness={poReadiness}
+      />
       <section className="nested-panel" aria-label="AI explanation">
         <h3>AI Explanation</h3>
         <div className="state warning">

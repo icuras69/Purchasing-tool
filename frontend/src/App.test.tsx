@@ -54,6 +54,7 @@ import {
   getSupplierForecast,
   getPurchaseOrder,
   getRecommendation,
+  getRecommendationPOReadiness,
   getRecommendationReviewSummary,
   isAuthEnabled,
   issuePurchaseOrder,
@@ -90,6 +91,7 @@ import type {
   ProductSupplierMapping,
   PurchaseOrder,
   PurchaseRecommendation,
+  RecommendationPOReadiness,
   RecommendationLLMExplanation,
   RecommendationReviewSummaryResponse,
   SeasonalProduct,
@@ -154,6 +156,7 @@ vi.mock("./api", () => ({
   getPurchaseOrder: vi.fn(),
   listRecommendations: vi.fn(),
   getRecommendation: vi.fn(),
+  getRecommendationPOReadiness: vi.fn(),
   createReorderRecommendation: vi.fn(),
   createManagerApprovedStaleReviewRecommendation: vi.fn(),
   exportStaleDemandReviewCsv: vi.fn(),
@@ -852,6 +855,36 @@ function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): Pu
   };
 }
 
+function mockRecommendationPOReadiness(
+  overrides: Partial<RecommendationPOReadiness> = {},
+): RecommendationPOReadiness {
+  return {
+    recommendation_id: 900,
+    product_id: 1,
+    product_name: "Mapped Product",
+    supplier_id: 10,
+    supplier_name: "Acme Supplies",
+    recommendation_status: "accepted",
+    recommendation_type: "reorder",
+    recommended_quantity: 6,
+    estimated_unit_cost: 9.5,
+    estimated_total_cost: 57,
+    can_create_draft_po: true,
+    blockers: [],
+    warnings: ["Missing pack size; no order multiple is applied unless reviewed"],
+    required_manager_decision: null,
+    po_supplier_source: "products.supplier_id",
+    canonical_supplier_check_result: "ok",
+    product_supplier_id: null,
+    recommendation_supplier_id: 10,
+    forecast_recommended_action: "reorder",
+    stale_demand_only: false,
+    review_decision: null,
+    purchase_readiness_status: "order_ready",
+    ...overrides,
+  };
+}
+
 function mockStaleDemandReview(
   overrides: Partial<StaleDemandReviewResponse> = {},
 ): StaleDemandReviewResponse {
@@ -1260,6 +1293,7 @@ beforeEach(() => {
   vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
   vi.mocked(listRecommendations).mockResolvedValue([]);
   vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
+  vi.mocked(getRecommendationPOReadiness).mockResolvedValue(mockRecommendationPOReadiness());
   vi.mocked(createReorderRecommendation).mockResolvedValue(mockRecommendation());
   vi.mocked(createManagerApprovedStaleReviewRecommendation).mockResolvedValue(mockRecommendation());
   vi.mocked(exportStaleDemandReviewCsv).mockResolvedValue({
@@ -3479,6 +3513,77 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("product_supplier")).toBeInTheDocument();
     expect(screen.getByText("order_now")).toBeInTheDocument();
     expect(screen.getByText("high")).toBeInTheDocument();
+  });
+
+  it("PO readiness panel renders ready state with canonical supplier source and warnings", async () => {
+    const accepted = mockRecommendation({ status: "accepted" });
+    vi.mocked(listRecommendations).mockResolvedValue([accepted]);
+    vi.mocked(getRecommendation).mockResolvedValue(accepted);
+    vi.mocked(getRecommendationPOReadiness).mockResolvedValue(
+      mockRecommendationPOReadiness({
+        can_create_draft_po: true,
+        warnings: ["Missing pack size; no order multiple is applied unless reviewed"],
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    const panel = await screen.findByRole("region", { name: "PO Readiness" });
+    expect(within(panel).getByText("Ready to create draft PO")).toBeInTheDocument();
+    expect(within(panel).getByText("products.supplier_id")).toBeInTheDocument();
+    expect(within(panel).getByText("ok")).toBeInTheDocument();
+    expect(
+      within(panel).getByText("Missing pack size; no order multiple is applied unless reviewed"),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Convert to Draft PO" })).toBeEnabled();
+  });
+
+  it("PO readiness panel shows blockers and disables conversion when blocked", async () => {
+    const accepted = mockRecommendation({ status: "accepted" });
+    vi.mocked(listRecommendations).mockResolvedValue([accepted]);
+    vi.mocked(getRecommendation).mockResolvedValue(accepted);
+    vi.mocked(getRecommendationPOReadiness).mockResolvedValue(
+      mockRecommendationPOReadiness({
+        can_create_draft_po: false,
+        blockers: ["Product is missing a canonical supplier assignment.", "Product is missing usable supplier lead time."],
+        warnings: [],
+        canonical_supplier_check_result: "missing",
+        supplier_id: null,
+        supplier_name: null,
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    const panel = await screen.findByRole("region", { name: "PO Readiness" });
+    expect(within(panel).getByText("Not ready for draft PO")).toBeInTheDocument();
+    expect(within(panel).getByText("This recommendation cannot create a draft PO yet.")).toBeInTheDocument();
+    expect(within(panel).getByText("Product is missing a canonical supplier assignment.")).toBeInTheDocument();
+    expect(within(panel).getByText("Product is missing usable supplier lead time.")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Convert to Draft PO" })).toBeDisabled();
+  });
+
+  it("PO readiness endpoint failure shows a non-blocking detail error", async () => {
+    const accepted = mockRecommendation({ status: "accepted" });
+    vi.mocked(listRecommendations).mockResolvedValue([accepted]);
+    vi.mocked(getRecommendation).mockResolvedValue(accepted);
+    vi.mocked(getRecommendationPOReadiness).mockRejectedValue(new Error("Readiness offline"));
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+    await screen.findByText("Mapped Product");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    const panel = await screen.findByRole("region", { name: "PO Readiness" });
+    expect(within(panel).getByText(/PO readiness unavailable: Readiness offline/)).toBeInTheDocument();
+    expect(screen.getByText("Recommendation 900")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Convert to Draft PO" })).toBeEnabled();
   });
 
   it("generate AI explanation button renders on recommendation detail", async () => {

@@ -28,6 +28,7 @@ import type {
   ProductSupplierMapping,
   PurchaseOrder,
   PurchaseRecommendation,
+  RecommendationPOReadiness,
   RecommendationLLMExplanation,
   StaleDemandDecisionRequest,
   StaleDemandReviewDecision,
@@ -764,6 +765,13 @@ export function getRecommendation(recommendationId: number): Promise<PurchaseRec
   return fetchJson<PurchaseRecommendation>(
     `/recommendations/${recommendationId}`,
     "recommendation",
+  );
+}
+
+export function getRecommendationPOReadiness(recommendationId: number): Promise<RecommendationPOReadiness> {
+  return fetchJson<RecommendationPOReadiness>(
+    `/recommendations/${recommendationId}/po-readiness`,
+    "recommendation PO readiness",
   );
 }
 

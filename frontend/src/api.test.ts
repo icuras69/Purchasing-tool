@@ -18,6 +18,7 @@ import {
   getForecastReconciliationProducts,
   getManualSupplierCleanupCandidates,
   getManagerApprovedStaleQueue,
+  getRecommendationPOReadiness,
   getRecommendationReviewSummary,
   getStoredAccessToken,
   getStaleDemandReview,
@@ -239,6 +240,23 @@ describe("apiUrl", () => {
         method: "POST",
         body: JSON.stringify({ created_by: "manual" }),
       }),
+    );
+  });
+
+  it("fetches recommendation PO readiness", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ recommendation_id: 900, can_create_draft_po: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getRecommendationPOReadiness(900);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/900/po-readiness"),
+      expect.any(Object),
     );
   });
 
