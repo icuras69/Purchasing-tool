@@ -15,7 +15,7 @@ from app.services.recommendation_audit import (
 )
 from app.services.purchase_order_drafting import (
     recalculate_purchase_order_total,
-    snapshot_purchase_order_line,
+    snapshot_purchase_order_line_from_product,
 )
 
 
@@ -24,6 +24,7 @@ ACCEPTED = "accepted"
 REJECTED = "rejected"
 CONVERTED_TO_PO = "converted_to_po"
 REORDER = "reorder"
+MANAGER_APPROVED_ONE_TIME = "manager_approved_one_time"
 
 
 class RecommendationError(Exception):
@@ -261,26 +262,143 @@ def reject_recommendation(
     return recommendation
 
 
+def unique_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def recommendation_po_readiness(db: Session, recommendation: Recommendation) -> dict[str, Any]:
+    product = load_product_for_recommendation(db, recommendation.product_id) if recommendation.product_id else None
+    explanation = explain_product_recommendation(db, product.id) if product else None
+    supplier = product.supplier_record if product else None
+    blockers: list[str] = []
+    warnings: list[str] = []
+    required_manager_decision: str | None = None
+    canonical_supplier_check_result = "missing"
+    po_supplier_source = "products.supplier_id"
+
+    quantity = float(recommendation.recommended_qty or 0)
+    if recommendation.status != ACCEPTED:
+        blockers.append("Only accepted recommendations can be converted to a draft purchase order.")
+    if recommendation.converted_purchase_order_id:
+        blockers.append("Recommendation has already been converted to a purchase order.")
+    if recommendation.recommendation_type != REORDER:
+        blockers.append("Recommendation type is not reorder.")
+    if quantity <= 0:
+        blockers.append("Recommendation quantity must be greater than zero.")
+
+    if product is None:
+        blockers.append("Product not found.")
+    else:
+        if product.is_non_inventory:
+            blockers.append("Product is non-inventory.")
+        if product.supplier_id is None or supplier is None:
+            blockers.append("Product is missing a canonical supplier assignment.")
+            canonical_supplier_check_result = "missing"
+        elif hasattr(supplier, "is_active") and not supplier.is_active:
+            blockers.append("Canonical supplier is inactive.")
+            canonical_supplier_check_result = "inactive"
+        elif recommendation.supplier_id is not None and recommendation.supplier_id != product.supplier_id:
+            blockers.append("Recommendation supplier conflicts with the product canonical supplier.")
+            canonical_supplier_check_result = "conflict"
+        else:
+            canonical_supplier_check_result = "ok"
+
+    if explanation is None and product is not None:
+        blockers.append("Recommendation explanation is unavailable.")
+    elif explanation:
+        explanation_blockers = set(explanation.get("blockers") or [])
+        if "Missing supplier" in explanation_blockers and "Product is missing a canonical supplier assignment." not in blockers:
+            blockers.append("Product is missing a canonical supplier assignment.")
+        if "Missing lead time" in explanation_blockers:
+            blockers.append("Product is missing usable supplier lead time.")
+        if "No demand history" in explanation_blockers:
+            blockers.append("Product is missing demand history or open demand.")
+        if "Product is non-inventory" in explanation_blockers and "Product is non-inventory." not in blockers:
+            blockers.append("Product is non-inventory.")
+
+        if explanation.get("recommended_action") != "reorder":
+            blockers.append("Forecast action is not reorder.")
+
+        stale_only = bool(explanation.get("stale_demand_only"))
+        manager_approved = explanation.get("review_decision") == MANAGER_APPROVED_ONE_TIME
+        if stale_only:
+            required_manager_decision = MANAGER_APPROVED_ONE_TIME
+            if not manager_approved:
+                blockers.append("Stale-only demand requires manager-approved one-time review before PO creation.")
+            else:
+                warnings.append("Stale-only demand was manager-approved for one-time PO review.")
+
+        if explanation.get("cost_required") and explanation.get("cost_status") == "missing":
+            blockers.append("Product is missing required cost.")
+        if explanation.get("pack_size_required") and explanation.get("pack_size") is None:
+            blockers.append("Product is missing required pack size.")
+
+        for warning in explanation.get("warnings") or []:
+            if str(warning).startswith("Stale demand only") and required_manager_decision == MANAGER_APPROVED_ONE_TIME:
+                continue
+            warnings.append(str(warning))
+        for issue in explanation.get("purchase_readiness_issues") or []:
+            if issue in {"Stale-only demand requires manual review", "Missing supplier", "Missing lead time", "No demand history"}:
+                continue
+            if issue == "Missing cost" and explanation.get("cost_required"):
+                continue
+            if issue == "Missing pack size" and explanation.get("pack_size_required"):
+                continue
+            warnings.append(str(issue))
+
+    unit_cost = recommendation.estimated_unit_cost
+    if unit_cost is None and product is not None:
+        unit_cost = profile_or_effective_inputs(db, product).get("cost_price")
+    estimated_total_cost = round(quantity * unit_cost, 2) if unit_cost is not None and quantity > 0 else None
+    blockers = unique_preserve_order(blockers)
+    warnings = unique_preserve_order(warnings)
+    return {
+        "recommendation_id": recommendation.id,
+        "product_id": product.id if product else recommendation.product_id,
+        "product_name": product.name if product else None,
+        "supplier_id": product.supplier_id if product else None,
+        "supplier_name": supplier.name if supplier else None,
+        "recommendation_status": recommendation.status,
+        "recommendation_type": recommendation.recommendation_type,
+        "recommended_quantity": quantity,
+        "estimated_unit_cost": unit_cost,
+        "estimated_total_cost": estimated_total_cost,
+        "can_create_draft_po": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "required_manager_decision": required_manager_decision,
+        "po_supplier_source": po_supplier_source,
+        "canonical_supplier_check_result": canonical_supplier_check_result,
+        "product_supplier_id": recommendation.product_supplier_id,
+        "recommendation_supplier_id": recommendation.supplier_id,
+        "forecast_recommended_action": explanation.get("recommended_action") if explanation else None,
+        "stale_demand_only": bool(explanation.get("stale_demand_only")) if explanation else False,
+        "review_decision": explanation.get("review_decision") if explanation else None,
+        "purchase_readiness_status": explanation.get("purchase_readiness_status") if explanation else None,
+    }
+
+
 def convert_recommendation_to_draft_po(
     db: Session,
     recommendation: Recommendation,
 ) -> tuple[Recommendation, PurchaseOrder]:
-    if recommendation.status != ACCEPTED:
-        raise RecommendationError("Only accepted recommendations can be converted to a draft purchase order.")
-    if recommendation.converted_purchase_order_id:
-        raise RecommendationError("Recommendation has already been converted to a purchase order.")
-    if not recommendation.product_supplier_id or not recommendation.supplier_id:
-        raise RecommendationError("Recommendation does not have a ProductSupplier mapping.")
+    readiness = recommendation_po_readiness(db, recommendation)
+    if not readiness["can_create_draft_po"]:
+        raise RecommendationError("; ".join(readiness["blockers"]))
 
-    product_supplier = db.get(ProductSupplier, recommendation.product_supplier_id)
-    if not product_supplier:
-        raise RecommendationError("ProductSupplier mapping not found.")
-    if product_supplier.match_status == REJECTED:
-        raise RecommendationError("Rejected ProductSupplier mappings cannot be converted to purchase orders.")
+    product = load_product_for_recommendation(db, recommendation.product_id)
+    if not product or not product.supplier_id:
+        raise RecommendationError("Product is missing a canonical supplier assignment.")
 
     now = datetime.utcnow()
     po = PurchaseOrder(
-        supplier_id=recommendation.supplier_id,
+        supplier_id=product.supplier_id,
         status="draft",
         created_at=now,
         updated_at=now,
@@ -289,7 +407,14 @@ def convert_recommendation_to_draft_po(
     )
     db.add(po)
     db.flush()
-    po.lines.append(snapshot_purchase_order_line(po, product_supplier, recommendation.recommended_qty))
+    po.lines.append(
+        snapshot_purchase_order_line_from_product(
+            po,
+            product,
+            recommendation.recommended_qty,
+            notes=f"Drafted from accepted recommendation {recommendation.id}.",
+        )
+    )
     db.flush()
     recalculate_purchase_order_total(po)
 

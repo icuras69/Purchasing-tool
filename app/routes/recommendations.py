@@ -21,6 +21,7 @@ from app.services.recommendations import (
     accept_recommendation,
     convert_recommendation_to_draft_po,
     create_reorder_recommendation_for_product,
+    recommendation_po_readiness,
     reject_recommendation,
 )
 from app.services.recommendation_audit import (
@@ -318,6 +319,12 @@ def get_pack_size_audit(
 @router.get("/{recommendation_id}", response_model=RecommendationResponse)
 def get_recommendation(recommendation_id: int, db: Session = Depends(get_db)):
     return serialize_recommendation(load_recommendation(db, recommendation_id))
+
+
+@router.get("/{recommendation_id}/po-readiness")
+def get_recommendation_po_readiness(recommendation_id: int, db: Session = Depends(get_db)):
+    recommendation = load_recommendation(db, recommendation_id)
+    return recommendation_po_readiness(db, recommendation)
 
 
 @router.post("/{recommendation_id}/accept", response_model=RecommendationResponse)

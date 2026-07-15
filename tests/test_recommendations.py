@@ -144,6 +144,33 @@ def accept_recommendation(client, recommendation_id: int, reviewed_by: str = "bu
     return response.json()
 
 
+def create_manual_recommendation_row(
+    db_session,
+    product: Product,
+    *,
+    supplier_id: int | None = None,
+    recommended_qty: float = 2,
+    status: str = "accepted",
+    recommendation_type: str = "reorder",
+    estimated_unit_cost: float | None = 5.0,
+) -> Recommendation:
+    recommendation = Recommendation(
+        product_id=product.id,
+        supplier_id=product.supplier_id if supplier_id is None else supplier_id,
+        recommended_qty=recommended_qty,
+        risk_level="medium",
+        recommendation_type=recommendation_type,
+        status=status,
+        reason="Manual test recommendation.",
+        generated_by="test",
+        estimated_unit_cost=estimated_unit_cost,
+        estimated_total_cost=round(recommended_qty * estimated_unit_cost, 2) if estimated_unit_cost is not None else None,
+    )
+    db_session.add(recommendation)
+    db_session.commit()
+    return recommendation
+
+
 def test_create_reorder_recommendation_for_product_with_orderpro_supplier(client, db_session):
     product, supplier, mapping = seed_recommendation_product(db_session)
 
@@ -1413,16 +1440,33 @@ def test_reject_recommendation_changes_status_and_stores_reason(client, db_sessi
     assert payload["rejected_reason"] == "Too early to reorder."
 
 
-def test_orderpro_recommendation_conversion_waits_for_purchase_order_refactor(client, db_session):
-    product, _supplier, _mapping = seed_recommendation_product(db_session)
+def test_accepted_safe_recommendation_can_create_draft_po_from_canonical_supplier(client, db_session):
+    product, supplier, _mapping = seed_recommendation_product(db_session)
     recommendation = create_recommendation(client, product.id)
     accept_recommendation(client, recommendation["id"])
 
+    readiness_response = client.get(f"/recommendations/{recommendation['id']}/po-readiness")
     response = client.post(f"/recommendations/{recommendation['id']}/convert-to-draft-po")
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Recommendation does not have a ProductSupplier mapping."
-    assert db_session.query(PurchaseOrder).count() == 0
+    assert readiness_response.status_code == 200
+    readiness = readiness_response.json()
+    assert readiness["can_create_draft_po"] is True
+    assert readiness["po_supplier_source"] == "products.supplier_id"
+    assert readiness["canonical_supplier_check_result"] == "ok"
+    assert response.status_code == 200
+    payload = response.json()
+    po = payload["purchase_order"]
+    assert po["status"] == "draft"
+    assert po["supplier_id"] == supplier.id
+    assert len(po["lines"]) == 1
+    line = po["lines"][0]
+    assert line["product_id"] == product.id
+    assert line["product_supplier_id"] is None
+    assert line["quantity"] == payload["recommendation"]["recommended_quantity"]
+    assert payload["recommendation"]["status"] == "converted_to_po"
+    assert db_session.query(PurchaseOrder).count() == 1
+    assert db_session.query(PurchaseOrder).first().approved_at is None
+    assert db_session.query(PurchaseOrder).first().issued_at is None
 
 
 def test_cannot_convert_rejected_recommendation(client, db_session):
@@ -1449,6 +1493,171 @@ def test_cannot_convert_pending_recommendation_without_acceptance(client, db_ses
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Only accepted recommendations can be converted to a draft purchase order."
+    assert db_session.query(PurchaseOrder).count() == 0
+
+
+def test_po_readiness_endpoint_is_read_only(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+    recommendation = create_recommendation(client, product.id)
+    accept_recommendation(client, recommendation["id"])
+    before_po_count = db_session.query(PurchaseOrder).count()
+    before_status = db_session.get(Recommendation, recommendation["id"]).status
+
+    response = client.get(f"/recommendations/{recommendation['id']}/po-readiness")
+
+    assert response.status_code == 200
+    assert response.json()["can_create_draft_po"] is True
+    assert db_session.query(PurchaseOrder).count() == before_po_count
+    assert db_session.get(Recommendation, recommendation["id"]).status == before_status
+
+
+def test_missing_canonical_supplier_blocks_recommendation_to_po_even_with_legacy_mapping(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+    legacy_supplier_id = product.supplier_id
+    product.supplier_id = None
+    recommendation = create_manual_recommendation_row(
+        db_session,
+        product,
+        supplier_id=legacy_supplier_id,
+        recommended_qty=3,
+    )
+
+    readiness_response = client.get(f"/recommendations/{recommendation.id}/po-readiness")
+    response = client.post(f"/recommendations/{recommendation.id}/convert-to-draft-po")
+
+    assert readiness_response.status_code == 200
+    assert readiness_response.json()["can_create_draft_po"] is False
+    assert readiness_response.json()["canonical_supplier_check_result"] == "missing"
+    assert response.status_code == 400
+    assert "canonical supplier" in response.json()["detail"]
+    assert db_session.query(PurchaseOrder).count() == 0
+
+
+def test_recommendation_supplier_conflict_blocks_po_creation(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+    other_supplier = Supplier(name="Other PO Supplier", normalized_name="OTHER PO SUPPLIER", lead_time_days=4)
+    db_session.add(other_supplier)
+    db_session.flush()
+    recommendation = create_manual_recommendation_row(
+        db_session,
+        product,
+        supplier_id=other_supplier.id,
+        recommended_qty=3,
+    )
+
+    readiness_response = client.get(f"/recommendations/{recommendation.id}/po-readiness")
+    response = client.post(f"/recommendations/{recommendation.id}/convert-to-draft-po")
+
+    assert readiness_response.status_code == 200
+    assert readiness_response.json()["canonical_supplier_check_result"] == "conflict"
+    assert response.status_code == 400
+    assert "conflicts with the product canonical supplier" in response.json()["detail"]
+    assert db_session.query(PurchaseOrder).count() == 0
+
+
+def test_non_positive_recommendation_quantity_blocks_po_creation(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+    recommendation = create_manual_recommendation_row(db_session, product, recommended_qty=0)
+
+    response = client.post(f"/recommendations/{recommendation.id}/convert-to-draft-po")
+
+    assert response.status_code == 400
+    assert "greater than zero" in response.json()["detail"]
+    assert db_session.query(PurchaseOrder).count() == 0
+
+
+def test_non_inventory_product_blocks_recommendation_to_po(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"is_non_inventory": True},
+    )
+    recommendation = create_manual_recommendation_row(db_session, product, recommended_qty=3)
+
+    response = client.post(f"/recommendations/{recommendation.id}/convert-to-draft-po")
+
+    assert response.status_code == 400
+    assert "non-inventory" in response.json()["detail"]
+    assert db_session.query(PurchaseOrder).count() == 0
+
+
+def test_stale_only_recommendation_without_manager_decision_blocks_po_creation(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    recommendation = create_manual_recommendation_row(db_session, product, recommended_qty=3)
+    db_session.commit()
+
+    response = client.post(f"/recommendations/{recommendation.id}/convert-to-draft-po")
+
+    assert response.status_code == 400
+    assert "manager-approved one-time" in response.json()["detail"]
+    assert db_session.query(PurchaseOrder).count() == 0
+
+
+def test_manager_approved_stale_accepted_recommendation_can_create_draft_po(client, db_session):
+    product, supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    add_forecast_profile(db_session, product, pack_size=1, cost_price=5.0, lead_time_days=4)
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "manager_approved_one_time", "reviewed_by": "Maged"},
+    )
+    create_response = client.post(
+        f"/recommendations/manager-approved-stale-queue/{product.id}/create-review-recommendation",
+        json={"created_by": "Maged"},
+    )
+    assert create_response.status_code == 200
+    recommendation = create_response.json()
+    accept_recommendation(client, recommendation["id"], reviewed_by="Maged")
+
+    readiness_response = client.get(f"/recommendations/{recommendation['id']}/po-readiness")
+    response = client.post(f"/recommendations/{recommendation['id']}/convert-to-draft-po")
+
+    assert readiness_response.status_code == 200
+    assert readiness_response.json()["can_create_draft_po"] is True
+    assert readiness_response.json()["required_manager_decision"] == "manager_approved_one_time"
+    assert response.status_code == 200
+    assert response.json()["purchase_order"]["supplier_id"] == supplier.id
+    assert response.json()["purchase_order"]["status"] == "draft"
+
+
+def test_missing_optional_pack_size_does_not_block_po_creation(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+    recommendation = create_recommendation(client, product.id)
+    accept_recommendation(client, recommendation["id"])
+
+    readiness_response = client.get(f"/recommendations/{recommendation['id']}/po-readiness")
+    response = client.post(f"/recommendations/{recommendation['id']}/convert-to-draft-po")
+
+    assert readiness_response.status_code == 200
+    assert readiness_response.json()["can_create_draft_po"] is True
+    assert any("pack size" in warning.lower() for warning in readiness_response.json()["warnings"])
+    assert response.status_code == 200
+
+
+def test_missing_cost_blocks_po_creation_only_when_cost_required(monkeypatch, client, db_session):
+    monkeypatch.setattr(settings, "recommendation_require_cost", True)
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"cost_price": None},
+    )
+    recommendation = create_manual_recommendation_row(
+        db_session,
+        product,
+        recommended_qty=3,
+        estimated_unit_cost=None,
+    )
+
+    response = client.post(f"/recommendations/{recommendation.id}/convert-to-draft-po")
+
+    assert response.status_code == 400
+    assert "required cost" in response.json()["detail"]
     assert db_session.query(PurchaseOrder).count() == 0
 
 
