@@ -12,12 +12,19 @@ from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
 from app.models.recommendation import Recommendation
+from app.models.stale_demand_review_decision import StaleDemandReviewDecision
 from app.models.usage_history import UsageHistory
 from app.services.forecast_input_reconciliation import profile_or_effective_inputs
 from app.services.forecasting import build_forecast
 
 
 ACTIONABLE_RECOMMENDATION_STATUSES = {"draft", "pending_review", "accepted"}
+ALLOWED_STALE_DEMAND_DECISIONS = {
+    "watchlist",
+    "manager_approved_one_time",
+    "rejected_stale",
+    "wait_for_recent_demand",
+}
 EPSILON = 0.000001
 
 
@@ -33,6 +40,7 @@ def load_product_for_recommendation_explanation(db: Session, product_id: int) ->
             selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
             selectinload(Product.inventory_positions),
             selectinload(Product.forecast_input_profile),
+            selectinload(Product.stale_demand_review_decision),
         )
         .filter(Product.id == product_id)
         .first()
@@ -58,6 +66,7 @@ def explain_product_recommendation(
     lead_time_days = effective_inputs.get("lead_time_days")
     minimum_order_quantity = effective_inputs.get("min_order_qty")
     supplier = product.supplier_record
+    decision = product.stale_demand_review_decision
 
     blockers = blockers_for_product(product, effective_inputs, forecast, demand)
     warnings = warnings_for_product(effective_inputs, forecast, demand, today_value)
@@ -96,6 +105,11 @@ def explain_product_recommendation(
         "stale_demand_only": bool(forecast.get("stale_demand_only")),
         "stale_demand_policy": stale_demand_policy_status(forecast),
         "stale_demand_recommendations_allowed": stale_demand_recommendations_allowed(),
+        "review_decision": decision.decision if decision else None,
+        "reviewed_by": decision.reviewed_by if decision else None,
+        "review_notes": decision.notes if decision else None,
+        "reviewed_at": decision.reviewed_at.isoformat() if decision else None,
+        "decision_status": stale_demand_decision_status(decision),
         "legacy_demand_raw_units_in_window": forecast.get("legacy_demand_raw_units_in_window"),
         "legacy_demand_negative_or_return_rows": forecast.get("legacy_demand_negative_or_return_rows"),
         "demand_rows": demand["demand_rows"],
@@ -688,8 +702,10 @@ def stale_demand_review_candidates(
     db: Session,
     *,
     limit: int = 500,
+    decision_filter: str = "unreviewed",
     today: date | None = None,
 ) -> dict[str, Any]:
+    normalized_filter = normalize_stale_demand_decision_filter(decision_filter)
     today_value = today or datetime.now(timezone.utc).date()
     products = (
         db.query(Product)
@@ -698,6 +714,7 @@ def stale_demand_review_candidates(
             selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
             selectinload(Product.inventory_positions),
             selectinload(Product.forecast_input_profile),
+            selectinload(Product.stale_demand_review_decision),
         )
         .order_by(Product.id.asc())
         .limit(limit)
@@ -715,6 +732,10 @@ def stale_demand_review_candidates(
         include, reason = is_stale_demand_review_candidate(explanation)
         if not include:
             skipped_counter[reason] += 1
+            continue
+        decision = explanation.get("review_decision")
+        if not stale_demand_decision_matches_filter(decision, normalized_filter):
+            skipped_counter["decision_filter_excluded"] += 1
             continue
 
         action = stale_demand_review_suggested_action(explanation)
@@ -749,6 +770,11 @@ def stale_demand_review_candidates(
                 "purchase_readiness_issues": explanation.get("purchase_readiness_issues") or [],
                 "suggested_action": action,
                 "stale_demand_policy": explanation.get("stale_demand_policy"),
+                "review_decision": explanation.get("review_decision"),
+                "reviewed_by": explanation.get("reviewed_by"),
+                "review_notes": explanation.get("review_notes"),
+                "reviewed_at": explanation.get("reviewed_at"),
+                "decision_status": explanation.get("decision_status"),
                 "recommendation_status": explanation.get("status"),
                 "purchase_readiness_status": explanation.get("purchase_readiness_status"),
             }
@@ -768,9 +794,30 @@ def stale_demand_review_candidates(
             "suggested_action_counts": dict(action_counter),
             "skipped_counts": dict(skipped_counter),
             "limit": limit,
+            "decision_filter": normalized_filter,
         },
         "items": items,
     }
+
+
+def normalize_stale_demand_decision_filter(value: str | None) -> str:
+    normalized = (value or "unreviewed").strip().lower()
+    allowed = ALLOWED_STALE_DEMAND_DECISIONS | {"unreviewed", "all"}
+    if normalized not in allowed:
+        raise ValueError("Invalid stale-demand decision filter.")
+    return normalized
+
+
+def stale_demand_decision_matches_filter(decision: str | None, decision_filter: str) -> bool:
+    if decision_filter == "all":
+        return True
+    if decision_filter == "unreviewed":
+        return decision is None
+    return decision == decision_filter
+
+
+def stale_demand_decision_status(decision: StaleDemandReviewDecision | None) -> str:
+    return decision.decision if decision else "unreviewed"
 
 
 def is_stale_demand_review_candidate(explanation: dict[str, Any]) -> tuple[bool, str]:
@@ -793,6 +840,92 @@ def is_stale_demand_review_candidate(explanation: dict[str, Any]) -> tuple[bool,
     if explanation.get("purchase_readiness_status") == "order_ready":
         return False, "already_order_ready"
     return True, "candidate"
+
+
+def list_stale_demand_review_decisions(db: Session, *, limit: int = 500) -> dict[str, Any]:
+    decisions = (
+        db.query(StaleDemandReviewDecision)
+        .options(selectinload(StaleDemandReviewDecision.product))
+        .order_by(StaleDemandReviewDecision.updated_at.desc(), StaleDemandReviewDecision.id.desc())
+        .limit(limit)
+        .all()
+    )
+    counter = Counter(decision.decision for decision in decisions)
+    return {
+        "summary": {
+            "total_decisions": len(decisions),
+            "decision_counts": dict(counter),
+            "limit": limit,
+        },
+        "items": [serialize_stale_demand_review_decision(decision) for decision in decisions],
+    }
+
+
+def save_stale_demand_review_decision(
+    db: Session,
+    product_id: int,
+    *,
+    decision: str,
+    reviewed_by: str,
+    notes: str | None = None,
+) -> StaleDemandReviewDecision:
+    normalized_decision = normalize_stale_demand_decision(decision)
+    reviewer = (reviewed_by or "").strip()
+    if not reviewer:
+        raise ValueError("reviewed_by is required.")
+
+    product = load_product_for_recommendation_explanation(db, product_id)
+    if product is None:
+        raise LookupError("Product not found.")
+
+    explanation = explain_product_recommendation(db, product_id)
+    if explanation is None:
+        raise LookupError("Product not found.")
+    eligible, _reason = is_stale_demand_review_candidate(explanation)
+    if normalized_decision not in {"watchlist", "rejected_stale"} and not eligible:
+        raise ValueError("Product is not currently eligible for this stale-demand decision.")
+
+    now = datetime.utcnow()
+    review = (
+        db.query(StaleDemandReviewDecision)
+        .filter(StaleDemandReviewDecision.product_id == product_id)
+        .one_or_none()
+    )
+    if review is None:
+        review = StaleDemandReviewDecision(product_id=product_id, created_at=now)
+        db.add(review)
+    review.decision = normalized_decision
+    review.reviewed_by = reviewer
+    review.notes = notes
+    review.reviewed_at = now
+    review.updated_at = now
+    db.commit()
+    db.refresh(review)
+    return review
+
+
+def normalize_stale_demand_decision(decision: str) -> str:
+    normalized = (decision or "").strip().lower()
+    if normalized not in ALLOWED_STALE_DEMAND_DECISIONS:
+        raise ValueError("Invalid stale-demand review decision.")
+    return normalized
+
+
+def serialize_stale_demand_review_decision(decision: StaleDemandReviewDecision) -> dict[str, Any]:
+    product = decision.product
+    return {
+        "id": decision.id,
+        "product_id": decision.product_id,
+        "product_name": product.name if product else None,
+        "orderpro_sku": product.orderpro_sku if product else None,
+        "recommendation_id": decision.recommendation_id,
+        "decision": decision.decision,
+        "reviewed_by": decision.reviewed_by,
+        "notes": decision.notes,
+        "reviewed_at": decision.reviewed_at.isoformat() if decision.reviewed_at else None,
+        "created_at": decision.created_at.isoformat() if decision.created_at else None,
+        "updated_at": decision.updated_at.isoformat() if decision.updated_at else None,
+    }
 
 
 def stale_demand_review_suggested_action(explanation: dict[str, Any]) -> str:
@@ -1078,12 +1211,20 @@ def validate_product_can_create_reorder_recommendation(explanation: dict[str, An
         raise ValueError("Product is missing usable supplier lead time.")
     if "No demand history" in explanation["blockers"]:
         raise ValueError("Product is missing demand history or open demand.")
-    if explanation.get("stale_demand_only") and not stale_demand_recommendations_allowed():
+    manager_approved_stale = (
+        explanation.get("stale_demand_only")
+        and explanation.get("review_decision") == "manager_approved_one_time"
+    )
+    if explanation.get("stale_demand_only") and not stale_demand_recommendations_allowed() and not manager_approved_stale:
         raise ValueError("Product has stale-only legacy demand and requires manual review.")
     if explanation.get("cost_required") and explanation.get("cost_status") == "missing":
         raise ValueError("Product is missing required cost.")
     if explanation.get("pack_size_required") and explanation.get("pack_size") is None:
         raise ValueError("Product is missing required pack size.")
+    if manager_approved_stale:
+        if explanation.get("recommended_action") == "reorder" and float(explanation.get("recommended_quantity") or 0) > 0:
+            return
+        raise ValueError("Product is not currently recommended for reorder.")
     if explanation["status"] != "actionable":
         raise ValueError("Product is not currently recommended for reorder.")
 

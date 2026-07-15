@@ -59,6 +59,7 @@ import {
   rejectProductSupplier,
   rejectSupplierAssignmentReview,
   reviewManualSupplierCleanupCandidate,
+  saveStaleDemandReviewDecision,
   searchManualSupplierCleanupSuppliers,
   setPreferredProductSupplier,
   setUnauthorizedHandler,
@@ -129,6 +130,7 @@ vi.mock("./api", () => ({
   getSeasonalProducts: vi.fn(),
   getProductSeasonality: vi.fn(),
   getStaleDemandReview: vi.fn(),
+  saveStaleDemandReviewDecision: vi.fn(),
   getSupplierForecast: vi.fn(),
   createDraftPOFromSupplierForecast: vi.fn(),
   isAuthEnabled: vi.fn(),
@@ -880,6 +882,11 @@ function mockStaleDemandReviewWithCandidate(): StaleDemandReviewResponse {
         purchase_readiness_issues: ["Stale-only demand requires manual review"],
         suggested_action: "manual_review",
         stale_demand_policy: "manual_review_required",
+        review_decision: null,
+        reviewed_by: null,
+        review_notes: null,
+        reviewed_at: null,
+        decision_status: "unreviewed",
         recommendation_status: "needs_review",
         purchase_readiness_status: "blocked",
       },
@@ -1135,6 +1142,19 @@ beforeEach(() => {
   vi.mocked(getSeasonalProducts).mockResolvedValue([]);
   vi.mocked(getProductSeasonality).mockResolvedValue(mockProductSeasonalityDetail());
   vi.mocked(getStaleDemandReview).mockResolvedValue(mockStaleDemandReview());
+  vi.mocked(saveStaleDemandReviewDecision).mockResolvedValue({
+    id: 1,
+    product_id: 3020,
+    product_name: "Stale Product",
+    orderpro_sku: "STALE-3020",
+    recommendation_id: null,
+    decision: "manager_approved_one_time",
+    reviewed_by: "Maged",
+    notes: "Approved for one-time reorder.",
+    reviewed_at: "2026-07-14T10:00:00",
+    created_at: "2026-07-14T10:00:00",
+    updated_at: "2026-07-14T10:00:00",
+  });
   vi.mocked(getSupplierForecast).mockResolvedValue(mockSupplierForecast());
   vi.mocked(generateRecommendationLLMExplanation).mockResolvedValue(mockLLMExplanation());
   vi.mocked(createProductSupplier).mockResolvedValue(mockSupplierMapping());
@@ -3144,6 +3164,33 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("Stale Product")).toBeInTheDocument();
     expect(screen.getByText("3020")).toBeInTheDocument();
     expect(screen.getByText("manual_review")).toBeInTheDocument();
+    expect(screen.getByText("unreviewed")).toBeInTheDocument();
+    expect(screen.getByLabelText("Decision for Product ID 3020")).toBeInTheDocument();
+  });
+
+  it("saving stale-demand decision calls the manager decision endpoint", async () => {
+    vi.mocked(getStaleDemandReview).mockResolvedValue(mockStaleDemandReviewWithCandidate());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Recommendations" }));
+
+    await screen.findByRole("heading", { name: "Stale Demand Review" });
+    await userEvent.selectOptions(
+      screen.getByLabelText("Decision for Product ID 3020"),
+      "manager_approved_one_time",
+    );
+    await userEvent.clear(screen.getByLabelText("Reviewer for Product ID 3020"));
+    await userEvent.type(screen.getByLabelText("Reviewer for Product ID 3020"), "Maged");
+    await userEvent.type(screen.getByLabelText("Decision notes for Product ID 3020"), "Approved for demo.");
+    await userEvent.click(screen.getByRole("button", { name: "Save decision" }));
+
+    await waitFor(() =>
+      expect(saveStaleDemandReviewDecision).toHaveBeenCalledWith(3020, {
+        decision: "manager_approved_one_time",
+        reviewed_by: "Maged",
+        notes: "Approved for demo.",
+      }),
+    );
   });
 
   it("generate recommendation calls the reorder endpoint", async () => {

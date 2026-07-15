@@ -56,6 +56,7 @@ import {
   rejectProductSupplier,
   rejectSupplierAssignmentReview,
   reviewManualSupplierCleanupCandidate,
+  saveStaleDemandReviewDecision,
   searchManualSupplierCleanupSuppliers,
   setUnauthorizedHandler,
   setPreferredProductSupplier,
@@ -121,6 +122,12 @@ type SupplierForecastFilter =
   | "open_demand"
   | "no_history"
   | "missing_lead_time";
+
+type StaleDemandDecisionDraft = {
+  decision: string;
+  reviewed_by: string;
+  notes: string;
+};
 
 interface ResourceState<T> {
   data: T[];
@@ -2035,6 +2042,10 @@ function RecommendationsPanel() {
     useState<StaleDemandReviewResponse | null>(null);
   const [staleDemandLoading, setStaleDemandLoading] = useState(true);
   const [staleDemandError, setStaleDemandError] = useState<string | null>(null);
+  const [staleDemandSuccess, setStaleDemandSuccess] = useState<string | null>(null);
+  const [staleDemandDecisionDrafts, setStaleDemandDecisionDrafts] =
+    useState<Record<number, StaleDemandDecisionDraft>>({});
+  const [savingStaleDecisionProductId, setSavingStaleDecisionProductId] = useState<number | null>(null);
   const [selectedRecommendation, setSelectedRecommendation] =
     useState<PurchaseRecommendation | null>(null);
   const [productId, setProductId] = useState("");
@@ -2059,7 +2070,7 @@ function RecommendationsPanel() {
   }, []);
 
   const loadStaleDemandReview = useCallback((active = true) => {
-    getStaleDemandReview()
+    getStaleDemandReview("all")
       .then((loadedReview) => {
         if (active) {
           setStaleDemandReview(loadedReview);
@@ -2192,6 +2203,42 @@ function RecommendationsPanel() {
     }
   }
 
+  function updateStaleDemandDraft(productId: number, changes: Partial<StaleDemandDecisionDraft>) {
+    setStaleDemandDecisionDrafts((current) => ({
+      ...current,
+      [productId]: {
+        decision: current[productId]?.decision ?? "watchlist",
+        reviewed_by: current[productId]?.reviewed_by ?? "Maged",
+        notes: current[productId]?.notes ?? "",
+        ...changes,
+      },
+    }));
+  }
+
+  async function handleSaveStaleDemandDecision(item: StaleDemandReviewItem) {
+    const draft = staleDemandDecisionDrafts[item.product_id] ?? {
+      decision: item.review_decision ?? "watchlist",
+      reviewed_by: item.reviewed_by ?? "Maged",
+      notes: item.review_notes ?? "",
+    };
+    setSavingStaleDecisionProductId(item.product_id);
+    setStaleDemandError(null);
+    setStaleDemandSuccess(null);
+    try {
+      await saveStaleDemandReviewDecision(item.product_id, {
+        decision: draft.decision,
+        reviewed_by: draft.reviewed_by,
+        notes: draft.notes || null,
+      });
+      setStaleDemandSuccess(`Saved stale-demand decision for Product ID ${item.product_id}.`);
+      loadStaleDemandReview();
+    } catch (loadError) {
+      setStaleDemandError((loadError as Error).message);
+    } finally {
+      setSavingStaleDecisionProductId(null);
+    }
+  }
+
   return (
     <div className="review-stack">
       <section className="panel-heading" aria-label="Recommendations overview">
@@ -2219,9 +2266,14 @@ function RecommendationsPanel() {
       </section>
 
       <StaleDemandReviewPanel
+        drafts={staleDemandDecisionDrafts}
         error={staleDemandError}
         loading={staleDemandLoading}
+        onDraftChange={updateStaleDemandDraft}
+        onSaveDecision={handleSaveStaleDemandDecision}
         review={staleDemandReview}
+        savingProductId={savingStaleDecisionProductId}
+        success={staleDemandSuccess}
       />
 
       <RecommendationsTable
@@ -2329,13 +2381,23 @@ function RecommendationsTable({
 }
 
 function StaleDemandReviewPanel({
+  drafts,
   error,
   loading,
+  onDraftChange,
+  onSaveDecision,
   review,
+  savingProductId,
+  success,
 }: {
+  drafts: Record<number, StaleDemandDecisionDraft>;
   error: string | null;
   loading: boolean;
+  onDraftChange: (productId: number, changes: Partial<StaleDemandDecisionDraft>) => void;
+  onSaveDecision: (item: StaleDemandReviewItem) => void;
   review: StaleDemandReviewResponse | null;
+  savingProductId: number | null;
+  success: string | null;
 }) {
   if (loading) {
     return <div className="state">Loading stale-demand review...</div>;
@@ -2353,6 +2415,7 @@ function StaleDemandReviewPanel({
         </div>
         <span className="badge">{review?.summary.total_candidates ?? 0} candidates</span>
       </div>
+      {success && <div className="state success">{success}</div>}
       <table>
         <thead>
           <tr>
@@ -2365,22 +2428,70 @@ function StaleDemandReviewPanel({
             <th>Advisory qty</th>
             <th>Est. cost</th>
             <th>Suggested action</th>
+            <th>Latest decision</th>
+            <th>Decision</th>
+            <th>Reviewer</th>
+            <th>Notes</th>
+            <th>Save</th>
           </tr>
         </thead>
         <tbody>
-          {items.map((item: StaleDemandReviewItem) => (
-            <tr key={item.product_id}>
-              <td>{item.product_id}</td>
-              <td>{formatValue(item.product_name)}</td>
-              <td>{formatValue(item.supplier_name)}</td>
-              <td>{formatValue(item.last_demand_date)}</td>
-              <td>{formatValue(item.days_since_last_demand)}</td>
-              <td>{formatValue(item.current_stock)}</td>
-              <td>{formatValue(item.advisory_recommended_quantity)}</td>
-              <td>{formatValue(item.estimated_total_cost)}</td>
-              <td>{formatValue(item.suggested_action)}</td>
-            </tr>
-          ))}
+          {items.map((item: StaleDemandReviewItem) => {
+            const draft = drafts[item.product_id] ?? {
+              decision: item.review_decision ?? "watchlist",
+              reviewed_by: item.reviewed_by ?? "Maged",
+              notes: item.review_notes ?? "",
+            };
+            const isSaving = savingProductId === item.product_id;
+            return (
+              <tr key={item.product_id}>
+                <td>{item.product_id}</td>
+                <td>{formatValue(item.product_name)}</td>
+                <td>{formatValue(item.supplier_name)}</td>
+                <td>{formatValue(item.last_demand_date)}</td>
+                <td>{formatValue(item.days_since_last_demand)}</td>
+                <td>{formatValue(item.current_stock)}</td>
+                <td>{formatValue(item.advisory_recommended_quantity)}</td>
+                <td>{formatValue(item.estimated_total_cost)}</td>
+                <td>{formatValue(item.suggested_action)}</td>
+                <td>{formatValue(item.review_decision ?? "unreviewed")}</td>
+                <td>
+                  <select
+                    aria-label={`Decision for Product ID ${item.product_id}`}
+                    disabled={isSaving}
+                    onChange={(event) => onDraftChange(item.product_id, { decision: event.target.value })}
+                    value={draft.decision}
+                  >
+                    <option value="watchlist">Watchlist</option>
+                    <option value="manager_approved_one_time">Manager approved one-time</option>
+                    <option value="rejected_stale">Reject stale</option>
+                    <option value="wait_for_recent_demand">Wait for recent demand</option>
+                  </select>
+                </td>
+                <td>
+                  <input
+                    aria-label={`Reviewer for Product ID ${item.product_id}`}
+                    disabled={isSaving}
+                    onChange={(event) => onDraftChange(item.product_id, { reviewed_by: event.target.value })}
+                    value={draft.reviewed_by}
+                  />
+                </td>
+                <td>
+                  <input
+                    aria-label={`Decision notes for Product ID ${item.product_id}`}
+                    disabled={isSaving}
+                    onChange={(event) => onDraftChange(item.product_id, { notes: event.target.value })}
+                    value={draft.notes}
+                  />
+                </td>
+                <td>
+                  <button disabled={isSaving} onClick={() => onSaveDecision(item)} type="button">
+                    {isSaving ? "Saving..." : "Save decision"}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       {items.length === 0 && <div className="state">No stale-demand recommendation candidates found.</div>}

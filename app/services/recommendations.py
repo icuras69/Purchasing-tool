@@ -81,6 +81,11 @@ def create_reorder_recommendation_for_product(
             "cost_status": explanation.get("cost_status"),
             "stale_demand_policy": explanation.get("stale_demand_policy"),
             "stale_demand_recommendations_allowed": explanation.get("stale_demand_recommendations_allowed"),
+            "review_decision": explanation.get("review_decision"),
+            "reviewed_by": explanation.get("reviewed_by"),
+            "review_notes": explanation.get("review_notes"),
+            "reviewed_at": explanation.get("reviewed_at"),
+            "decision_status": explanation.get("decision_status"),
         }
     )
     supplier_context = forecast.get("supplier_context") or {}

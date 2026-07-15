@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
@@ -27,6 +28,9 @@ from app.services.recommendation_audit import (
     cleanup_candidates,
     demand_policy_impact,
     explain_product_recommendation,
+    list_stale_demand_review_decisions,
+    save_stale_demand_review_decision,
+    serialize_stale_demand_review_decision,
     stale_demand_review_candidates,
 )
 from app.services.pack_size_audit import pack_size_audit
@@ -34,6 +38,12 @@ from app.services.perf_logging import perf_timer
 
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
+
+
+class StaleDemandDecisionRequest(BaseModel):
+    decision: str
+    reviewed_by: str = Field(..., min_length=1)
+    notes: str | None = None
 
 
 def serialize_recommendation(recommendation: Recommendation) -> dict:
@@ -146,9 +156,45 @@ def get_cleanup_candidates(
 @router.get("/stale-demand-review")
 def get_stale_demand_review(
     limit: int = Query(default=500, ge=1, le=2000),
+    decision: str = Query(
+        default="unreviewed",
+        pattern="^(unreviewed|manager_approved_one_time|watchlist|rejected_stale|wait_for_recent_demand|all)$",
+    ),
     db: Session = Depends(get_db),
 ):
-    return stale_demand_review_candidates(db, limit=limit)
+    try:
+        return stale_demand_review_candidates(db, limit=limit, decision_filter=decision)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/stale-demand-decisions")
+def get_stale_demand_decisions(
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    return list_stale_demand_review_decisions(db, limit=limit)
+
+
+@router.post("/stale-demand-review/{product_id}/decision")
+def create_stale_demand_review_decision(
+    product_id: int,
+    payload: StaleDemandDecisionRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        decision = save_stale_demand_review_decision(
+            db,
+            product_id,
+            decision=payload.decision,
+            reviewed_by=payload.reviewed_by,
+            notes=payload.notes,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return serialize_stale_demand_review_decision(decision)
 
 
 @router.get("/pack-size-audit")

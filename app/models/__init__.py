@@ -17,6 +17,7 @@ from app.models.product_historical_link import ProductHistoricalLink
 from app.models.product_seasonality_backtest import ProductSeasonalityBacktest
 from app.models.product_forecast_input_profile import ProductForecastInputProfile
 from app.models.product_supplier_assignment_review import ProductSupplierAssignmentReview
+from app.models.stale_demand_review_decision import StaleDemandReviewDecision
 
 __all__ = [
     "Product",
@@ -41,4 +42,5 @@ __all__ = [
     "ProductSeasonalityBacktest",
     "ProductForecastInputProfile",
     "ProductSupplierAssignmentReview",
+    "StaleDemandReviewDecision",
 ]

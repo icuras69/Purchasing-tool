@@ -77,6 +77,12 @@ class Product(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    stale_demand_review_decision = relationship(
+        "StaleDemandReviewDecision",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
     historical_links = relationship(
         "ProductHistoricalLink",
         foreign_keys="ProductHistoricalLink.orderpro_product_id",

@@ -845,6 +845,11 @@ export interface StaleDemandReviewItem {
   purchase_readiness_issues: string[];
   suggested_action: string;
   stale_demand_policy: string | null;
+  review_decision: string | null;
+  reviewed_by: string | null;
+  review_notes: string | null;
+  reviewed_at: string | null;
+  decision_status: string;
   recommendation_status: string | null;
   purchase_readiness_status: string | null;
 }
@@ -856,6 +861,27 @@ export interface StaleDemandReviewResponse {
     suggested_action_counts: Record<string, number>;
     skipped_counts: Record<string, number>;
     limit: number;
+    decision_filter?: string;
   };
   items: StaleDemandReviewItem[];
+}
+
+export interface StaleDemandDecisionRequest {
+  decision: string;
+  reviewed_by: string;
+  notes?: string | null;
+}
+
+export interface StaleDemandReviewDecision {
+  id: number;
+  product_id: number;
+  product_name: string | null;
+  orderpro_sku: string | null;
+  recommendation_id: number | null;
+  decision: string;
+  reviewed_by: string;
+  notes: string | null;
+  reviewed_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
 }

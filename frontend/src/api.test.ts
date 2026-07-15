@@ -13,9 +13,11 @@ import {
   getForecastReconciliationProducts,
   getManualSupplierCleanupCandidates,
   getStoredAccessToken,
+  getStaleDemandReview,
   isAuthEnabled,
   loginAdmin,
   reviewManualSupplierCleanupCandidate,
+  saveStaleDemandReviewDecision,
   searchManualSupplierCleanupSuppliers,
   setUnauthorizedHandler,
   storeAccessToken,
@@ -91,6 +93,57 @@ describe("apiUrl", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/products/?search=3020"),
       expect.any(Object),
+    );
+  });
+
+  it("fetches stale-demand review candidates with a decision filter", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          summary: { total_candidates: 0, products_evaluated: 0, suggested_action_counts: {}, skipped_counts: {}, limit: 500 },
+          items: [],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getStaleDemandReview("manager_approved_one_time");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/stale-demand-review?decision=manager_approved_one_time"),
+      expect.any(Object),
+    );
+  });
+
+  it("saves stale-demand review decisions", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: 1, product_id: 3020, decision: "watchlist", reviewed_by: "Maged" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await saveStaleDemandReviewDecision(3020, {
+      decision: "watchlist",
+      reviewed_by: "Maged",
+      notes: "Wait for more context.",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/recommendations/stale-demand-review/3020/decision"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          decision: "watchlist",
+          reviewed_by: "Maged",
+          notes: "Wait for more context.",
+        }),
+      }),
     );
   });
 

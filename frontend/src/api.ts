@@ -28,6 +28,8 @@ import type {
   PurchaseOrder,
   PurchaseRecommendation,
   RecommendationLLMExplanation,
+  StaleDemandDecisionRequest,
+  StaleDemandReviewDecision,
   StaleDemandReviewResponse,
   ProductSeasonalityDetail,
   RecommendationAcceptRequest,
@@ -680,8 +682,25 @@ export function listRecommendations(): Promise<PurchaseRecommendation[]> {
   return fetchJson<PurchaseRecommendation[]>("/recommendations", "recommendations");
 }
 
-export function getStaleDemandReview(): Promise<StaleDemandReviewResponse> {
-  return fetchJson<StaleDemandReviewResponse>("/recommendations/stale-demand-review", "stale demand review");
+export function getStaleDemandReview(decision = "all"): Promise<StaleDemandReviewResponse> {
+  return fetchJson<StaleDemandReviewResponse>(
+    `/recommendations/stale-demand-review${queryString({ decision })}`,
+    "stale demand review",
+  );
+}
+
+export function saveStaleDemandReviewDecision(
+  productId: number,
+  payload: StaleDemandDecisionRequest,
+): Promise<StaleDemandReviewDecision> {
+  return sendJson<StaleDemandReviewDecision>(
+    `/recommendations/stale-demand-review/${productId}/decision`,
+    "stale demand decision",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function getRecommendation(recommendationId: number): Promise<PurchaseRecommendation> {

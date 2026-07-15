@@ -8,6 +8,7 @@ from app.models.product_forecast_input_profile import ProductForecastInputProfil
 from app.models.product_supplier import ProductSupplier
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.recommendation import Recommendation
+from app.models.stale_demand_review_decision import StaleDemandReviewDecision
 from app.models.supplier import Supplier
 from app.models.usage_history import UsageHistory
 from app.services.forecasting import calculate_usage_history_demand, legacy_usage_quantity
@@ -705,6 +706,136 @@ def test_stale_demand_review_excludes_zero_advisory_quantity(client, db_session)
     payload = response.json()
     assert payload["summary"]["total_candidates"] == 0
     assert all(item["product_id"] != product.id for item in payload["items"])
+
+
+def test_stale_demand_decision_manager_approved_allows_manual_recommendation_without_po(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    before_po_count = db_session.query(PurchaseOrder).count()
+    before_forecast = client.get(f"/recommendations/explain?product_id={product.id}").json()
+
+    blocked_response = client.post(f"/recommendations/reorder/{product.id}")
+    decision_response = client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={
+            "decision": "manager_approved_one_time",
+            "reviewed_by": "Maged",
+            "notes": "Approved one-time stale-demand reorder.",
+        },
+    )
+    after_forecast = client.get(f"/recommendations/explain?product_id={product.id}").json()
+    create_response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert blocked_response.status_code == 400
+    assert decision_response.status_code == 200
+    assert decision_response.json()["decision"] == "manager_approved_one_time"
+    assert decision_response.json()["reviewed_by"] == "Maged"
+    assert after_forecast["review_decision"] == "manager_approved_one_time"
+    assert after_forecast["reviewed_by"] == "Maged"
+    assert after_forecast["recommended_quantity"] == before_forecast["recommended_quantity"]
+    assert after_forecast["reorder_point"] == before_forecast["reorder_point"]
+    assert create_response.status_code == 201
+    assert create_response.json()["forecast_snapshot"]["review_decision"] == "manager_approved_one_time"
+    assert db_session.query(PurchaseOrder).count() == before_po_count
+
+
+def test_stale_demand_decision_watchlist_is_saved(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+
+    response = client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "watchlist", "reviewed_by": "Maged", "notes": "Do not reorder yet."},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["product_id"] == product.id
+    assert payload["decision"] == "watchlist"
+    assert payload["notes"] == "Do not reorder yet."
+    stored = db_session.query(StaleDemandReviewDecision).filter_by(product_id=product.id).one()
+    assert stored.decision == "watchlist"
+
+
+def test_stale_demand_decision_rejects_invalid_decision_and_requires_reviewer(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+
+    invalid_response = client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "approve_forever", "reviewed_by": "Maged"},
+    )
+    missing_reviewer_response = client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "watchlist", "reviewed_by": ""},
+    )
+
+    assert invalid_response.status_code == 400
+    assert invalid_response.json()["detail"] == "Invalid stale-demand review decision."
+    assert missing_reviewer_response.status_code == 422
+
+
+def test_stale_demand_decision_endpoint_does_not_change_forecast_formula(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    before = client.get(f"/recommendations/explain?product_id={product.id}").json()
+
+    response = client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "wait_for_recent_demand", "reviewed_by": "Maged"},
+    )
+    after = client.get(f"/recommendations/explain?product_id={product.id}").json()
+
+    assert response.status_code == 200
+    assert after["recommended_quantity"] == before["recommended_quantity"]
+    assert after["recommended_action"] == before["recommended_action"]
+    assert after["reorder_point"] == before["reorder_point"]
+
+
+def test_stale_demand_review_endpoint_includes_decision_fields_and_filters_rejected(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"current_stock": 0, "safety_stock": 0, "min_order_qty": 1},
+    )
+    product.usage_history[0].date = STALE_DEMAND_DATE
+    db_session.commit()
+    client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "rejected_stale", "reviewed_by": "Maged", "notes": "Discontinued."},
+    )
+
+    default_response = client.get("/recommendations/stale-demand-review")
+    all_response = client.get("/recommendations/stale-demand-review?decision=all")
+    rejected_response = client.get("/recommendations/stale-demand-review?decision=rejected_stale")
+
+    assert default_response.status_code == 200
+    assert all(item["product_id"] != product.id for item in default_response.json()["items"])
+    assert all_response.status_code == 200
+    all_item = next(item for item in all_response.json()["items"] if item["product_id"] == product.id)
+    assert all_item["review_decision"] == "rejected_stale"
+    assert all_item["reviewed_by"] == "Maged"
+    assert all_item["review_notes"] == "Discontinued."
+    assert all_item["decision_status"] == "rejected_stale"
+    assert rejected_response.status_code == 200
+    assert rejected_response.json()["items"][0]["product_id"] == product.id
+
+
+def test_non_stale_product_cannot_be_manager_approved_as_stale_reorder(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(db_session)
+
+    response = client.post(
+        f"/recommendations/stale-demand-review/{product.id}/decision",
+        json={"decision": "manager_approved_one_time", "reviewed_by": "Maged"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Product is not currently eligible for this stale-demand decision."
 
 
 def test_demand_policy_impact_endpoint_reports_stale_and_recent_policy_changes(client, db_session):
