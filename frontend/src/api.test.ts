@@ -18,6 +18,7 @@ import {
   getForecastReconciliationProducts,
   getManualSupplierCleanupCandidates,
   getManagerApprovedStaleQueue,
+  getPurchaseOrderExternalSendReadiness,
   getPurchaseOrderPreflight,
   getRecommendationPOReadiness,
   getRecommendationReviewSummary,
@@ -450,6 +451,50 @@ describe("apiUrl", () => {
       }),
     );
     expect(result.can_submit).toBe(true);
+  });
+
+  it("fetches purchase order external send readiness with auth headers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          purchase_order_id: 500,
+          status: "issued",
+          supplier_id: 10,
+          supplier_name: "Acme Supplies",
+          can_send_externally: false,
+          external_send_supported: false,
+          external_send_system: "OrderPro",
+          blockers: ["External OrderPro sending is not implemented yet."],
+          warnings: [],
+          required_local_status: "issued",
+          preflight_summary: {
+            overall_status: "ready",
+            can_submit: false,
+            can_approve: false,
+            can_issue_if_applicable: false,
+            blocker_count: 0,
+            warning_count: 0,
+            line_count: 1,
+            blockers: [],
+            warnings: [],
+          },
+          message: "This purchase order is local-only. External OrderPro sending is not implemented yet.",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    storeAccessToken("stored-token");
+
+    const result = await getPurchaseOrderExternalSendReadiness(500);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/purchase-orders/500/external-send-readiness"),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer stored-token" }),
+      }),
+    );
+    expect(result.external_send_supported).toBe(false);
   });
 
   it("fetches forecast reconciliation products with filters", async () => {

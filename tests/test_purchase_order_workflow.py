@@ -495,6 +495,99 @@ def test_preflight_endpoint_is_read_only(client, db_session):
     assert after.total_amount == before_state["total_amount"]
 
 
+def test_external_send_readiness_reports_orderpro_send_not_supported(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="External Send Supplier")
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/external-send-readiness")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["purchase_order_id"] == po["id"]
+    assert payload["external_send_supported"] is False
+    assert payload["can_send_externally"] is False
+    assert payload["external_send_system"] == "OrderPro"
+    assert payload["required_local_status"] == "issued"
+    assert payload["message"] == (
+        "This purchase order is local-only. External OrderPro sending is not implemented yet."
+    )
+    assert "External OrderPro sending is not implemented yet." in payload["blockers"]
+
+
+def test_external_send_readiness_is_false_even_for_issued_po(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Issued External Send Supplier")
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+    approve_po(client, po["id"])
+    issue_po(client, po["id"])
+
+    response = client.get(f"/purchase-orders/{po['id']}/external-send-readiness")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "issued"
+    assert payload["external_send_supported"] is False
+    assert payload["can_send_externally"] is False
+    assert payload["external_send_system"] == "OrderPro"
+
+
+def test_external_send_readiness_includes_preflight_information(client, db_session):
+    _product, supplier, _mapping = seed_product_supplier(db_session, supplier_name="External Preflight Supplier")
+    po = create_po(client, supplier.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/external-send-readiness")
+
+    assert response.status_code == 200
+    preflight = response.json()["preflight_summary"]
+    assert preflight["overall_status"] == "blocked"
+    assert preflight["line_count"] == 0
+    assert "Purchase order has no lines." in preflight["blockers"]
+    assert "Local PO preflight still has blockers." in response.json()["warnings"]
+
+
+def test_external_send_readiness_endpoint_is_read_only(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Readonly External Supplier")
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    before = db_session.get(PurchaseOrder, po["id"])
+    before_state = {
+        "status": before.status,
+        "updated_at": before.updated_at,
+        "issued_at": before.issued_at,
+        "total_amount": before.total_amount,
+    }
+
+    response = client.get(f"/purchase-orders/{po['id']}/external-send-readiness")
+
+    assert response.status_code == 200
+    after = db_session.get(PurchaseOrder, po["id"])
+    assert after.status == before_state["status"]
+    assert after.updated_at == before_state["updated_at"]
+    assert after.issued_at == before_state["issued_at"]
+    assert after.total_amount == before_state["total_amount"]
+
+
+def test_issue_endpoint_remains_local_only_and_does_not_call_orderpro(client, db_session, monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Issuing a local PO must not call OrderPro.")
+
+    monkeypatch.setattr("app.services.orderpro_client.OrderProClient.generic_get", fail_if_called)
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Local Issue Supplier")
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    submit_po(client, po["id"])
+    approve_po(client, po["id"])
+
+    response = client.post(f"/purchase-orders/{po['id']}/issue")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "issued"
+    assert payload["issued_at"] is not None
+
+
 def test_cannot_approve_draft_purchase_order_directly(client, db_session):
     _product, supplier, _mapping = seed_product_supplier(db_session)
     po = create_po(client, supplier.id)

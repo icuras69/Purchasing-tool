@@ -23,6 +23,7 @@ from app.services.purchase_order_drafting import (
     create_draft_purchase_order_from_products,
     snapshot_purchase_order_line_from_product,
 )
+from app.services.purchase_order_external_send import purchase_order_external_send_readiness
 from app.services.purchase_order_export import build_purchase_order_csv, load_purchase_order_for_export
 from app.services.purchase_order_preflight import (
     assert_preflight_allows,
@@ -256,6 +257,14 @@ def get_purchase_order_preflight(po_id: int, db: Session = Depends(get_db)):
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found.")
     return purchase_order_preflight(db, po)
+
+
+@router.get("/{po_id}/external-send-readiness")
+def get_purchase_order_external_send_readiness(po_id: int, db: Session = Depends(get_db)):
+    po = load_purchase_order_for_preflight(db, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found.")
+    return purchase_order_external_send_readiness(db, po)
 
 
 @router.get("/{po_id}/export.csv")

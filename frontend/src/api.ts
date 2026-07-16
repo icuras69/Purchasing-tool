@@ -27,6 +27,7 @@ import type {
   ProductSupplierInput,
   ProductSupplierMapping,
   PurchaseOrder,
+  PurchaseOrderExternalSendReadiness,
   PurchaseOrderPreflight,
   PurchaseRecommendation,
   RecommendationPOReadiness,
@@ -583,6 +584,15 @@ export function getPurchaseOrder(poId: number): Promise<PurchaseOrder> {
 
 export function getPurchaseOrderPreflight(poId: number): Promise<PurchaseOrderPreflight> {
   return fetchJson<PurchaseOrderPreflight>(`/purchase-orders/${poId}/preflight`, "purchase order preflight");
+}
+
+export function getPurchaseOrderExternalSendReadiness(
+  poId: number,
+): Promise<PurchaseOrderExternalSendReadiness> {
+  return fetchJson<PurchaseOrderExternalSendReadiness>(
+    `/purchase-orders/${poId}/external-send-readiness`,
+    "purchase order external send readiness",
+  );
 }
 
 export function exportPurchaseOrderCsv(

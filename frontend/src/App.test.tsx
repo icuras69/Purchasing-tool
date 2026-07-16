@@ -53,6 +53,7 @@ import {
   getStaleDemandReview,
   getSupplierForecast,
   getPurchaseOrder,
+  getPurchaseOrderExternalSendReadiness,
   getPurchaseOrderPreflight,
   getRecommendation,
   getRecommendationPOReadiness,
@@ -91,6 +92,7 @@ import type {
   Product,
   ProductSupplierMapping,
   PurchaseOrder,
+  PurchaseOrderExternalSendReadiness,
   PurchaseOrderPreflight,
   PurchaseRecommendation,
   RecommendationPOReadiness,
@@ -156,6 +158,7 @@ vi.mock("./api", () => ({
   unsetPreferredProductSupplier: vi.fn(),
   listPurchaseOrders: vi.fn(),
   getPurchaseOrder: vi.fn(),
+  getPurchaseOrderExternalSendReadiness: vi.fn(),
   getPurchaseOrderPreflight: vi.fn(),
   listRecommendations: vi.fn(),
   getRecommendation: vi.fn(),
@@ -824,6 +827,36 @@ function mockPurchaseOrderPreflight(
   };
 }
 
+function mockPurchaseOrderExternalSendReadiness(
+  overrides: Partial<PurchaseOrderExternalSendReadiness> = {},
+): PurchaseOrderExternalSendReadiness {
+  return {
+    purchase_order_id: 500,
+    status: "draft",
+    supplier_id: 10,
+    supplier_name: "Acme Supplies",
+    can_send_externally: false,
+    external_send_supported: false,
+    external_send_system: "OrderPro",
+    blockers: ["External OrderPro sending is not implemented yet."],
+    warnings: ["Future external sending should require the PO to be locally issued first."],
+    required_local_status: "issued",
+    preflight_summary: {
+      overall_status: "needs_review",
+      can_submit: true,
+      can_approve: false,
+      can_issue_if_applicable: false,
+      blocker_count: 0,
+      warning_count: 1,
+      line_count: 1,
+      blockers: [],
+      warnings: ["Missing pack size; review before ordering."],
+    },
+    message: "This purchase order is local-only. External OrderPro sending is not implemented yet.",
+    ...overrides,
+  };
+}
+
 function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): PurchaseRecommendation {
   return {
     id: 900,
@@ -1340,6 +1373,9 @@ beforeEach(() => {
   vi.mocked(unsetPreferredProductSupplier).mockResolvedValue(mockSupplierMapping({ is_preferred: false }));
   vi.mocked(listPurchaseOrders).mockResolvedValue([]);
   vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+  vi.mocked(getPurchaseOrderExternalSendReadiness).mockResolvedValue(
+    mockPurchaseOrderExternalSendReadiness(),
+  );
   vi.mocked(getPurchaseOrderPreflight).mockResolvedValue(mockPurchaseOrderPreflight());
   vi.mocked(listRecommendations).mockResolvedValue([]);
   vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
@@ -3258,12 +3294,32 @@ describe("App mapping review workflow", () => {
     await screen.findByText("Acme Supplies");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
 
-    expect(await screen.findByRole("button", { name: "Issue" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Mark as locally issued" })).toBeInTheDocument();
     expect(
-      screen.getByText("Issue only marks this PO as internally issued. It does not send it externally."),
+      screen.getByText(
+        "Marking this PO as locally issued only changes the local status. It does not send to OrderPro, email suppliers, or create an external PO.",
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add Line" })).not.toBeInTheDocument();
+  });
+
+  it("shows external send readiness as not implemented and no Send to OrderPro action", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("heading", { name: "External Send Readiness" })).toBeInTheDocument();
+    expect(
+      screen.getAllByText("This purchase order is local-only. External OrderPro sending is not implemented yet.").length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("Target system")).toBeInTheDocument();
+    expect(screen.getByText("OrderPro")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /send to orderpro/i })).not.toBeInTheDocument();
   });
 
   it("issued PO shows receive action and no line editing", async () => {
@@ -3302,7 +3358,7 @@ describe("App mapping review workflow", () => {
 
     expect(screen.queryByRole("button", { name: "Submit for Approval" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Issue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark as locally issued" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Receive" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
   });
@@ -3323,7 +3379,7 @@ describe("App mapping review workflow", () => {
 
     expect(screen.queryByRole("button", { name: "Submit for Approval" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Issue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark as locally issued" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Receive" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
   });
@@ -3420,7 +3476,7 @@ describe("App mapping review workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
     await screen.findByText("Acme Supplies");
     await userEvent.click(screen.getByRole("button", { name: "View" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Issue" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Mark as locally issued" }));
 
     expect(window.confirm).toHaveBeenCalledWith(
       "Mark this purchase order as internally issued? This will not send it externally.",

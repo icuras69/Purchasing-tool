@@ -46,6 +46,7 @@ import {
   getSupplierAssignmentReviewSummary,
   getProductSeasonality,
   getPurchaseOrder,
+  getPurchaseOrderExternalSendReadiness,
   getPurchaseOrderPreflight,
   getRecommendation,
   getRecommendationPOReadiness,
@@ -98,6 +99,7 @@ import type {
   ProductSupplierInput,
   ProductSupplierMapping,
   PurchaseOrder,
+  PurchaseOrderExternalSendReadiness,
   PurchaseOrderPreflight,
   PurchaseRecommendation,
   RecommendationPOReadiness,
@@ -5904,6 +5906,9 @@ function PurchaseOrderDetail({
   const [preflight, setPreflight] = useState<PurchaseOrderPreflight | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightError, setPreflightError] = useState<string | null>(null);
+  const [externalReadiness, setExternalReadiness] = useState<PurchaseOrderExternalSendReadiness | null>(null);
+  const [externalReadinessLoading, setExternalReadinessLoading] = useState(false);
+  const [externalReadinessError, setExternalReadinessError] = useState<string | null>(null);
   const canEdit = purchaseOrder.status === "draft";
   const canCancel = purchaseOrder.status === "draft" || purchaseOrder.status === "pending_approval";
   const canApprove = purchaseOrder.status === "pending_approval";
@@ -5929,6 +5934,29 @@ function PurchaseOrderDetail({
           setPreflight(null);
           setPreflightLoading(false);
           setPreflightError(loadError.message);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [purchaseOrder.id, purchaseOrder.status, purchaseOrder.updated_at, purchaseOrder.lines.length]);
+
+  useEffect(() => {
+    let active = true;
+    setExternalReadinessLoading(true);
+    setExternalReadinessError(null);
+    getPurchaseOrderExternalSendReadiness(purchaseOrder.id)
+      .then((loadedReadiness) => {
+        if (active) {
+          setExternalReadiness(loadedReadiness);
+          setExternalReadinessLoading(false);
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setExternalReadiness(null);
+          setExternalReadinessLoading(false);
+          setExternalReadinessError(loadError.message);
         }
       });
     return () => {
@@ -5977,7 +6005,7 @@ function PurchaseOrderDetail({
           )}
           {canIssue && (
             <button disabled={headerActionLoading} onClick={onIssue} type="button">
-              Issue
+              Mark as locally issued
             </button>
           )}
           {canReceive && (
@@ -6008,13 +6036,18 @@ function PurchaseOrderDetail({
       )}
       {canIssue && (
         <div className="state warning">
-          Issue only marks this PO as internally issued. It does not send it externally.
+          Marking this PO as locally issued only changes the local status. It does not send to OrderPro, email suppliers, or create an external PO.
         </div>
       )}
       <PurchaseOrderPreflightPanel
         error={preflightError}
         loading={preflightLoading}
         preflight={preflight}
+      />
+      <PurchaseOrderExternalSendReadinessPanel
+        error={externalReadinessError}
+        loading={externalReadinessLoading}
+        readiness={externalReadiness}
       />
       <dl className="detail-list">
         <div>
@@ -6190,6 +6223,91 @@ function PurchaseOrderPreflightPanel({
             ))}
           </tbody>
         </table>
+      )}
+    </section>
+  );
+}
+
+function PurchaseOrderExternalSendReadinessPanel({
+  error,
+  loading,
+  readiness,
+}: {
+  error: string | null;
+  loading: boolean;
+  readiness: PurchaseOrderExternalSendReadiness | null;
+}) {
+  if (loading) {
+    return (
+      <section className="table-wrap" aria-label="External Send Readiness">
+        <h3>External Send Readiness</h3>
+        <div className="state">Checking external send readiness...</div>
+      </section>
+    );
+  }
+
+  if (error) {
+    return (
+      <section className="table-wrap" aria-label="External Send Readiness">
+        <h3>External Send Readiness</h3>
+        <div className="state warning">
+          External send readiness is unavailable. No external send action is available from this screen.
+        </div>
+      </section>
+    );
+  }
+
+  if (!readiness) {
+    return null;
+  }
+
+  return (
+    <section className="table-wrap" aria-label="External Send Readiness">
+      <div className="section-header">
+        <div>
+          <h3>External Send Readiness</h3>
+          <p>This section is informational only. There is no Send to OrderPro action.</p>
+        </div>
+        <span className="status rejected">Not active</span>
+      </div>
+      <div className="state warning">{readiness.message}</div>
+      <dl className="detail-list">
+        <div>
+          <dt>External send supported</dt>
+          <dd>{formatBoolean(readiness.external_send_supported)}</dd>
+        </div>
+        <div>
+          <dt>Can send externally</dt>
+          <dd>{formatBoolean(readiness.can_send_externally)}</dd>
+        </div>
+        <div>
+          <dt>Target system</dt>
+          <dd>{formatValue(readiness.external_send_system)}</dd>
+        </div>
+        <div>
+          <dt>Required local status</dt>
+          <dd>{formatValue(readiness.required_local_status)}</dd>
+        </div>
+      </dl>
+      {readiness.blockers.length > 0 && (
+        <div className="state error">
+          <strong>External sending is blocked.</strong>
+          <ul>
+            {readiness.blockers.map((blocker) => (
+              <li key={blocker}>{blocker}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {readiness.warnings.length > 0 && (
+        <div className="state warning">
+          <strong>Readiness notes</strong>
+          <ul>
+            {readiness.warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
       )}
     </section>
   );

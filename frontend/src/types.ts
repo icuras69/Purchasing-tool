@@ -737,6 +737,31 @@ export interface PurchaseOrderPreflight {
   };
 }
 
+export interface PurchaseOrderExternalSendReadiness {
+  purchase_order_id: number;
+  status: string;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  can_send_externally: boolean;
+  external_send_supported: boolean;
+  external_send_system: string;
+  blockers: string[];
+  warnings: string[];
+  required_local_status: string;
+  preflight_summary: {
+    overall_status: string;
+    can_submit: boolean;
+    can_approve: boolean;
+    can_issue_if_applicable: boolean;
+    blocker_count: number;
+    warning_count: number;
+    line_count: number;
+    blockers: string[];
+    warnings: string[];
+  };
+  message: string;
+}
+
 export interface CreatePurchaseOrderRequest {
   supplier_id: number;
   notes?: string | null;
