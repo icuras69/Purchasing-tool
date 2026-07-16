@@ -53,6 +53,7 @@ import {
   getStaleDemandReview,
   getSupplierForecast,
   getPurchaseOrder,
+  getPurchaseOrderPreflight,
   getRecommendation,
   getRecommendationPOReadiness,
   getRecommendationReviewSummary,
@@ -90,6 +91,7 @@ import type {
   Product,
   ProductSupplierMapping,
   PurchaseOrder,
+  PurchaseOrderPreflight,
   PurchaseRecommendation,
   RecommendationPOReadiness,
   RecommendationLLMExplanation,
@@ -154,6 +156,7 @@ vi.mock("./api", () => ({
   unsetPreferredProductSupplier: vi.fn(),
   listPurchaseOrders: vi.fn(),
   getPurchaseOrder: vi.fn(),
+  getPurchaseOrderPreflight: vi.fn(),
   listRecommendations: vi.fn(),
   getRecommendation: vi.fn(),
   getRecommendationPOReadiness: vi.fn(),
@@ -775,6 +778,52 @@ function mockPurchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrde
   };
 }
 
+function mockPurchaseOrderPreflight(
+  overrides: Partial<PurchaseOrderPreflight> = {},
+): PurchaseOrderPreflight {
+  return {
+    purchase_order_id: 500,
+    status: "draft",
+    supplier_id: 10,
+    supplier_name: "Acme Supplies",
+    can_submit: true,
+    can_approve: false,
+    can_issue_if_applicable: false,
+    overall_status: "needs_review",
+    blockers: [],
+    warnings: ["Missing pack size; review before ordering."],
+    line_checks: [
+      {
+        line_id: 700,
+        product_id: 1,
+        product_name: "Mapped Product",
+        supplier_id: 10,
+        supplier_name: "Acme Supplies",
+        quantity: 2,
+        unit_cost: 9.5,
+        estimated_line_total: 19,
+        product_supplier_id: null,
+        source_recommendation_id: null,
+        is_inventory_product: true,
+        canonical_supplier_matches_po_supplier: true,
+        quantity_valid: true,
+        cost_present: true,
+        supplier_snapshot_present: true,
+        blockers: [],
+        warnings: ["Missing pack size; review before ordering."],
+      },
+    ],
+    summary_counts: {
+      line_count: 1,
+      blocker_count: 0,
+      warning_count: 1,
+      lines_with_blockers: 0,
+      lines_with_warnings: 1,
+    },
+    ...overrides,
+  };
+}
+
 function mockRecommendation(overrides: Partial<PurchaseRecommendation> = {}): PurchaseRecommendation {
   return {
     id: 900,
@@ -1291,6 +1340,7 @@ beforeEach(() => {
   vi.mocked(unsetPreferredProductSupplier).mockResolvedValue(mockSupplierMapping({ is_preferred: false }));
   vi.mocked(listPurchaseOrders).mockResolvedValue([]);
   vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+  vi.mocked(getPurchaseOrderPreflight).mockResolvedValue(mockPurchaseOrderPreflight());
   vi.mocked(listRecommendations).mockResolvedValue([]);
   vi.mocked(getRecommendation).mockResolvedValue(mockRecommendation());
   vi.mocked(getRecommendationPOReadiness).mockResolvedValue(mockRecommendationPOReadiness());
@@ -3103,6 +3153,68 @@ describe("App mapping review workflow", () => {
     expect(submitPurchaseOrderForApproval).toHaveBeenCalledWith(500);
   });
 
+  it("shows purchase order preflight warnings in PO detail", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+    vi.mocked(getPurchaseOrderPreflight).mockResolvedValue(
+      mockPurchaseOrderPreflight({
+        warnings: ["Missing cost; review before ordering."],
+        line_checks: [
+          {
+            ...mockPurchaseOrderPreflight().line_checks[0],
+            warnings: ["Missing cost; review before ordering."],
+          },
+        ],
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("heading", { name: "PO Preflight" })).toBeInTheDocument();
+    expect(screen.getByText("Review before moving forward.")).toBeInTheDocument();
+    expect(screen.getAllByText("Missing cost; review before ordering.").length).toBeGreaterThan(0);
+  });
+
+  it("disables submit when PO preflight has blockers", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+    vi.mocked(getPurchaseOrderPreflight).mockResolvedValue(
+      mockPurchaseOrderPreflight({
+        can_submit: false,
+        overall_status: "blocked",
+        blockers: ["Line quantity must be greater than zero."],
+        warnings: [],
+        line_checks: [
+          {
+            ...mockPurchaseOrderPreflight().line_checks[0],
+            blockers: ["Line quantity must be greater than zero."],
+            warnings: [],
+          },
+        ],
+        summary_counts: {
+          line_count: 1,
+          blocker_count: 1,
+          warning_count: 0,
+          lines_with_blockers: 1,
+          lines_with_warnings: 0,
+        },
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    const submitButton = await screen.findByRole("button", { name: "Submit for Approval" });
+    await waitFor(() => expect(submitButton).toBeDisabled());
+    expect(screen.getByText("This PO cannot move forward yet.")).toBeInTheDocument();
+    expect(screen.getAllByText("Line quantity must be greater than zero.").length).toBeGreaterThan(0);
+  });
+
   it("cancel purchase order asks for confirmation", async () => {
     vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
     vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
@@ -3220,6 +3332,23 @@ describe("App mapping review workflow", () => {
     const pendingPo = mockPurchaseOrder({ status: "pending_approval" });
     vi.mocked(listPurchaseOrders).mockResolvedValue([pendingPo]);
     vi.mocked(getPurchaseOrder).mockResolvedValue(pendingPo);
+    vi.mocked(getPurchaseOrderPreflight).mockResolvedValue(
+      mockPurchaseOrderPreflight({
+        status: "pending_approval",
+        can_submit: false,
+        can_approve: true,
+        overall_status: "ready",
+        warnings: [],
+        line_checks: [],
+        summary_counts: {
+          line_count: 1,
+          blocker_count: 0,
+          warning_count: 0,
+          lines_with_blockers: 0,
+          lines_with_warnings: 0,
+        },
+      }),
+    );
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
@@ -3229,6 +3358,57 @@ describe("App mapping review workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     expect(approvePurchaseOrder).toHaveBeenCalledWith(500, { approved_by: "manager" });
+  });
+
+  it("disables approve when PO preflight blocks approval", async () => {
+    const pendingPo = mockPurchaseOrder({ status: "pending_approval" });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([pendingPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(pendingPo);
+    vi.mocked(getPurchaseOrderPreflight).mockResolvedValue(
+      mockPurchaseOrderPreflight({
+        status: "pending_approval",
+        can_submit: false,
+        can_approve: false,
+        overall_status: "blocked",
+        blockers: ["Purchase order has no lines."],
+        warnings: [],
+        line_checks: [],
+        summary_counts: {
+          line_count: 0,
+          blocker_count: 1,
+          warning_count: 0,
+          lines_with_blockers: 0,
+          lines_with_warnings: 0,
+        },
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    const approveButton = await screen.findByRole("button", { name: "Approve" });
+    await waitFor(() => expect(approveButton).toBeDisabled());
+    expect(screen.getByText("Purchase order has no lines.")).toBeInTheDocument();
+  });
+
+  it("shows non-blocking message when PO preflight cannot load", async () => {
+    vi.mocked(listPurchaseOrders).mockResolvedValue([mockPurchaseOrder()]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
+    vi.mocked(getPurchaseOrderPreflight).mockRejectedValue(new Error("Preflight unavailable."));
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await screen.findByText("Acme Supplies");
+    await userEvent.click(screen.getByRole("button", { name: "View" }));
+
+    expect(
+      await screen.findByText(
+        "Preflight is unavailable right now. Backend validation will still run before any status change.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit for Approval" })).toBeEnabled();
   });
 
   it("issue action confirms before calling the issue endpoint", async () => {
@@ -3269,6 +3449,23 @@ describe("App mapping review workflow", () => {
     const pendingPo = mockPurchaseOrder({ status: "pending_approval" });
     vi.mocked(listPurchaseOrders).mockResolvedValue([pendingPo]);
     vi.mocked(getPurchaseOrder).mockResolvedValue(pendingPo);
+    vi.mocked(getPurchaseOrderPreflight).mockResolvedValue(
+      mockPurchaseOrderPreflight({
+        status: "pending_approval",
+        can_submit: false,
+        can_approve: true,
+        overall_status: "ready",
+        warnings: [],
+        line_checks: [],
+        summary_counts: {
+          line_count: 1,
+          blocker_count: 0,
+          warning_count: 0,
+          lines_with_blockers: 0,
+          lines_with_warnings: 0,
+        },
+      }),
+    );
     vi.mocked(approvePurchaseOrder).mockRejectedValue(
       new Error("Cannot approve a purchase order with no lines."),
     );

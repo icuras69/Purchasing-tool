@@ -24,6 +24,11 @@ from app.services.purchase_order_drafting import (
     snapshot_purchase_order_line_from_product,
 )
 from app.services.purchase_order_export import build_purchase_order_csv, load_purchase_order_for_export
+from app.services.purchase_order_preflight import (
+    assert_preflight_allows,
+    load_purchase_order_for_preflight,
+    purchase_order_preflight,
+)
 
 router = APIRouter(prefix="/purchase-orders", tags=["purchase-orders"])
 
@@ -245,6 +250,14 @@ def get_purchase_order(po_id: int, db: Session = Depends(get_db)):
     return serialize_purchase_order(load_purchase_order(db, po_id))
 
 
+@router.get("/{po_id}/preflight")
+def get_purchase_order_preflight(po_id: int, db: Session = Depends(get_db)):
+    po = load_purchase_order_for_preflight(db, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found.")
+    return purchase_order_preflight(db, po)
+
+
 @router.get("/{po_id}/export.csv")
 def export_purchase_order_csv(po_id: int, db: Session = Depends(get_db)):
     po = load_purchase_order_for_export(db, po_id)
@@ -335,6 +348,11 @@ def update_purchase_order_line(
 def submit_purchase_order_for_approval(po_id: int, db: Session = Depends(get_db)):
     po = load_purchase_order(db, po_id)
     require_draft(po)
+    preflight_po = load_purchase_order_for_preflight(db, po_id)
+    try:
+        assert_preflight_allows(purchase_order_preflight(db, preflight_po), "submit")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     po.status = PENDING_APPROVAL
     po.updated_at = datetime.utcnow()
     db.commit()
@@ -350,8 +368,11 @@ def approve_purchase_order(
     po = load_purchase_order(db, po_id)
     if po.status != PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail="Only pending approval purchase orders can be approved.")
-    if not po.lines:
-        raise HTTPException(status_code=400, detail="Cannot approve a purchase order with no lines.")
+    preflight_po = load_purchase_order_for_preflight(db, po_id)
+    try:
+        assert_preflight_allows(purchase_order_preflight(db, preflight_po), "approve")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     now = datetime.utcnow()
     po.status = APPROVED
@@ -368,6 +389,11 @@ def issue_purchase_order(po_id: int, db: Session = Depends(get_db)):
     po = load_purchase_order(db, po_id)
     if po.status != APPROVED:
         raise HTTPException(status_code=400, detail="Only approved purchase orders can be issued.")
+    preflight_po = load_purchase_order_for_preflight(db, po_id)
+    try:
+        assert_preflight_allows(purchase_order_preflight(db, preflight_po), "issue")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     now = datetime.utcnow()
     po.status = ISSUED

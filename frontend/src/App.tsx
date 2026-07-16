@@ -46,6 +46,7 @@ import {
   getSupplierAssignmentReviewSummary,
   getProductSeasonality,
   getPurchaseOrder,
+  getPurchaseOrderPreflight,
   getRecommendation,
   getRecommendationPOReadiness,
   getRecommendationReviewSummary,
@@ -97,6 +98,7 @@ import type {
   ProductSupplierInput,
   ProductSupplierMapping,
   PurchaseOrder,
+  PurchaseOrderPreflight,
   PurchaseRecommendation,
   RecommendationPOReadiness,
   AddPurchaseOrderLineRequest,
@@ -5899,12 +5901,40 @@ function PurchaseOrderDetail({
   purchaseOrder: PurchaseOrder;
 }) {
   const [approvedBy, setApprovedBy] = useState("");
+  const [preflight, setPreflight] = useState<PurchaseOrderPreflight | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
   const canEdit = purchaseOrder.status === "draft";
   const canCancel = purchaseOrder.status === "draft" || purchaseOrder.status === "pending_approval";
   const canApprove = purchaseOrder.status === "pending_approval";
   const canIssue = purchaseOrder.status === "approved";
   const canReceive = purchaseOrder.status === "issued";
   const canExport = purchaseOrder.lines.length > 0;
+  const submitBlockedByPreflight = preflight ? !preflight.can_submit : false;
+  const approveBlockedByPreflight = preflight ? !preflight.can_approve : false;
+
+  useEffect(() => {
+    let active = true;
+    setPreflightLoading(true);
+    setPreflightError(null);
+    getPurchaseOrderPreflight(purchaseOrder.id)
+      .then((loadedPreflight) => {
+        if (active) {
+          setPreflight(loadedPreflight);
+          setPreflightLoading(false);
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setPreflight(null);
+          setPreflightLoading(false);
+          setPreflightError(loadError.message);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [purchaseOrder.id, purchaseOrder.status, purchaseOrder.updated_at, purchaseOrder.lines.length]);
 
   return (
     <section className="detail-panel" aria-label="Purchase order details">
@@ -5912,7 +5942,12 @@ function PurchaseOrderDetail({
         <h2>Purchase Order {purchaseOrder.id}</h2>
         <div className="action-row">
           {canEdit && (
-            <button disabled={headerActionLoading} onClick={onSubmitForApproval} type="button">
+            <button
+              disabled={headerActionLoading || submitBlockedByPreflight}
+              onClick={onSubmitForApproval}
+              title={submitBlockedByPreflight ? "Resolve PO preflight blockers before submitting." : undefined}
+              type="button"
+            >
               Submit for Approval
             </button>
           )}
@@ -5931,7 +5966,11 @@ function PurchaseOrderDetail({
                   value={approvedBy}
                 />
               </label>
-              <button disabled={headerActionLoading} type="submit">
+              <button
+                disabled={headerActionLoading || approveBlockedByPreflight}
+                title={approveBlockedByPreflight ? "Resolve PO preflight blockers before approval." : undefined}
+                type="submit"
+              >
                 Approve
               </button>
             </form>
@@ -5972,6 +6011,11 @@ function PurchaseOrderDetail({
           Issue only marks this PO as internally issued. It does not send it externally.
         </div>
       )}
+      <PurchaseOrderPreflightPanel
+        error={preflightError}
+        loading={preflightLoading}
+        preflight={preflight}
+      />
       <dl className="detail-list">
         <div>
           <dt>Supplier</dt>
@@ -6028,6 +6072,125 @@ function PurchaseOrderDetail({
         onUpdateLine={onUpdateLine}
         purchaseOrder={purchaseOrder}
       />
+    </section>
+  );
+}
+
+function PurchaseOrderPreflightPanel({
+  error,
+  loading,
+  preflight,
+}: {
+  error: string | null;
+  loading: boolean;
+  preflight: PurchaseOrderPreflight | null;
+}) {
+  if (loading) {
+    return (
+      <section className="table-wrap" aria-label="PO Preflight">
+        <h3>PO Preflight</h3>
+        <div className="state">Checking purchase order readiness...</div>
+      </section>
+    );
+  }
+
+  if (error) {
+    return (
+      <section className="table-wrap" aria-label="PO Preflight">
+        <h3>PO Preflight</h3>
+        <div className="state warning">
+          Preflight is unavailable right now. Backend validation will still run before any status change.
+        </div>
+      </section>
+    );
+  }
+
+  if (!preflight) {
+    return null;
+  }
+
+  const readyLabel = preflight.overall_status === "ready" ? "Ready" : "Needs attention";
+  const statusClass =
+    preflight.overall_status === "ready"
+      ? "status accepted"
+      : preflight.overall_status === "blocked"
+        ? "status rejected"
+        : "status pending";
+  const lineFindings = preflight.line_checks.filter(
+    (line) => line.blockers.length > 0 || line.warnings.length > 0,
+  );
+
+  return (
+    <section className="table-wrap" aria-label="PO Preflight">
+      <div className="section-header">
+        <div>
+          <h3>PO Preflight</h3>
+          <p>Backend validation runs again before submit, approval, or issue.</p>
+        </div>
+        <span className={statusClass}>{readyLabel}</span>
+      </div>
+      <dl className="detail-list">
+        <div>
+          <dt>Can submit</dt>
+          <dd>{formatBoolean(preflight.can_submit)}</dd>
+        </div>
+        <div>
+          <dt>Can approve</dt>
+          <dd>{formatBoolean(preflight.can_approve)}</dd>
+        </div>
+        <div>
+          <dt>Supplier</dt>
+          <dd>{formatValue(preflight.supplier_name)}</dd>
+        </div>
+        <div>
+          <dt>Lines</dt>
+          <dd>{preflight.summary_counts.line_count}</dd>
+        </div>
+      </dl>
+      {preflight.blockers.length > 0 && (
+        <div className="state error">
+          <strong>This PO cannot move forward yet.</strong>
+          <ul>
+            {preflight.blockers.map((blocker) => (
+              <li key={blocker}>{blocker}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {preflight.warnings.length > 0 && (
+        <div className="state warning">
+          <strong>Review before moving forward.</strong>
+          <ul>
+            {preflight.warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {lineFindings.length > 0 && (
+        <table className="compact-table">
+          <thead>
+            <tr>
+              <th>Line</th>
+              <th>Product ID</th>
+              <th>Product</th>
+              <th>Blockers</th>
+              <th>Warnings</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lineFindings.map((line) => (
+              <tr key={line.line_id ?? `${line.product_id}-${line.product_name}`}>
+                <td>{formatValue(line.line_id)}</td>
+                <td>{formatValue(line.product_id)}</td>
+                <td>{formatValue(line.product_name)}</td>
+                <td>{line.blockers.length > 0 ? line.blockers.join("; ") : "-"}</td>
+                <td>{line.warnings.length > 0 ? line.warnings.join("; ") : "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </section>
   );
 }

@@ -5,8 +5,9 @@ from datetime import date, datetime, timezone
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.product_supplier import ProductSupplier
-from app.models.purchase_order import PurchaseOrder
+from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.supplier import Supplier
+from app.services.purchase_order_preflight import line_preflight_check
 from app.models.usage_history import UsageHistory
 from app.core.security import settings
 
@@ -22,6 +23,7 @@ def seed_product_supplier(
     supplier = Supplier(name=supplier_name, normalized_name=supplier_name.upper())
     db_session.add_all([product, supplier])
     db_session.flush()
+    product.supplier_id = supplier.id
     mapping = ProductSupplier(
         product_id=product.id,
         supplier_id=supplier.id,
@@ -263,13 +265,234 @@ def test_update_draft_purchase_order_line_quantity(client, db_session):
 
 
 def test_submit_draft_purchase_order_for_approval(client, db_session):
-    _product, supplier, _mapping = seed_product_supplier(db_session)
+    _product, supplier, mapping = seed_product_supplier(db_session)
     po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
 
     response = client.post(f"/purchase-orders/{po['id']}/submit-for-approval")
 
     assert response.status_code == 200
     assert response.json()["status"] == "pending_approval"
+
+
+def test_preflight_blocks_empty_draft_purchase_order(client, db_session):
+    _product, supplier, _mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+
+    preflight_response = client.get(f"/purchase-orders/{po['id']}/preflight")
+    submit_response = client.post(f"/purchase-orders/{po['id']}/submit-for-approval")
+
+    assert preflight_response.status_code == 200
+    payload = preflight_response.json()
+    assert payload["can_submit"] is False
+    assert payload["overall_status"] == "blocked"
+    assert "Purchase order has no lines." in payload["blockers"]
+    assert submit_response.status_code == 400
+    assert "Purchase order has no lines." in submit_response.json()["detail"]
+
+
+def test_valid_draft_purchase_order_passes_preflight_with_legacy_warning(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["can_submit"] is True
+    assert payload["overall_status"] == "needs_review"
+    assert payload["summary_counts"]["line_count"] == 1
+    assert payload["line_checks"][0]["canonical_supplier_matches_po_supplier"] is True
+    assert "Line uses legacy ProductSupplier snapshot for backward compatibility." in payload["warnings"]
+
+
+def test_preflight_blocks_missing_po_supplier(client, db_session):
+    product, supplier, _mapping = seed_product_supplier(db_session)
+    po = PurchaseOrder(status="draft", supplier_id=None, created_by="test")
+    db_session.add(po)
+    db_session.flush()
+    db_session.add(
+        PurchaseOrderLine(
+            purchase_order_id=po.id,
+            product_id=product.id,
+            quantity=1,
+            unit_cost=product.cost_price,
+        )
+    )
+    db_session.commit()
+
+    response = client.get(f"/purchase-orders/{po.id}/preflight")
+
+    assert response.status_code == 200
+    assert response.json()["can_submit"] is False
+    assert "Purchase order is missing a supplier." in response.json()["blockers"]
+
+
+def test_preflight_blocks_non_positive_line_quantity(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session)
+    po = create_po(client, supplier.id)
+    payload = add_line(client, po["id"], mapping.id)
+    line = db_session.get(PurchaseOrderLine, payload["lines"][0]["id"])
+    line.quantity = 0
+    db_session.commit()
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    assert response.json()["can_submit"] is False
+    assert "Line quantity must be greater than zero." in response.json()["blockers"]
+
+
+def test_preflight_blocks_missing_line_product(client, db_session):
+    _product, supplier, _mapping = seed_product_supplier(db_session)
+    po = PurchaseOrder(id=1, supplier_id=supplier.id, supplier=supplier, status="draft")
+    line = PurchaseOrderLine(id=1, purchase_order_id=1, product_id=999999, quantity=1, unit_cost=10)
+
+    check = line_preflight_check(db_session, po, line, recommendation=None)
+
+    assert "Line product is missing." in check["blockers"]
+
+
+def test_preflight_blocks_line_missing_canonical_supplier(client, db_session):
+    product, supplier, mapping = seed_product_supplier(db_session)
+    product.supplier_id = None
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    assert response.json()["can_submit"] is False
+    assert "Line product is missing a canonical supplier assignment." in response.json()["blockers"]
+
+
+def test_preflight_blocks_mixed_supplier_lines(client, db_session):
+    _product_a, supplier_a, mapping_a = seed_product_supplier(db_session, supplier_name="Preflight Supplier A")
+    product_b, supplier_b, _mapping_b = seed_product_supplier(db_session, supplier_name="Preflight Supplier B")
+    po = create_po(client, supplier_a.id)
+    add_line(client, po["id"], mapping_a.id)
+    db_session.add(
+        PurchaseOrderLine(
+            purchase_order_id=po["id"],
+            product_id=product_b.id,
+            quantity=1,
+            unit_cost=10,
+        )
+    )
+    db_session.commit()
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["can_submit"] is False
+    assert "Line product canonical supplier conflicts with the PO supplier." in payload["blockers"]
+    assert "Purchase order contains products from multiple canonical suppliers." in payload["blockers"]
+
+
+def test_preflight_missing_unit_cost_warns_when_cost_optional(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(
+        db_session,
+        supplier_name="Optional Cost Supplier",
+    )
+    mapping.purchase_price = None
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    assert response.json()["can_submit"] is True
+    assert "Line unit cost is missing." in response.json()["warnings"]
+
+
+def test_preflight_missing_unit_cost_blocks_when_cost_required(monkeypatch, client, db_session):
+    monkeypatch.setattr(settings, "recommendation_require_cost", True)
+    _product, supplier, mapping = seed_product_supplier(
+        db_session,
+        supplier_name="Required Cost Supplier",
+    )
+    mapping.purchase_price = None
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+    submit_response = client.post(f"/purchase-orders/{po['id']}/submit-for-approval")
+
+    assert response.status_code == 200
+    assert response.json()["can_submit"] is False
+    assert "Line unit cost is missing and cost is required." in response.json()["blockers"]
+    assert submit_response.status_code == 400
+    assert "Line unit cost is missing and cost is required." in submit_response.json()["detail"]
+
+
+def test_preflight_missing_pack_size_warns_when_optional(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Optional Pack Supplier")
+    mapping.pack_size = None
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    assert response.json()["can_submit"] is True
+    assert "Line pack size is missing." in response.json()["warnings"]
+
+
+def test_preflight_missing_pack_size_blocks_when_required(monkeypatch, client, db_session):
+    monkeypatch.setattr(settings, "recommendation_require_pack_size", True)
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Required Pack Supplier")
+    mapping.pack_size = None
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    assert response.json()["can_submit"] is False
+    assert "Line pack size is missing and pack size is required." in response.json()["blockers"]
+
+
+def test_preflight_blocks_legacy_only_line_without_canonical_supplier(client, db_session):
+    product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Legacy Only Supplier")
+    product.supplier_id = None
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["can_submit"] is False
+    assert "Line product is missing a canonical supplier assignment." in payload["blockers"]
+    assert "Line uses legacy ProductSupplier snapshot for backward compatibility." in payload["warnings"]
+
+
+def test_preflight_endpoint_is_read_only(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Readonly Preflight Supplier")
+    po = create_po(client, supplier.id)
+    add_line(client, po["id"], mapping.id)
+    before = db_session.get(PurchaseOrder, po["id"])
+    before_state = {
+        "status": before.status,
+        "updated_at": before.updated_at,
+        "total_amount": before.total_amount,
+    }
+
+    response = client.get(f"/purchase-orders/{po['id']}/preflight")
+
+    assert response.status_code == 200
+    after = db_session.get(PurchaseOrder, po["id"])
+    assert after.status == before_state["status"]
+    assert after.updated_at == before_state["updated_at"]
+    assert after.total_amount == before_state["total_amount"]
 
 
 def test_cannot_approve_draft_purchase_order_directly(client, db_session):
@@ -306,7 +529,9 @@ def test_can_approve_pending_purchase_order_with_lines(client, db_session):
 def test_cannot_approve_purchase_order_with_zero_lines(client, db_session):
     _product, supplier, _mapping = seed_product_supplier(db_session)
     po = create_po(client, supplier.id)
-    submit_po(client, po["id"])
+    stored_po = db_session.get(PurchaseOrder, po["id"])
+    stored_po.status = "pending_approval"
+    db_session.commit()
 
     response = client.post(
         f"/purchase-orders/{po['id']}/approve",
@@ -314,7 +539,7 @@ def test_cannot_approve_purchase_order_with_zero_lines(client, db_session):
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Cannot approve a purchase order with no lines."
+    assert "Purchase order has no lines." in response.json()["detail"]
 
 
 def test_cannot_issue_purchase_order_before_approval(client, db_session):

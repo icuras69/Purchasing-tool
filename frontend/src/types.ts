@@ -696,6 +696,47 @@ export interface PurchaseOrder {
   lines: PurchaseOrderLine[];
 }
 
+export interface PurchaseOrderPreflightLineCheck {
+  line_id: number | null;
+  product_id: number | null;
+  product_name: string | null;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  quantity: number | null;
+  unit_cost: number | null;
+  estimated_line_total: number | null;
+  product_supplier_id: number | null;
+  source_recommendation_id: number | null;
+  is_inventory_product: boolean | null;
+  canonical_supplier_matches_po_supplier: boolean | null;
+  quantity_valid: boolean;
+  cost_present: boolean;
+  supplier_snapshot_present: boolean;
+  blockers: string[];
+  warnings: string[];
+}
+
+export interface PurchaseOrderPreflight {
+  purchase_order_id: number;
+  status: string;
+  supplier_id: number | null;
+  supplier_name: string | null;
+  can_submit: boolean;
+  can_approve: boolean;
+  can_issue_if_applicable: boolean;
+  overall_status: "ready" | "needs_review" | "blocked" | string;
+  blockers: string[];
+  warnings: string[];
+  line_checks: PurchaseOrderPreflightLineCheck[];
+  summary_counts: {
+    line_count: number;
+    blocker_count: number;
+    warning_count: number;
+    lines_with_blockers: number;
+    lines_with_warnings: number;
+  };
+}
+
 export interface CreatePurchaseOrderRequest {
   supplier_id: number;
   notes?: string | null;

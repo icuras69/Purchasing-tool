@@ -18,6 +18,7 @@ import {
   getForecastReconciliationProducts,
   getManualSupplierCleanupCandidates,
   getManagerApprovedStaleQueue,
+  getPurchaseOrderPreflight,
   getRecommendationPOReadiness,
   getRecommendationReviewSummary,
   getStoredAccessToken,
@@ -409,6 +410,46 @@ describe("apiUrl", () => {
       expect.objectContaining({ headers: {} }),
     );
     expect(result.filename).toBeNull();
+  });
+
+  it("fetches purchase order preflight with auth headers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          purchase_order_id: 500,
+          status: "draft",
+          supplier_id: 10,
+          supplier_name: "Acme Supplies",
+          can_submit: true,
+          can_approve: false,
+          can_issue_if_applicable: false,
+          overall_status: "ready",
+          blockers: [],
+          warnings: [],
+          line_checks: [],
+          summary_counts: {
+            line_count: 1,
+            blocker_count: 0,
+            warning_count: 0,
+            lines_with_blockers: 0,
+            lines_with_warnings: 0,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    storeAccessToken("stored-token");
+
+    const result = await getPurchaseOrderPreflight(500);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/purchase-orders/500/preflight"),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer stored-token" }),
+      }),
+    );
+    expect(result.can_submit).toBe(true);
   });
 
   it("fetches forecast reconciliation products with filters", async () => {
