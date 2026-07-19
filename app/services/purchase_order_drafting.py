@@ -10,6 +10,7 @@ from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.supplier import Supplier
 from app.services.forecast_input_reconciliation import profile_or_effective_inputs
 from app.services.forecasting import build_forecast
+from app.services.pack_rules import resolve_product_pack_rule, round_required_quantity
 
 
 DRAFT_STATUS = "draft"
@@ -188,6 +189,27 @@ def snapshot_purchase_order_line_from_product(
     unit_cost = effective_inputs["cost_price"]
     line_total = round(quantity * unit_cost, 2) if unit_cost is not None else None
     lead_time_days = effective_inputs["lead_time_days"]
+    pack_rounding = None
+    if db is not None:
+        pack_rounding = round_required_quantity(
+            raw_required_quantity=quantity,
+            minimum_order_quantity=None,
+            rule=resolve_product_pack_rule(db, product),
+            legacy_pack_size=effective_inputs["pack_size"],
+        )
+    line_pack_size = (
+        pack_rounding.order_multiple
+        if pack_rounding is not None and pack_rounding.rule_source != "default_order_multiple"
+        else effective_inputs["pack_size"]
+    )
+    line_notes = notes
+    if (
+        pack_rounding is not None
+        and pack_rounding.final_quantity > 0
+        and pack_rounding.rule_source != "default_order_multiple"
+    ):
+        suffix = f" Pack rule: {pack_rounding.explanation}; {pack_rounding.display}."
+        line_notes = f"{notes or ''}{suffix}".strip()
 
     return PurchaseOrderLine(
         purchase_order_id=po.id,
@@ -200,9 +222,9 @@ def snapshot_purchase_order_line_from_product(
         currency=None,
         line_total=line_total,
         minimum_order_quantity=effective_inputs["min_order_qty"],
-        pack_size=effective_inputs["pack_size"],
+        pack_size=line_pack_size,
         lead_time_days=lead_time_days,
-        notes=notes,
+        notes=line_notes,
     )
 
 

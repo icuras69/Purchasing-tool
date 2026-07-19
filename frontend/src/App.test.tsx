@@ -2501,6 +2501,34 @@ describe("App mapping review workflow", () => {
     expect(screen.getByText("Line-level received/cancelled quantities are unavailable; full open line quantity is counted.")).toBeInTheDocument();
   });
 
+  it("shows raw to pack-rounded quantity context on product forecast", async () => {
+    vi.mocked(fetchProductForecast).mockResolvedValue(
+      mockForecast({
+        raw_required_quantity: 57,
+        pre_pack_recommended_quantity: 57,
+        order_multiple: 56,
+        pack_rule_name: "Uniblock default",
+        pack_rule_source: "product_pack_rule",
+        pack_rule_display: "112 units = 2 pallets (56 each)",
+        pack_rounding_explanation: "57 raw -> 112 final using 56 order multiple",
+        pack_rule_warnings: ["Reviewed pack rule."],
+        recommended_qty: 112,
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Forecast" }));
+    await userEvent.type(screen.getByLabelText("Product ID"), "1");
+    await userEvent.click(screen.getByRole("button", { name: "Fetch Forecast" }));
+
+    expect(await screen.findByText("Raw required quantity")).toBeInTheDocument();
+    expect(screen.getByText("Order multiple")).toBeInTheDocument();
+    expect(screen.getByText("Uniblock default")).toBeInTheDocument();
+    expect(screen.getByText("57 raw -> 112 final using 56 order multiple")).toBeInTheDocument();
+    expect(screen.getByText("112 units = 2 pallets (56 each)")).toBeInTheDocument();
+    expect(screen.getByText("Reviewed pack rule.")).toBeInTheDocument();
+  });
+
   it("shows a warning when supplier mapping is needed", async () => {
     vi.mocked(fetchProductForecast).mockResolvedValue(
       mockForecast({

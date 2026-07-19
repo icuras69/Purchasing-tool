@@ -15,6 +15,7 @@ from app.services.orderpro_demand import (
 from app.services.inbound_stock import get_product_inbound_stock
 from app.services.seasonality import seasonality_context_for_product
 from app.services.forecast_input_reconciliation import profile_or_effective_inputs
+from app.services.pack_rules import resolve_product_pack_rule, round_required_quantity
 
 
 def calculate_reorder_point(avg_daily_usage: float, lead_time_days: int, safety_stock: float) -> float:
@@ -353,6 +354,15 @@ def build_forecast(
             "input_warning_issues": [],
             "forecast_readiness_score": 0.0,
             "reorder_point": 0.0,
+            "raw_required_quantity": 0.0,
+            "pre_pack_recommended_quantity": 0.0,
+            "order_multiple": 1.0,
+            "pack_rule_id": None,
+            "pack_rule_name": "not_applicable",
+            "pack_rule_source": "not_applicable",
+            "pack_rule_display": "0 units",
+            "pack_rounding_explanation": "0 raw -> 0 final",
+            "pack_rule_warnings": [],
             "recommended_action": "ignore",
             "recommended_qty": 0.0,
             "risk_level": "low",
@@ -389,6 +399,7 @@ def build_forecast(
     lead_time_days_used = supplier_ctx["lead_time_days_used"]
     minimum_order_quantity_used = supplier_ctx["minimum_order_quantity_used"]
     pack_size_used = forecast_input_ctx["pack_size"]
+    pack_rule = resolve_product_pack_rule(db, product)
     safety_stock_used = float(forecast_input_ctx["safety_stock"] or 0)
 
     projected_lead_time_demand = round(avg_daily_usage * lead_time_days_used, 2)
@@ -399,11 +410,13 @@ def build_forecast(
     total_required_stock = round(projected_lead_time_demand + demand_ctx.total_open_demand + safety_stock_used, 2)
     raw_recommended_qty_before_inbound = max(total_required_stock - current_stock, 0)
     raw_recommended_qty = max(total_required_stock - current_stock - incoming_qty, 0)
-    recommended_qty_before_inbound = round_order_quantity(
-        max(raw_recommended_qty_before_inbound, minimum_order_quantity_used if raw_recommended_qty_before_inbound > 0 else 0),
-        product,
-        pack_size=pack_size_used,
+    pack_rounding_before_inbound = round_required_quantity(
+        raw_required_quantity=raw_recommended_qty_before_inbound,
+        minimum_order_quantity=minimum_order_quantity_used,
+        rule=pack_rule,
+        legacy_pack_size=pack_size_used,
     )
+    recommended_qty_before_inbound = pack_rounding_before_inbound.final_quantity
     has_open_demand_shortage = demand_ctx.total_open_demand > (current_stock + incoming_qty)
 
     if avg_daily_usage > 0:
@@ -464,7 +477,14 @@ def build_forecast(
         risk_level = "low"
         explanation = "Current stock is sufficient based on recent average daily usage."
 
-    recommended_qty = round_order_quantity(recommended_qty, product, pack_size=pack_size_used)
+    raw_required_quantity_for_pack = raw_recommended_qty if recommended_action == "reorder" else 0.0
+    pack_rounding = round_required_quantity(
+        raw_required_quantity=raw_required_quantity_for_pack,
+        minimum_order_quantity=minimum_order_quantity_used,
+        rule=pack_rule,
+        legacy_pack_size=pack_size_used,
+    )
+    recommended_qty = pack_rounding.final_quantity
     recommended_qty_after_inbound = recommended_qty
     inbound_adjustment_qty = round(max(recommended_qty_before_inbound - recommended_qty_after_inbound, 0), 2)
     estimated_unit_cost = forecast_input_ctx["cost_price"]
@@ -534,6 +554,16 @@ def build_forecast(
         "input_warning_issues": forecast_input_ctx["warning_issues"],
         "forecast_readiness_score": forecast_input_ctx["readiness_score"],
         "reorder_point": reorder_point,
+        "raw_required_quantity": pack_rounding.raw_required_quantity,
+        "pre_pack_recommended_quantity": pack_rounding.pre_pack_quantity,
+        "order_multiple": pack_rounding.order_multiple,
+        "pack_rule_id": pack_rounding.rule_id,
+        "pack_rule_name": pack_rounding.rule_name,
+        "pack_rule_source": pack_rounding.rule_source,
+        "pack_rule_display": pack_rounding.display,
+        "pack_rounding_explanation": pack_rounding.explanation,
+        "pack_rule_warnings": pack_rounding.warnings,
+        "pack_rule_context": pack_rounding.as_dict(),
         "recommended_action": recommended_action,
         "recommended_qty": recommended_qty,
         "risk_level": risk_level,

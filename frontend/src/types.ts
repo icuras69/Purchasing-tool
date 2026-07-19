@@ -287,6 +287,23 @@ export interface IncomingStockContext {
   warnings: string[];
 }
 
+export interface PackRuleContext {
+  raw_required_quantity: number;
+  pre_pack_quantity: number;
+  final_quantity: number;
+  order_multiple: number;
+  rule_id: number | null;
+  rule_name: string;
+  rule_source: string;
+  pack_type?: string | null;
+  units_per_box?: number | null;
+  units_per_pallet?: number | null;
+  pallet_only?: boolean;
+  display: string;
+  explanation: string;
+  warnings: string[];
+}
+
 export interface ForecastResponse {
   product_id: number;
   product_name: string;
@@ -340,6 +357,16 @@ export interface ForecastResponse {
   input_warning_issues?: string[];
   forecast_readiness_score?: number | null;
   reorder_point: number;
+  raw_required_quantity?: number | null;
+  pre_pack_recommended_quantity?: number | null;
+  order_multiple?: number | null;
+  pack_rule_id?: number | null;
+  pack_rule_name?: string | null;
+  pack_rule_source?: string | null;
+  pack_rule_display?: string | null;
+  pack_rounding_explanation?: string | null;
+  pack_rule_warnings?: string[];
+  pack_rule_context?: PackRuleContext | null;
   recommended_action: string;
   recommended_qty: number;
   risk_level: string;

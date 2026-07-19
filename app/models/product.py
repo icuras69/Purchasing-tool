@@ -83,6 +83,11 @@ class Product(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    pack_rules = relationship(
+        "ProductPackRule",
+        back_populates="product",
+        cascade="all, delete-orphan",
+    )
     historical_links = relationship(
         "ProductHistoricalLink",
         foreign_keys="ProductHistoricalLink.orderpro_product_id",

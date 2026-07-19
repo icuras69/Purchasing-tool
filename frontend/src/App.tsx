@@ -1871,6 +1871,26 @@ function ForecastDetails({ forecast }: { forecast: ForecastResponse }) {
             <dd>{formatValue(forecast.recommended_qty)}</dd>
           </div>
           <div>
+            <dt>Raw required quantity</dt>
+            <dd>{formatValue(forecast.raw_required_quantity)}</dd>
+          </div>
+          <div>
+            <dt>Order multiple</dt>
+            <dd>{formatValue(forecast.order_multiple)}</dd>
+          </div>
+          <div>
+            <dt>Pack rule</dt>
+            <dd>{formatValue(forecast.pack_rule_name)}</dd>
+          </div>
+          <div>
+            <dt>Pack rounding</dt>
+            <dd>{formatValue(forecast.pack_rounding_explanation)}</dd>
+          </div>
+          <div>
+            <dt>Pack display</dt>
+            <dd>{formatValue(forecast.pack_rule_display)}</dd>
+          </div>
+          <div>
             <dt>Inbound adjustment</dt>
             <dd>{formatValue(forecast.inbound_adjustment_qty)}</dd>
           </div>
@@ -1915,7 +1935,11 @@ function ForecastInputDetails({ forecast }: { forecast: ForecastResponse }) {
         </div>
         <div>
           <dt>Pack source</dt>
-          <dd>{sourceLabel(forecast.pack_size_source)}</dd>
+          <dd>{sourceLabel(forecast.pack_rule_source ?? forecast.pack_size_source)}</dd>
+        </div>
+        <div>
+          <dt>Pack warnings</dt>
+          <dd>{(forecast.pack_rule_warnings ?? []).join(", ") || "-"}</dd>
         </div>
         <div>
           <dt>Readiness score</dt>
