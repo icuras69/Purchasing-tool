@@ -13,6 +13,7 @@ import {
   createPurchaseOrder,
   createProductSupplier,
   createReorderRecommendation,
+  exportPurchaseOrderHandoffPacket,
   exportPurchaseOrderCsv,
   exportManagerApprovedStaleQueueCsv,
   exportRecommendationCleanupCandidatesCsv,
@@ -5548,6 +5549,7 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
   const [lineActionLoading, setLineActionLoading] = useState(false);
   const [headerActionLoading, setHeaderActionLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
+  const [handoffLoading, setHandoffLoading] = useState(false);
 
   const loadPurchaseOrders = useCallback((active = true) => {
     listPurchaseOrders()
@@ -5746,6 +5748,24 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
     }
   }
 
+  async function handleExportHandoffPacket() {
+    if (!selectedPo) {
+      return;
+    }
+    setHandoffLoading(true);
+    setActionError(null);
+    setExportMessage(null);
+    try {
+      const exported = await exportPurchaseOrderHandoffPacket(selectedPo.id);
+      downloadBlob(exported.blob, exported.filename ?? `purchase-order-${selectedPo.id}-handoff.zip`);
+      setExportMessage("Purchase order handoff packet downloaded. Nothing was sent externally.");
+    } catch (loadError) {
+      setActionError(`Could not download handoff packet. ${(loadError as Error).message}`);
+    } finally {
+      setHandoffLoading(false);
+    }
+  }
+
   return (
     <div className="review-stack">
       <section className="panel-heading" aria-label="Purchase orders overview">
@@ -5767,12 +5787,14 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
       {selectedPo ? (
         <PurchaseOrderDetail
           exportLoading={exportLoading}
+          handoffLoading={handoffLoading}
           headerActionLoading={headerActionLoading}
           lineActionLoading={lineActionLoading}
           onAddLine={handleAddLine}
           onApprove={handleApprove}
           onCancel={handleCancel}
           onExportCsv={handleExportCsv}
+          onExportHandoffPacket={handleExportHandoffPacket}
           onIssue={handleIssue}
           onReceive={handleReceive}
           onSubmitForApproval={handleSubmitForApproval}
@@ -5901,12 +5923,14 @@ function PurchaseOrdersTable({
 
 function PurchaseOrderDetail({
   exportLoading,
+  handoffLoading,
   headerActionLoading,
   lineActionLoading,
   onAddLine,
   onApprove,
   onCancel,
   onExportCsv,
+  onExportHandoffPacket,
   onIssue,
   onReceive,
   onSubmitForApproval,
@@ -5914,12 +5938,14 @@ function PurchaseOrderDetail({
   purchaseOrder,
 }: {
   exportLoading: boolean;
+  handoffLoading: boolean;
   headerActionLoading: boolean;
   lineActionLoading: boolean;
   onAddLine: (payload: AddPurchaseOrderLineRequest) => Promise<void>;
   onApprove: (approvedBy: string | null) => Promise<void>;
   onCancel: () => void;
   onExportCsv: () => void;
+  onExportHandoffPacket: () => void;
   onIssue: () => void;
   onReceive: () => void;
   onSubmitForApproval: () => void;
@@ -5939,6 +5965,7 @@ function PurchaseOrderDetail({
   const canIssue = purchaseOrder.status === "approved";
   const canReceive = purchaseOrder.status === "issued";
   const canExport = purchaseOrder.lines.length > 0;
+  const canDownloadHandoffPacket = purchaseOrder.status === "issued";
   const submitBlockedByPreflight = preflight ? !preflight.can_submit : false;
   const approveBlockedByPreflight = preflight ? !preflight.can_approve : false;
 
@@ -6050,6 +6077,11 @@ function PurchaseOrderDetail({
           >
             {exportLoading ? "Exporting..." : "Export CSV"}
           </button>
+          {canDownloadHandoffPacket && (
+            <button disabled={handoffLoading} onClick={onExportHandoffPacket} type="button">
+              {handoffLoading ? "Downloading..." : "Download handoff packet"}
+            </button>
+          )}
         </div>
       </div>
       {!canExport && <div className="state">Add at least one line before exporting CSV.</div>}
@@ -6061,6 +6093,11 @@ function PurchaseOrderDetail({
       {canIssue && (
         <div className="state warning">
           Marking this PO as locally issued only changes the local status. It does not send to OrderPro, email suppliers, or create an external PO.
+        </div>
+      )}
+      {canDownloadHandoffPacket && (
+        <div className="state">
+          Downloading the handoff packet does not send the PO externally or create an OrderPro purchase order.
         </div>
       )}
       <PurchaseOrderPreflightPanel

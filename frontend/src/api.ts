@@ -601,6 +601,12 @@ export function exportPurchaseOrderCsv(
   return fetchBlob(`/purchase-orders/${purchaseOrderId}/export.csv`, "purchase order CSV");
 }
 
+export function exportPurchaseOrderHandoffPacket(
+  purchaseOrderId: number,
+): Promise<{ blob: Blob; filename: string | null }> {
+  return fetchBlob(`/purchase-orders/${purchaseOrderId}/handoff-packet`, "purchase order handoff packet");
+}
+
 export function createPurchaseOrder(payload: CreatePurchaseOrderRequest): Promise<PurchaseOrder> {
   return sendJson<PurchaseOrder>("/purchase-orders", "purchase order", {
     method: "POST",

@@ -24,7 +24,11 @@ from app.services.purchase_order_drafting import (
     snapshot_purchase_order_line_from_product,
 )
 from app.services.purchase_order_external_send import purchase_order_external_send_readiness
-from app.services.purchase_order_export import build_purchase_order_csv, load_purchase_order_for_export
+from app.services.purchase_order_export import (
+    build_purchase_order_csv,
+    build_purchase_order_handoff_packet,
+    load_purchase_order_for_export,
+)
 from app.services.purchase_order_preflight import (
     assert_preflight_allows,
     load_purchase_order_for_preflight,
@@ -281,6 +285,25 @@ def export_purchase_order_csv(po_id: int, db: Session = Depends(get_db)):
         media_type=exported.content_type,
         headers={
             "Content-Disposition": f'attachment; filename="{exported.filename}"',
+        },
+    )
+
+
+@router.get("/{po_id}/handoff-packet")
+def export_purchase_order_handoff_packet(po_id: int, db: Session = Depends(get_db)):
+    po = load_purchase_order_for_export(db, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found.")
+    try:
+        packet = build_purchase_order_handoff_packet(po)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    return Response(
+        content=packet.content,
+        media_type=packet.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{packet.filename}"',
         },
     )
 

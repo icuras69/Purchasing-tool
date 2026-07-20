@@ -1,5 +1,7 @@
 import csv
 import io
+import json
+from zipfile import ZipFile
 from datetime import date, datetime, timezone
 
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
@@ -168,6 +170,23 @@ def parse_csv_response(response) -> list[dict[str, str]]:
     assert response.content.startswith(b"\xef\xbb\xbf")
     text = response.content.decode("utf-8-sig")
     return list(csv.DictReader(io.StringIO(text)))
+
+
+def parse_zip_csv(content: bytes, filename: str) -> list[dict[str, str]]:
+    with ZipFile(io.BytesIO(content)) as archive:
+        data = archive.read(filename)
+    assert data.startswith(b"\xef\xbb\xbf")
+    return list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+
+
+def parse_zip_json(content: bytes, filename: str) -> dict:
+    with ZipFile(io.BytesIO(content)) as archive:
+        return json.loads(archive.read(filename).decode("utf-8"))
+
+
+def zip_names(content: bytes) -> list[str]:
+    with ZipFile(io.BytesIO(content)) as archive:
+        return sorted(archive.namelist())
 
 
 def test_create_draft_purchase_order(client, db_session):
@@ -964,6 +983,126 @@ def test_export_purchase_order_csv_does_not_modify_purchase_order(client, db_ses
     assert after.updated_at == before_state["updated_at"]
     assert after.total_amount == before_state["total_amount"]
     assert len(after.lines) == before_state["line_count"]
+
+
+def test_handoff_packet_success_for_locally_issued_po(client, db_session, monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Handoff packet generation must not call OrderPro.")
+
+    monkeypatch.setattr("app.services.orderpro_client.OrderProClient.generic_get", fail_if_called)
+    product, supplier, mapping = seed_product_supplier(
+        db_session,
+        supplier_name="Handoff Supplier",
+        product_name="Handoff Product",
+    )
+    product.orderpro_id = "OP-HANDOFF-1"
+    product.orderpro_sku = "HANDOFF-SKU"
+    supplier.orderpro_code = "HANDOFF-SUP"
+    supplier.email = "handoff@example.com"
+    supplier.phone = "+123456"
+    db_session.commit()
+    po = create_po(client, supplier.id)
+    updated = add_line(client, po["id"], mapping.id, quantity=2.5)
+    line = db_session.query(PurchaseOrderLine).filter_by(purchase_order_id=updated["id"]).one()
+    line.notes = "Pack rule: 2.5 raw -> 2.5 final using 2 order multiple."
+    db_session.commit()
+    submit_po(client, po["id"])
+    approve_po(client, po["id"])
+    issue_po(client, po["id"])
+    before = db_session.get(PurchaseOrder, po["id"])
+    before_state = {
+        "status": before.status,
+        "updated_at": before.updated_at,
+        "issued_at": before.issued_at,
+        "total_amount": before.total_amount,
+    }
+
+    response = client.get(f"/purchase-orders/{po['id']}/handoff-packet")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+    disposition = response.headers["content-disposition"]
+    assert "attachment;" in disposition
+    assert f'filename="purchase-order-po-{po["id"]}-handoff.zip"' in disposition
+    assert zip_names(response.content) == [
+        "README.txt",
+        "purchase_order.json",
+        "purchase_order_lines.csv",
+    ]
+    header = parse_zip_json(response.content, "purchase_order.json")
+    assert header["packet_schema_version"] == "1.0"
+    assert header["local_purchase_order_id"] == po["id"]
+    assert header["displayed_po_number"] == f"PO-{po['id']}"
+    assert header["status"] == "issued"
+    assert header["supplier"]["supplier_id"] == supplier.id
+    assert header["supplier"]["canonical_supplier_name"] == "Handoff Supplier"
+    assert header["supplier"]["supplier_code"] == "HANDOFF-SUP"
+    assert header["supplier"]["email"] == "handoff@example.com"
+    assert header["line_count"] == 1
+    assert header["subtotal"] == 31.25
+    assert header["total"] == 31.25
+    assert header["external_send_performed"] is False
+    assert header["orderpro_po_created"] is False
+    assert "orderpro_linkage" not in header
+
+    rows = parse_zip_csv(response.content, "purchase_order_lines.csv")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["local_line_id"] == str(line.id)
+    assert row["product_id"] == str(product.id)
+    assert row["orderpro_product_id"] == "OP-HANDOFF-1"
+    assert row["sku"] == "HANDOFF-SKU"
+    assert row["product_name"] == "Handoff Product"
+    assert row["ordered_quantity"] == "2.5"
+    assert row["unit_cost"] == "12.50"
+    assert row["line_total"] == "31.25"
+    assert row["currency"] == "USD"
+    assert row["pack_quantity"] == "2"
+    assert row["number_of_packs"] == "1.25"
+    assert row["minimum_order_quantity"] == "5"
+    assert row["order_multiple"] == "2"
+    assert row["pack_rule_adjustment_reason"] == "Pack rule: 2.5 raw -> 2.5 final using 2 order multiple."
+
+    with ZipFile(io.BytesIO(response.content)) as archive:
+        readme = archive.read("README.txt").decode("utf-8")
+    assert "This is a local Purchasing Tool handoff packet." in readme
+    assert "No OrderPro purchase order was created." in readme
+    assert "Nothing was sent to the supplier." in readme
+    assert "manual review before external use" in readme
+
+    after = db_session.get(PurchaseOrder, po["id"])
+    assert after.status == before_state["status"]
+    assert after.updated_at == before_state["updated_at"]
+    assert after.issued_at == before_state["issued_at"]
+    assert after.total_amount == before_state["total_amount"]
+
+
+def test_handoff_packet_rejects_ineligible_statuses(client, db_session):
+    _product, supplier, mapping = seed_product_supplier(db_session, supplier_name="Ineligible Handoff Supplier")
+
+    draft_po = create_po(client, supplier.id)
+    add_line(client, draft_po["id"], mapping.id, quantity=1)
+
+    approved_po = create_po(client, supplier.id)
+    add_line(client, approved_po["id"], mapping.id, quantity=1)
+    submit_po(client, approved_po["id"])
+    approve_po(client, approved_po["id"])
+
+    cancelled_po = create_po(client, supplier.id)
+    add_line(client, cancelled_po["id"], mapping.id, quantity=1)
+    cancel_response = client.post(f"/purchase-orders/{cancelled_po['id']}/cancel")
+    assert cancel_response.status_code == 200
+
+    for po_id in (draft_po["id"], approved_po["id"], cancelled_po["id"]):
+        response = client.get(f"/purchase-orders/{po_id}/handoff-packet")
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Only locally issued purchase orders can generate a handoff packet."
+
+
+def test_handoff_packet_unknown_id_returns_404(client):
+    response = client.get("/purchase-orders/999999/handoff-packet")
+
+    assert response.status_code == 404
 
 
 def test_create_draft_po_from_one_valid_product(client, db_session):

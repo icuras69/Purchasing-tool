@@ -7,6 +7,7 @@ import {
   exportForecastReconciliationCsv,
   exportManagerApprovedStaleQueueCsv,
   exportPurchaseOrderCsv,
+  exportPurchaseOrderHandoffPacket,
   exportRecommendationCleanupCandidatesCsv,
   exportRecommendationReviewSummaryCsv,
   exportStaleDemandReviewCsv,
@@ -411,6 +412,31 @@ describe("apiUrl", () => {
       expect.objectContaining({ headers: {} }),
     );
     expect(result.filename).toBeNull();
+  });
+
+  it("exports purchase order handoff packet with bearer token and response filename", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("zip", {
+        status: 200,
+        headers: {
+          "Content-Type": "application/zip",
+          "Content-Disposition": 'attachment; filename="purchase-order-po-500-handoff.zip"',
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    storeAccessToken("stored-token");
+
+    const result = await exportPurchaseOrderHandoffPacket(500);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/purchase-orders/500/handoff-packet"),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer stored-token" }),
+      }),
+    );
+    expect(result.filename).toBe("purchase-order-po-500-handoff.zip");
+    expect(await result.blob.text()).toBe("zip");
   });
 
   it("fetches purchase order preflight with auth headers", async () => {

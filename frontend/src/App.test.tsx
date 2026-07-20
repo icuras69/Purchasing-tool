@@ -18,6 +18,7 @@ import {
   createProductSupplier,
   createReorderRecommendation,
   exportManagerApprovedStaleQueueCsv,
+  exportPurchaseOrderHandoffPacket,
   exportPurchaseOrderCsv,
   exportRecommendationCleanupCandidatesCsv,
   exportRecommendationReviewSummaryCsv,
@@ -174,6 +175,7 @@ vi.mock("./api", () => ({
   convertRecommendationToDraftPO: vi.fn(),
   createDraftPurchaseOrderFromProducts: vi.fn(),
   createPurchaseOrder: vi.fn(),
+  exportPurchaseOrderHandoffPacket: vi.fn(),
   exportPurchaseOrderCsv: vi.fn(),
   addPurchaseOrderLine: vi.fn(),
   updatePurchaseOrderLine: vi.fn(),
@@ -1416,6 +1418,10 @@ beforeEach(() => {
   vi.mocked(exportPurchaseOrderCsv).mockResolvedValue({
     blob: new Blob(["csv"], { type: "text/csv" }),
     filename: "purchase_order_500.csv",
+  });
+  vi.mocked(exportPurchaseOrderHandoffPacket).mockResolvedValue({
+    blob: new Blob(["zip"], { type: "application/zip" }),
+    filename: "purchase-order-po-500-handoff.zip",
   });
   vi.mocked(addPurchaseOrderLine).mockResolvedValue(mockPurchaseOrder());
   vi.mocked(submitPurchaseOrderForApproval).mockResolvedValue(
@@ -2831,6 +2837,68 @@ describe("App mapping review workflow", () => {
         "Purchase order action failed: Could not export purchase order CSV. Purchase order not found.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("shows handoff packet download only for issued purchase orders", async () => {
+    const issuedPo = mockPurchaseOrder({
+      status: "issued",
+      issued_at: "2026-05-28T12:00:00",
+    });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([issuedPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(issuedPo);
+
+    const { unmount } = render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+
+    expect(await screen.findByRole("button", { name: "Download handoff packet" })).toBeEnabled();
+    expect(
+      screen.getByText("Downloading the handoff packet does not send the PO externally or create an OrderPro purchase order."),
+    ).toBeInTheDocument();
+
+    unmount();
+    const draftPo = mockPurchaseOrder({ status: "draft", issued_at: null });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([draftPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(draftPo);
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+
+    expect(screen.queryByRole("button", { name: "Download handoff packet" })).not.toBeInTheDocument();
+  });
+
+  it("handoff packet action downloads the returned zip without external-send wording", async () => {
+    const objectUrlSpy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:purchase-order-handoff");
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        expect(this.download).toBe("purchase-order-po-500-handoff.zip");
+      });
+    const issuedPo = mockPurchaseOrder({
+      status: "issued",
+      issued_at: "2026-05-28T12:00:00",
+    });
+    vi.mocked(listPurchaseOrders).mockResolvedValue([issuedPo]);
+    vi.mocked(getPurchaseOrder).mockResolvedValue(issuedPo);
+    vi.mocked(exportPurchaseOrderHandoffPacket).mockResolvedValue({
+      blob: new Blob(["zip"], { type: "application/zip" }),
+      filename: "purchase-order-po-500-handoff.zip",
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Download handoff packet" }));
+
+    expect(exportPurchaseOrderHandoffPacket).toHaveBeenCalledWith(500);
+    expect(objectUrlSpy).toHaveBeenCalled();
+    expect(clickSpy).toHaveBeenCalled();
+    expect(revokeSpy).toHaveBeenCalledWith("blob:purchase-order-handoff");
+    expect(
+      await screen.findByText("Purchase order handoff packet downloaded. Nothing was sent externally."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /send/i })).not.toBeInTheDocument();
   });
 
   it("create draft PO form validates supplier_id", async () => {
