@@ -588,17 +588,17 @@ def test_fetch_orderpro_records_respects_limit_pages_and_uses_get_only():
     assert records == [{"id": 1}, {"id": 2}]
     assert seen_methods == ["GET", "GET"]
     assert seen_urls == [
-        "https://wms.orderpro.cloud/api/v2/products?page=1",
-        "https://wms.orderpro.cloud/api/v2/products?page=2",
+        "https://wms.orderpro.cloud/api/v2/products?page=1&per_page=200",
+        "https://wms.orderpro.cloud/api/v2/products?page=2&per_page=200",
     ]
 
 
 def test_fetch_orderpro_records_fetches_all_pages_when_no_limit():
-    seen_pages = []
+    seen_params = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         page = int(request.url.params.get("page", "1"))
-        seen_pages.append(page)
+        seen_params.append((page, request.url.params.get("per_page")))
         return httpx.Response(
             200,
             json={"data": [{"id": page}], "meta": {"current_page": page, "last_page": 2}},
@@ -613,7 +613,7 @@ def test_fetch_orderpro_records_fetches_all_pages_when_no_limit():
     records = fetch_orderpro_records(client, "/suppliers")
 
     assert records == [{"id": 1}, {"id": 2}]
-    assert seen_pages == [1, 2]
+    assert seen_params == [(1, "200"), (2, "200")]
 
 
 def test_fetch_orderpro_records_status_reports_limit_only_when_truncated():

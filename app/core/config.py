@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     orderpro_api_key: str = ""
     orderpro_inventory_endpoint: str = ""
     orderpro_timeout_seconds: int = 30
+    orderpro_rate_limit_max_retries: int = 3
     forecast_demand_lookback_days: int = 90
     forecast_min_history_days: int = 14
     orderpro_historical_demand_statuses: str = "shipped"

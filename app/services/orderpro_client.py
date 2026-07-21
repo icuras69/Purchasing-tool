@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import time
+from typing import Any, Callable
 
 import httpx
 
 from app.core.config import settings
+
+ORDERPRO_COLLECTION_PER_PAGE = 200
 
 
 class OrderProClientError(Exception):
@@ -55,11 +60,20 @@ class OrderProClient:
         token: str | None = None,
         timeout_seconds: int | None = None,
         transport: httpx.BaseTransport | None = None,
+        rate_limit_max_retries: int | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.base_url = (base_url if base_url is not None else settings.orderpro_api_base_url).rstrip("/")
         self.token = token if token is not None else settings.orderpro_api_token
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else settings.orderpro_timeout_seconds
         self.transport = transport
+        configured_retries = (
+            rate_limit_max_retries
+            if rate_limit_max_retries is not None
+            else settings.orderpro_rate_limit_max_retries
+        )
+        self.rate_limit_max_retries = max(int(configured_retries), 0)
+        self.sleep = sleep if sleep is not None else time.sleep
 
         if not self.base_url:
             raise OrderProConfigError("ORDERPRO_API_BASE_URL is required.")
@@ -114,7 +128,7 @@ class OrderProClient:
 
         try:
             with httpx.Client(timeout=self.timeout_seconds, transport=self.transport) as client:
-                response = client.get(request_url, headers=headers, params=params)
+                response = self._get_with_rate_limit_retries(client, request_url, headers=headers, params=params)
         except httpx.TimeoutException as error:
             raise OrderProTimeoutError(f"OrderPro GET {normalize_target_label(target)} timed out.") from error
         except httpx.HTTPError as error:
@@ -178,7 +192,7 @@ class OrderProClient:
         rows: list[Any] = []
 
         while True:
-            payload = self.generic_get(path, params={"page": page})
+            payload = self.generic_get(path, params=paginated_params(page))
             rows.extend(extract_records(payload))
 
             next_page = next_page_number(payload, current_page=page)
@@ -187,6 +201,26 @@ class OrderProClient:
             page = next_page
 
         return rows
+
+    def _get_with_rate_limit_retries(
+        self,
+        client: httpx.Client,
+        request_url: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, Any] | None,
+    ) -> httpx.Response:
+        attempts = 0
+        while True:
+            response = client.get(request_url, headers=headers, params=params)
+            if response.status_code != 429 or attempts >= self.rate_limit_max_retries:
+                return response
+            attempts += 1
+            self.sleep(retry_after_seconds(response.headers.get("Retry-After")))
+
+
+def paginated_params(page: int) -> dict[str, int]:
+    return {"page": page, "per_page": ORDERPRO_COLLECTION_PER_PAGE}
 
 
 def normalize_path(path: str) -> str:
@@ -258,6 +292,27 @@ def next_page_number(payload: Any, *, current_page: int) -> int | None:
         return None
 
     return None
+
+
+def retry_after_seconds(value: str | None, *, now: datetime | None = None) -> float:
+    if not value:
+        return 0.0
+    cleaned = value.strip()
+    try:
+        return max(float(cleaned), 0.0)
+    except ValueError:
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(cleaned)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return 0.0
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return max((retry_at - reference).total_seconds(), 0.0)
 
 
 def extract_error_message(response: httpx.Response, *, token: str | None = None) -> str:

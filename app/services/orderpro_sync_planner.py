@@ -14,7 +14,7 @@ from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.warehouse import Warehouse
-from app.services.orderpro_client import OrderProClient, extract_records, next_page_number
+from app.services.orderpro_client import OrderProClient, extract_records, next_page_number, paginated_params
 from app.services.product_identity import (
     normalize_orderpro_id,
     normalize_product_code,
@@ -87,7 +87,7 @@ def fetch_orderpro_records_with_status(
     pages_fetched = 0
 
     while True:
-        payload = client.generic_get(path, params={"page": page})
+        payload = client.generic_get(path, params=paginated_params(page))
         pages_fetched += 1
         records.extend(record for record in extract_records(payload) if isinstance(record, dict))
 

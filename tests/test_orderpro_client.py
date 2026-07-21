@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 
@@ -9,6 +11,7 @@ from app.services.orderpro_client import (
     extract_records,
     next_page_number,
     normalize_path,
+    retry_after_seconds,
 )
 
 
@@ -77,7 +80,7 @@ def test_orderpro_client_supports_basic_pagination():
 
     def handler(request: httpx.Request) -> httpx.Response:
         page = request.url.params.get("page")
-        calls.append(page)
+        calls.append((page, request.url.params.get("per_page")))
         if page == "1":
             return httpx.Response(
                 200,
@@ -101,7 +104,7 @@ def test_orderpro_client_supports_basic_pagination():
     )
 
     assert client.get_products() == [{"id": 1}, {"id": 2}]
-    assert calls == ["1", "2"]
+    assert calls == [("1", "200"), ("2", "200")]
 
 
 def test_orderpro_client_supports_nested_paginator_pagination():
@@ -109,7 +112,7 @@ def test_orderpro_client_supports_nested_paginator_pagination():
 
     def handler(request: httpx.Request) -> httpx.Response:
         page = request.url.params.get("page")
-        calls.append(page)
+        calls.append((page, request.url.params.get("per_page")))
         if page == "1":
             return httpx.Response(
                 200,
@@ -144,7 +147,99 @@ def test_orderpro_client_supports_nested_paginator_pagination():
     )
 
     assert client.get_suppliers() == [{"id": 1}, {"id": 2}]
-    assert calls == ["1", "2"]
+    assert calls == [("1", "200"), ("2", "200")]
+
+
+def test_orderpro_client_retries_one_429_then_succeeds_without_duplicate_rows():
+    seen_pages = []
+    sleeps = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page")
+        seen_pages.append(page)
+        if seen_pages == ["1"]:
+            return httpx.Response(
+                200,
+                json={"data": [{"id": 1}], "meta": {"current_page": 1, "last_page": 2}},
+            )
+        if seen_pages == ["1", "2"]:
+            return httpx.Response(429, headers={"Retry-After": "2"}, json={"message": "Too many attempts."})
+        return httpx.Response(
+            200,
+            json={"data": [{"id": 2}], "meta": {"current_page": 2, "last_page": 2}},
+        )
+
+    client = OrderProClient(
+        base_url="https://wms.orderpro.cloud/api/v2",
+        token="secret-token",
+        transport=httpx.MockTransport(handler),
+        rate_limit_max_retries=1,
+        sleep=sleeps.append,
+    )
+
+    assert client._get_all_pages("/orders") == [{"id": 1}, {"id": 2}]
+    assert seen_pages == ["1", "2", "2"]
+    assert sleeps == [2.0]
+
+
+def test_orderpro_client_parses_retry_after_http_date():
+    retry_at = "Mon, 20 Jul 2026 12:00:05 GMT"
+    now = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+
+    assert retry_after_seconds(retry_at, now=now) == 5.0
+
+
+def test_orderpro_client_exhausts_429_retry_limit_and_redacts_token():
+    calls = []
+    sleeps = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "1"},
+            json={"message": "Slow down secret-token"},
+        )
+
+    client = OrderProClient(
+        base_url="https://wms.orderpro.cloud/api/v2",
+        token="secret-token",
+        transport=httpx.MockTransport(handler),
+        rate_limit_max_retries=2,
+        sleep=sleeps.append,
+    )
+
+    with pytest.raises(OrderProHTTPError) as error:
+        client.generic_get("/orders")
+
+    assert error.value.status_code == 429
+    assert len(calls) == 3
+    assert sleeps == [1.0, 1.0]
+    assert "secret-token" not in str(error.value)
+    assert "[redacted]" in str(error.value)
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 404, 500])
+def test_orderpro_client_does_not_retry_non_429_statuses(status_code):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(status_code, json={"message": f"status {status_code}"})
+
+    client = OrderProClient(
+        base_url="https://wms.orderpro.cloud/api/v2",
+        token="secret-token",
+        transport=httpx.MockTransport(handler),
+        rate_limit_max_retries=3,
+        sleep=lambda _seconds: (_ for _ in ()).throw(AssertionError("sleep should not run")),
+    )
+
+    with pytest.raises(OrderProHTTPError) as error:
+        client.generic_get("/products")
+
+    assert error.value.status_code == status_code
+    assert len(calls) == 1
 
 
 def test_orderpro_client_exposes_get_only_public_api_for_orderpro_calls():

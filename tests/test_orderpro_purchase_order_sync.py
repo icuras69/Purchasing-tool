@@ -1,5 +1,7 @@
 from datetime import date, datetime
 
+import httpx
+
 from app.models.orderpro_purchase_order import OrderProPurchaseOrder, OrderProPurchaseOrderLine
 from app.models.product import Product
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
@@ -10,6 +12,7 @@ from app.services.orderpro_client import OrderProClient, extract_records
 from app.services.orderpro_purchase_order_sync import (
     apply_orderpro_purchase_order_sync,
     extract_purchase_order_items,
+    fetch_orderpro_purchase_orders,
     is_open_orderpro_purchase_order_status,
     parse_purchase_order_line_quantities,
     plan_orderpro_purchase_order_sync,
@@ -79,6 +82,33 @@ def test_orderpro_client_has_no_write_methods_for_po_mirror_task():
     assert not hasattr(OrderProClient, "post")
     assert not hasattr(OrderProClient, "patch")
     assert not hasattr(OrderProClient, "delete")
+
+
+def test_fetch_orderpro_purchase_orders_uses_shared_per_page_pagination():
+    seen_urls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        page = int(request.url.params.get("page", "1"))
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"id": page}],
+                "meta": {"current_page": page, "last_page": 2},
+            },
+        )
+
+    client = OrderProClient(
+        base_url="https://wms.orderpro.cloud/api/v2",
+        token="secret-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert fetch_orderpro_purchase_orders(client) == [{"id": 1}, {"id": 2}]
+    assert seen_urls == [
+        "https://wms.orderpro.cloud/api/v2/purchase-orders?page=1&per_page=200",
+        "https://wms.orderpro.cloud/api/v2/purchase-orders?page=2&per_page=200",
+    ]
 
 
 def test_status_mapping_includes_open_and_excludes_terminal_statuses():
