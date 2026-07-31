@@ -144,6 +144,8 @@ def load_product_for_draft(db: Session, product_id: int) -> Product | None:
 
 
 def validate_orderpro_product_supplier(product: Product, supplier_id: int | None = None) -> str | None:
+    if not product.is_active:
+        return "Product is inactive."
     if product.supplier_id is None:
         return "Product is missing an OrderPro supplier mapping."
     if supplier_id is not None and product.supplier_id != supplier_id:

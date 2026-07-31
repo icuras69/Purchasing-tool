@@ -14,40 +14,21 @@ from app.models.purchase_order import PurchaseOrder, PurchaseOrderLine
 
 
 CSV_COLUMNS = [
-    "purchase_order_id",
-    "status",
-    "created_at",
-    "updated_at",
-    "approved_at",
-    "issued_at",
-    "expected_delivery_date",
-    "currency",
-    "order_notes",
-    "supplier_id",
-    "supplier_code",
-    "supplier_name",
-    "supplier_email",
-    "supplier_phone",
-    "supplier_lead_time_days",
-    "product_id",
-    "orderpro_product_id",
-    "sku",
-    "barcode",
-    "product_name",
-    "product_description",
-    "category",
-    "pack_size",
-    "current_stock",
-    "quantity",
-    "unit_cost",
-    "line_total",
-    "order_subtotal",
-    "order_total",
-    "line_notes",
-    "supplier_sku",
-    "supplier_product_name",
-    "minimum_order_quantity",
-    "lead_time_days",
+    "PO Number",
+    "Supplier",
+    "Status",
+    "Expected Delivery",
+    "SKU",
+    "Product",
+    "Supplier SKU",
+    "Quantity",
+    "Pack Size",
+    "Packs",
+    "MOQ",
+    "Unit Cost",
+    "Line Total",
+    "Currency",
+    "Notes",
 ]
 
 
@@ -160,7 +141,7 @@ def sanitize_zip_filename_part(value: str | None) -> str:
 def purchase_order_csv_filename(po: PurchaseOrder) -> str:
     supplier_name = po.supplier.name if po.supplier else "supplier"
     created_date = po.created_at.date().isoformat() if po.created_at else datetime.utcnow().date().isoformat()
-    return f"purchase_order_{po.id}_{sanitize_filename_part(supplier_name)}_{created_date}.csv"
+    return f"PO-{po.id}_{sanitize_filename_part(supplier_name)}_{created_date}.csv"
 
 
 def purchase_order_display_number(po: PurchaseOrder) -> str:
@@ -174,53 +155,30 @@ def purchase_order_handoff_filename(po: PurchaseOrder) -> str:
 def purchase_order_rows(po: PurchaseOrder) -> list[dict[str, str]]:
     supplier = po.supplier
     rows: list[dict[str, str]] = []
-    order_total = po.total_amount
-    if order_total is None:
-        line_totals = [calculate_line_total(line.quantity, line.unit_cost) for line in po.lines]
-        totals = [line_total for line_total in line_totals if line_total is not None]
-        order_total = sum(totals, Decimal("0")) if totals else None
 
     for line in po.lines:
         product = line.product
         line_total = line.line_total
         if line_total is None:
             line_total = calculate_line_total(line.quantity, line.unit_cost)
+        packs = number_of_packs(line.quantity, line.pack_size)
 
         row = {
-            "purchase_order_id": format_decimal(po.id),
-            "status": safe_csv_text(po.status),
-            "created_at": format_datetime(po.created_at),
-            "updated_at": format_datetime(po.updated_at),
-            "approved_at": format_datetime(po.approved_at),
-            "issued_at": format_datetime(po.issued_at),
-            "expected_delivery_date": format_datetime(po.delivery_date),
-            "currency": safe_csv_text(line.currency or po.currency),
-            "order_notes": safe_csv_text(po.notes),
-            "supplier_id": format_decimal(po.supplier_id),
-            "supplier_code": safe_csv_text(supplier.orderpro_code if supplier else None),
-            "supplier_name": safe_csv_text(supplier.name if supplier else None),
-            "supplier_email": safe_csv_text(supplier.email if supplier else None),
-            "supplier_phone": safe_csv_text(supplier.phone if supplier else None),
-            "supplier_lead_time_days": format_decimal(supplier.lead_time_days if supplier else None),
-            "product_id": format_decimal(line.product_id),
-            "orderpro_product_id": safe_csv_text(product.orderpro_id if product else None),
-            "sku": safe_csv_text((product.orderpro_sku if product else None) or line.supplier_sku),
-            "barcode": safe_csv_text(product.barcode if product else None),
-            "product_name": safe_csv_text((product.name if product else None) or line.supplier_product_name),
-            "product_description": safe_csv_text(product.description if product else None),
-            "category": safe_csv_text(product.category if product else None),
-            "pack_size": format_decimal(line.pack_size),
-            "current_stock": format_decimal(product.current_stock if product else None),
-            "quantity": format_decimal(line.quantity),
-            "unit_cost": format_decimal(line.unit_cost, money=True),
-            "line_total": format_decimal(line_total, money=True),
-            "order_subtotal": format_decimal(order_total, money=True),
-            "order_total": format_decimal(order_total, money=True),
-            "line_notes": safe_csv_text(line.notes),
-            "supplier_sku": safe_csv_text(line.supplier_sku),
-            "supplier_product_name": safe_csv_text(line.supplier_product_name),
-            "minimum_order_quantity": format_decimal(line.minimum_order_quantity),
-            "lead_time_days": format_decimal(line.lead_time_days),
+            "PO Number": safe_csv_text(purchase_order_display_number(po)),
+            "Supplier": safe_csv_text(supplier.name if supplier else None),
+            "Status": safe_csv_text(po.status),
+            "Expected Delivery": format_datetime(po.delivery_date),
+            "SKU": safe_csv_text((product.orderpro_sku if product else None) or line.supplier_sku),
+            "Product": safe_csv_text((product.name if product else None) or line.supplier_product_name),
+            "Supplier SKU": safe_csv_text(line.supplier_sku),
+            "Quantity": format_decimal(line.quantity),
+            "Pack Size": format_decimal(line.pack_size),
+            "Packs": format_decimal(packs),
+            "MOQ": format_decimal(line.minimum_order_quantity),
+            "Unit Cost": format_decimal(line.unit_cost, money=True),
+            "Line Total": format_decimal(line_total, money=True),
+            "Currency": safe_csv_text(line.currency or po.currency),
+            "Notes": safe_csv_text(line.notes),
         }
         rows.append(row)
     return rows

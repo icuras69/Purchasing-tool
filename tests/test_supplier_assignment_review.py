@@ -26,7 +26,7 @@ def _supplier(db_session, name="Acme Supplier", orderpro_id="sup-1", orderpro_co
     return supplier
 
 
-def _product(db_session, name="Missing Supplier Product", sku="SKU-1", supplier_id=None):
+def _product(db_session, name="Missing Supplier Product", sku="SKU-1", supplier_id=None, is_active=True):
     product = Product(
         name=name,
         source_system="orderpro",
@@ -36,6 +36,7 @@ def _product(db_session, name="Missing Supplier Product", sku="SKU-1", supplier_
         current_stock=5,
         lead_time_days=0,
         min_order_qty=1,
+        is_active=is_active,
     )
     db_session.add(product)
     db_session.commit()
@@ -97,6 +98,15 @@ def test_product_with_supplier_id_is_excluded(db_session):
     plan = build_supplier_assignment_review_report(db_session)
 
     assert plan.summary["missing_supplier_products"] == 0
+
+
+def test_inactive_product_is_excluded_from_supplier_review(db_session):
+    _product(db_session, is_active=False)
+
+    plan = build_supplier_assignment_review_report(db_session)
+
+    assert plan.summary["missing_supplier_products"] == 0
+    assert plan.items == []
 
 
 def test_repeated_orderpro_po_evidence_creates_high_confidence_suggestion(db_session):

@@ -1417,7 +1417,7 @@ beforeEach(() => {
   vi.mocked(createPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
   vi.mocked(exportPurchaseOrderCsv).mockResolvedValue({
     blob: new Blob(["csv"], { type: "text/csv" }),
-    filename: "purchase_order_500.csv",
+    filename: "PO-500.csv",
   });
   vi.mocked(exportPurchaseOrderHandoffPacket).mockResolvedValue({
     blob: new Blob(["zip"], { type: "application/zip" }),
@@ -2741,7 +2741,7 @@ describe("App mapping review workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
     await userEvent.click(await screen.findByRole("button", { name: "View" }));
 
-    expect(await screen.findByRole("button", { name: "Export CSV" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Export Clean CSV" })).toBeEnabled();
   });
 
   it("export CSV button is disabled for an empty purchase order", async () => {
@@ -2753,7 +2753,7 @@ describe("App mapping review workflow", () => {
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
     await userEvent.click(await screen.findByRole("button", { name: "View" }));
 
-    expect(await screen.findByRole("button", { name: "Export CSV" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Export Clean CSV" })).toBeDisabled();
     expect(screen.getByText("Add at least one line before exporting CSV.")).toBeInTheDocument();
   });
 
@@ -2765,26 +2765,26 @@ describe("App mapping review workflow", () => {
     vi.mocked(getPurchaseOrder).mockResolvedValue(mockPurchaseOrder());
     vi.mocked(exportPurchaseOrderCsv).mockResolvedValue({
       blob: new Blob(["csv"], { type: "text/csv" }),
-      filename: "purchase_order_500_acme.csv",
+      filename: "PO-500_Acme.csv",
     });
 
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
     await userEvent.click(await screen.findByRole("button", { name: "View" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Export Clean CSV" }));
 
     expect(exportPurchaseOrderCsv).toHaveBeenCalledWith(500);
     expect(objectUrlSpy).toHaveBeenCalled();
     expect(clickSpy).toHaveBeenCalled();
     expect(revokeSpy).toHaveBeenCalledWith("blob:purchase-order");
-    expect(await screen.findByText("Purchase order CSV exported.")).toBeInTheDocument();
+    expect(await screen.findByText("Clean purchase order CSV exported.")).toBeInTheDocument();
   });
 
   it("export CSV action uses fallback filename when the header filename is absent", async () => {
     const clickSpy = vi
       .spyOn(HTMLAnchorElement.prototype, "click")
       .mockImplementation(function (this: HTMLAnchorElement) {
-        expect(this.download).toBe("purchase_order_500.csv");
+        expect(this.download).toBe("PO-500.csv");
       });
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fallback");
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
@@ -2798,7 +2798,7 @@ describe("App mapping review workflow", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
     await userEvent.click(await screen.findByRole("button", { name: "View" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Export Clean CSV" }));
 
     expect(clickSpy).toHaveBeenCalled();
   });
@@ -2816,7 +2816,7 @@ describe("App mapping review workflow", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
     await userEvent.click(await screen.findByRole("button", { name: "View" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Export Clean CSV" }));
 
     expect(await screen.findByRole("button", { name: "Exporting..." })).toBeDisabled();
     resolveExport({ blob: new Blob(["csv"]), filename: "done.csv" });
@@ -2830,7 +2830,7 @@ describe("App mapping review workflow", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Purchase Orders" }));
     await userEvent.click(await screen.findByRole("button", { name: "View" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Export Clean CSV" }));
 
     expect(
       await screen.findByText(

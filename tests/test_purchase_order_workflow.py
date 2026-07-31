@@ -816,34 +816,44 @@ def test_export_purchase_order_csv_success(client, db_session):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
     assert "attachment;" in response.headers["content-disposition"]
-    assert f"purchase_order_{updated['id']}_CSV_Supplier_Inc_" in response.headers["content-disposition"]
+    assert f"PO-{updated['id']}_CSV_Supplier_Inc_" in response.headers["content-disposition"]
     rows = parse_csv_response(response)
     assert len(rows) == 1
     row = rows[0]
-    assert row["purchase_order_id"] == str(updated["id"])
-    assert row["status"] == "draft"
-    assert row["supplier_id"] == str(supplier.id)
-    assert row["supplier_code"] == "CSV-SUP"
-    assert row["supplier_name"] == "CSV Supplier, Inc."
-    assert row["supplier_email"] == "orders@example.com"
-    assert row["supplier_phone"] == "'+123456"
-    assert row["supplier_lead_time_days"] == "9"
-    assert row["product_id"] == str(product.id)
-    assert row["orderpro_product_id"] == "4120"
-    assert row["sku"] == "CSV-SKU"
-    assert row["barcode"] == "123456789"
-    assert row["product_name"] == 'CSV "Quoted", Product'
-    assert row["product_description"] == "Product description\nwith line break"
-    assert row["category"] == "Export Category"
-    assert row["current_stock"] == "12.5"
-    assert row["quantity"] == "2.5"
-    assert row["unit_cost"] == "12.50"
-    assert row["line_total"] == "31.25"
-    assert row["order_total"] == "31.25"
-    assert row["line_notes"] == "Line notes"
-    assert row["minimum_order_quantity"] == "5"
-    assert row["pack_size"] == "2"
-    assert row["lead_time_days"] == "7"
+    assert list(row) == [
+        "PO Number",
+        "Supplier",
+        "Status",
+        "Expected Delivery",
+        "SKU",
+        "Product",
+        "Supplier SKU",
+        "Quantity",
+        "Pack Size",
+        "Packs",
+        "MOQ",
+        "Unit Cost",
+        "Line Total",
+        "Currency",
+        "Notes",
+    ]
+    assert row["PO Number"] == f"PO-{updated['id']}"
+    assert row["Supplier"] == "CSV Supplier, Inc."
+    assert row["Status"] == "draft"
+    assert row["SKU"] == "CSV-SKU"
+    assert row["Product"] == 'CSV "Quoted", Product'
+    assert row["Supplier SKU"] == "CS-SKU"
+    assert row["Quantity"] == "2.5"
+    assert row["Pack Size"] == "2"
+    assert row["Packs"] == "1.25"
+    assert row["MOQ"] == "5"
+    assert row["Unit Cost"] == "12.50"
+    assert row["Line Total"] == "31.25"
+    assert row["Currency"] == "USD"
+    assert row["Notes"] == "Line notes"
+    assert "product_id" not in row
+    assert "supplier_email" not in row
+    assert "order_total" not in row
 
 
 def test_export_purchase_order_csv_multiple_lines_and_missing_optional_fields(client, db_session):
@@ -876,12 +886,13 @@ def test_export_purchase_order_csv_multiple_lines_and_missing_optional_fields(cl
     rows = parse_csv_response(response)
     assert len(rows) == 2
     second_row = rows[1]
-    assert second_row["product_id"] == str(second_product.id)
-    assert second_row["unit_cost"] == ""
-    assert second_row["line_total"] == ""
-    assert second_row["supplier_sku"] == ""
-    assert second_row["supplier_product_name"] == ""
-    assert second_row["product_description"] == ""
+    assert second_row["SKU"] == ""
+    assert second_row["Product"] == "No Optional Fields"
+    assert second_row["Unit Cost"] == ""
+    assert second_row["Line Total"] == ""
+    assert second_row["Supplier SKU"] == ""
+    assert second_row["Pack Size"] == ""
+    assert second_row["Packs"] == ""
 
 
 def test_export_purchase_order_csv_sanitizes_formula_injection(client, db_session):
@@ -902,14 +913,12 @@ def test_export_purchase_order_csv_sanitizes_formula_injection(client, db_sessio
 
     assert response.status_code == 200
     row = parse_csv_response(response)[0]
-    assert row["supplier_name"] == "'=Danger Supplier"
-    assert row["product_name"] == "'@Danger Product"
-    assert row["sku"] == "'+SKU"
-    assert row["product_description"] == "'-Description"
-    assert row["supplier_sku"] == "'=SUP-SKU"
-    assert row["supplier_product_name"] == "'+Supplier Product"
-    assert row["quantity"] == "1"
-    assert row["unit_cost"] == "12.50"
+    assert row["Supplier"] == "'=Danger Supplier"
+    assert row["Product"] == "'@Danger Product"
+    assert row["SKU"] == "'+SKU"
+    assert row["Supplier SKU"] == "'=SUP-SKU"
+    assert row["Quantity"] == "1"
+    assert row["Unit Cost"] == "12.50"
 
 
 def test_export_purchase_order_csv_unknown_id_returns_404(client):
@@ -1211,6 +1220,30 @@ def test_draft_po_from_products_rejects_when_all_products_are_skipped(client, db
             "reason": "Product is missing an OrderPro supplier mapping.",
         }
     ]
+
+
+def test_draft_po_from_products_rejects_inactive_product(client, db_session):
+    product, _supplier, _mapping = seed_draft_mapping(
+        db_session,
+        product_name="Inactive Draft Product",
+        product_overrides={"is_active": False},
+    )
+
+    response = client.post(
+        "/purchase-orders/draft-from-products",
+        json={"product_ids": [product.id]},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["message"] == "No valid purchase order lines could be created."
+    assert response.json()["detail"]["skipped_products"] == [
+        {
+            "product_id": product.id,
+            "product_name": "Inactive Draft Product",
+            "reason": "Product is inactive.",
+        }
+    ]
+    assert db_session.query(PurchaseOrder).count() == 0
 
 
 def test_draft_po_from_products_skips_product_for_requested_different_supplier(client, db_session):

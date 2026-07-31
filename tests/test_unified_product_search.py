@@ -13,6 +13,7 @@ def _orderpro_product(
     barcode: str | None = None,
     supplier_sku: str | None = None,
     supplier_id: int | None = None,
+    is_active: bool = True,
 ):
     product = Product(
         id=product_id,
@@ -28,7 +29,7 @@ def _orderpro_product(
         safety_stock=0,
         lead_time_days=0,
         min_order_qty=0,
-        is_active=True,
+        is_active=is_active,
     )
     db_session.add(product)
     db_session.commit()
@@ -101,6 +102,28 @@ def test_products_endpoint_searches_exact_barcode(client, db_session):
     payload = response.json()
     assert [row["id"] for row in payload] == [product.id]
     assert payload[0]["barcode"] == "BAR-123"
+
+
+def test_products_endpoint_hides_inactive_products_but_detail_remains_available(client, db_session):
+    active = _orderpro_product(db_session, product_id=3200, name="Active Product", sku="ACTIVE-SKU")
+    inactive = _orderpro_product(
+        db_session,
+        product_id=3201,
+        name="Inactive Product",
+        sku="INACTIVE-SKU",
+        is_active=False,
+    )
+
+    list_response = client.get("/products/")
+    search_response = client.get("/products/?search=INACTIVE-SKU")
+    detail_response = client.get(f"/products/{inactive.id}")
+
+    assert list_response.status_code == 200
+    assert [row["id"] for row in list_response.json()] == [active.id]
+    assert search_response.status_code == 200
+    assert search_response.json() == []
+    assert detail_response.status_code == 200
+    assert detail_response.json()["id"] == inactive.id
 
 
 def test_forecast_reconciliation_search_prefers_exact_product_id(client, db_session):

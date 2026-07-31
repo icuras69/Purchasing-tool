@@ -47,6 +47,7 @@ def missing_supplier_products(db: Session, *, product_id: int | None = None) -> 
             selectinload(Product.seasonality_profile),
         )
         .filter(Product.supplier_id.is_(None))
+        .filter(Product.is_active.is_(True))
         .filter(
             (Product.source_system == "orderpro")
             | (Product.orderpro_id.is_not(None))

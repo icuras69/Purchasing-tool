@@ -27,7 +27,15 @@ def _supplier(db_session, name="Cleanup Supplier", code="CLN", orderpro_id="sup-
     return supplier
 
 
-def _product(db_session, name="Cleanup Product", sku="CLEANUP-SKU", supplier_id=None, stock=0, cost=None):
+def _product(
+    db_session,
+    name="Cleanup Product",
+    sku="CLEANUP-SKU",
+    supplier_id=None,
+    stock=0,
+    cost=None,
+    is_active=True,
+):
     product = Product(
         name=name,
         source_system="orderpro",
@@ -38,7 +46,7 @@ def _product(db_session, name="Cleanup Product", sku="CLEANUP-SKU", supplier_id=
         cost_price=cost,
         lead_time_days=2,
         min_order_qty=1,
-        is_active=True,
+        is_active=is_active,
     )
     db_session.add(product)
     db_session.commit()
@@ -158,6 +166,15 @@ def test_export_includes_only_products_missing_supplier(db_session):
 
     assert [row["product_id"] for row in export.rows] == [missing.id]
     assert export.summary["total_missing_supplier_products"] == 1
+
+
+def test_export_excludes_inactive_products_missing_supplier(db_session):
+    _product(db_session, sku="INACTIVE-MISSING", is_active=False)
+
+    export = build_missing_supplier_cleanup_export(db_session)
+
+    assert export.rows == []
+    assert export.summary["total_missing_supplier_products"] == 0
 
 
 def test_priority_score_increases_for_open_demand_stock_and_history(db_session):

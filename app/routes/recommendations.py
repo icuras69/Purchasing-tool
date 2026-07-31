@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
+from app.models.product import Product
 from app.models.recommendation import Recommendation
 from app.routes.purchase_orders import serialize_purchase_order
 from app.schemas.recommendation import (
@@ -118,7 +119,13 @@ def create_reorder_recommendation(product_id: int, db: Session = Depends(get_db)
 @router.get("", response_model=list[RecommendationResponse])
 def list_recommendations(db: Session = Depends(get_db)):
     with perf_timer("recommendations.list") as perf:
-        recommendations = recommendation_query(db).order_by(Recommendation.id.asc()).all()
+        recommendations = (
+            recommendation_query(db)
+            .join(Recommendation.product)
+            .filter(Product.is_active.is_(True))
+            .order_by(Recommendation.id.asc())
+            .all()
+        )
         perf["returned"] = len(recommendations)
         return [serialize_recommendation(recommendation) for recommendation in recommendations]
 

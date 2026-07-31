@@ -15,6 +15,7 @@ IGNORED_DIRS = {
     ".venv",
     "venv",
     "__pycache__",
+    "pytest-of-root",
     "node_modules",
     "dist",
     "tmp",

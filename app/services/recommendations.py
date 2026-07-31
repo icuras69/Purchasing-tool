@@ -56,6 +56,8 @@ def create_reorder_recommendation_for_product(
     product = load_product_for_recommendation(db, product_id)
     if not product:
         raise RecommendationError("Product not found.", status_code=404)
+    if not product.is_active:
+        raise RecommendationError("Inactive products cannot receive new reorder recommendations.")
 
     explanation = explain_product_recommendation(db, product.id)
     if explanation is None:
@@ -303,6 +305,8 @@ def recommendation_po_readiness(db: Session, recommendation: Recommendation) -> 
     if product is None:
         blockers.append("Product not found.")
     else:
+        if not product.is_active:
+            blockers.append("Product is inactive.")
         if product.is_non_inventory:
             blockers.append("Product is non-inventory.")
         if product.supplier_id is None or supplier is None:

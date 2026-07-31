@@ -76,9 +76,13 @@ def serialize_product(product: Product) -> dict:
 
 
 def product_list_query(db: Session):
-    return db.query(Product).options(
-        selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
-        selectinload(Product.supplier_record),
+    return (
+        db.query(Product)
+        .options(
+            selectinload(Product.product_suppliers).selectinload(ProductSupplier.supplier),
+            selectinload(Product.supplier_record),
+        )
+        .filter(Product.is_active.is_(True))
     )
 
 
@@ -166,7 +170,7 @@ def list_weak_mappings(
 
     unmapped_products = (
         db.query(Product)
-        .filter(~Product.product_suppliers.any())
+        .filter(Product.is_active.is_(True), ~Product.product_suppliers.any())
         .order_by(Product.id.asc())
         .all()
     )
@@ -186,6 +190,7 @@ def list_weak_mappings(
             selectinload(ProductSupplier.supplier),
         )
         .filter(
+            ProductSupplier.product.has(Product.is_active.is_(True)),
             or_(
                 ProductSupplier.match_status != "matched",
                 ProductSupplier.match_status.is_(None),

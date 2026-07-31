@@ -153,7 +153,8 @@ The baseline Alembic migration creates the pre-Alembic core schema on a clean da
 Optional disposable database check:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\check_clean_database_migrations.py --database-url "postgresql://USER:PASSWORD@HOST:PORT/DISPOSABLE_DB"
+$env:DISPOSABLE_DATABASE_URL = "<Render external URL for a disposable database>"
+.\.venv\Scripts\python.exe scripts\check_clean_database_migrations.py --database-url "$env:DISPOSABLE_DATABASE_URL"
 ```
 
 The check refuses the normal local development database and non-empty databases unless `--allow-non-empty` is passed.

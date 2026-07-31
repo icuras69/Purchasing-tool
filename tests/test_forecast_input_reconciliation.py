@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
 from app.models.orderpro_purchase_order import OrderProPurchaseOrder, OrderProPurchaseOrderLine
@@ -136,11 +136,12 @@ def add_open_demand(db_session, product: Product, quantity: float) -> None:
 
 
 def add_shipped_demand(db_session, product: Product, quantity: float = 5) -> None:
+    recent_order_date = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
     order = OrderProOrder(
         orderpro_id=f"SHIP-{product.id}",
         order_number=f"SHIP-{product.id}",
         status="shipped",
-        order_date=datetime(2026, 5, 1),
+        order_date=recent_order_date,
     )
     db_session.add(order)
     db_session.flush()

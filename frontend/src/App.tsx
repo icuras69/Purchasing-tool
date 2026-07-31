@@ -5739,8 +5739,8 @@ function PurchaseOrdersPanel({ initialPoId }: { initialPoId: number | null }) {
     setExportMessage(null);
     try {
       const exported = await exportPurchaseOrderCsv(selectedPo.id);
-      downloadBlob(exported.blob, exported.filename ?? `purchase_order_${selectedPo.id}.csv`);
-      setExportMessage("Purchase order CSV exported.");
+      downloadBlob(exported.blob, exported.filename ?? `PO-${selectedPo.id}.csv`);
+      setExportMessage("Clean purchase order CSV exported.");
     } catch (loadError) {
       setActionError(`Could not export purchase order CSV. ${(loadError as Error).message}`);
     } finally {
@@ -6072,10 +6072,14 @@ function PurchaseOrderDetail({
           <button
             disabled={exportLoading || !canExport}
             onClick={onExportCsv}
-            title={canExport ? "Export purchase order lines to CSV" : "Add at least one line before exporting"}
+            title={
+              canExport
+                ? "Export a clean spreadsheet with the essential purchase order fields"
+                : "Add at least one line before exporting"
+            }
             type="button"
           >
-            {exportLoading ? "Exporting..." : "Export CSV"}
+            {exportLoading ? "Exporting..." : "Export Clean CSV"}
           </button>
           {canDownloadHandoffPacket && (
             <button disabled={handoffLoading} onClick={onExportHandoffPacket} type="button">

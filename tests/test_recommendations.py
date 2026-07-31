@@ -188,6 +188,19 @@ def test_create_reorder_recommendation_for_product_with_orderpro_supplier(client
     assert payload["currency"] is None
 
 
+def test_inactive_product_cannot_receive_new_reorder_recommendation(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"is_active": False},
+    )
+
+    response = client.post(f"/recommendations/reorder/{product.id}")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Inactive products cannot receive new reorder recommendations."
+    assert db_session.query(Recommendation).count() == 0
+
+
 def test_recommendation_stores_input_forecast_and_supplier_snapshots(client, db_session):
     product, supplier, _mapping = seed_recommendation_product(db_session)
 
@@ -1580,6 +1593,24 @@ def test_non_inventory_product_blocks_recommendation_to_po(client, db_session):
     assert db_session.query(PurchaseOrder).count() == 0
 
 
+def test_inactive_product_blocks_recommendation_to_po(client, db_session):
+    product, _supplier, _mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={"is_active": False},
+    )
+    recommendation = create_manual_recommendation_row(db_session, product, recommended_qty=3)
+
+    readiness_response = client.get(f"/recommendations/{recommendation.id}/po-readiness")
+    convert_response = client.post(f"/recommendations/{recommendation.id}/convert-to-draft-po")
+
+    assert readiness_response.status_code == 200
+    assert readiness_response.json()["can_create_draft_po"] is False
+    assert "Product is inactive." in readiness_response.json()["blockers"]
+    assert convert_response.status_code == 400
+    assert "Product is inactive." in convert_response.json()["detail"]
+    assert db_session.query(PurchaseOrder).count() == 0
+
+
 def test_stale_only_recommendation_without_manager_decision_blocks_po_creation(client, db_session):
     product, _supplier, _mapping = seed_recommendation_product(
         db_session,
@@ -1672,3 +1703,30 @@ def test_list_and_get_recommendations(client, db_session):
     assert [row["id"] for row in list_response.json()] == [recommendation["id"]]
     assert detail_response.status_code == 200
     assert detail_response.json()["id"] == recommendation["id"]
+
+
+def test_recommendation_list_hides_inactive_product_history_but_detail_remains_available(client, db_session):
+    active_product, _supplier, _mapping = seed_recommendation_product(db_session)
+    active_recommendation = create_manual_recommendation_row(db_session, active_product)
+    inactive_product, _inactive_supplier, _inactive_mapping = seed_recommendation_product(
+        db_session,
+        product_overrides={
+            "name": "Inactive Recommendation Product",
+            "orderpro_id": "inactive-8182",
+            "orderpro_sku": "INACTIVE-REC-SKU",
+            "is_active": False,
+        },
+        supplier_overrides={
+            "name": "Inactive Recommendation Supplier",
+            "normalized_name": "INACTIVE RECOMMENDATION SUPPLIER",
+        },
+    )
+    inactive_recommendation = create_manual_recommendation_row(db_session, inactive_product)
+
+    list_response = client.get("/recommendations")
+    detail_response = client.get(f"/recommendations/{inactive_recommendation.id}")
+
+    assert list_response.status_code == 200
+    assert [row["id"] for row in list_response.json()] == [active_recommendation.id]
+    assert detail_response.status_code == 200
+    assert detail_response.json()["id"] == inactive_recommendation.id

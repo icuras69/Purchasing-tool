@@ -326,6 +326,7 @@ def _missing_supplier_base_query(db: Session):
             selectinload(Product.seasonality_profile),
         )
         .filter(Product.supplier_id.is_(None))
+        .filter(Product.is_active.is_(True))
         .filter(
             (Product.source_system == "orderpro")
             | (Product.orderpro_id.is_not(None))
@@ -373,6 +374,7 @@ def _fast_candidate_summary(db: Session) -> dict[str, Any]:
     product_rows = (
         db.query(Product.id, Product.current_stock, Product.cost_price, Product.seasonality_tag)
         .filter(Product.supplier_id.is_(None))
+        .filter(Product.is_active.is_(True))
         .filter(
             (Product.source_system == "orderpro")
             | (Product.orderpro_id.is_not(None))
