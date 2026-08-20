@@ -41,7 +41,18 @@ def normalize_supplier_code(value: Any) -> str | None:
 
 def normalize_supplier_name(value: Any) -> str | None:
     text = clean_supplier_text(value)
-    return text.lower() if text else None
+    if not text:
+        return None
+
+    normalized = text.lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    # OrderPro and the legacy supplier workbook use several spellings for the
+    # same supplier (EDF Man, ED&F Man, and the ED&FMAN code). Keep this alias
+    # explicit rather than applying punctuation-insensitive matching to every
+    # supplier name, which could merge unrelated businesses.
+    if compact == "edfman":
+        return "ed&f man"
+    return normalized
 
 
 def one_by_supplier_key(suppliers: Iterable[Any], field_name: str, normalizer) -> dict[str, Any]:

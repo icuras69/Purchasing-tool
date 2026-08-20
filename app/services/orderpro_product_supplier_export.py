@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.models.product import Product
 from app.models.product_supplier_assignment_review import ProductSupplierAssignmentReview
 from app.models.supplier import Supplier
+from app.services.supplier_identity import normalize_supplier_name
 
 
 PRODUCT_ID_COLUMNS = {"id", "product_id", "orderpro_id", "orderpro_product_id"}
@@ -22,6 +23,9 @@ SUPPLIER_CODE_COLUMNS = {"supplier_code", "supplier", "supplier_ref"}
 SUPPLIER_ID_COLUMNS = {"supplier_id", "orderpro_supplier_id"}
 SUPPLIER_NAME_COLUMNS = {"supplier_name"}
 SUPPLIER_SKU_COLUMNS = {"supplier_sku", "supplier_product_code"}
+LEAD_TIME_COLUMNS = {"lead_time", "lead_time_days", "leadtime"}
+COST_PRICE_COLUMNS = {"cost_price", "cost", "purchase_price", "unit_cost"}
+MOQ_COLUMNS = {"min_order_qty", "minimum_order_quantity", "moq"}
 
 
 @dataclass
@@ -32,6 +36,9 @@ class ProductSupplierExportPlan:
     records_created: int = 0
     records_updated: int = 0
     products_confirmed: int = 0
+    lead_times_applied: int = 0
+    cost_prices_applied: int = 0
+    moqs_applied: int = 0
 
 
 def normalize_column_name(value: str) -> str:
@@ -51,8 +58,7 @@ def normalize_code(value: Any) -> str | None:
 
 
 def normalize_name(value: Any) -> str | None:
-    text = normalize_text(value)
-    return " ".join(text.lower().split()) if text else None
+    return normalize_supplier_name(value)
 
 
 def read_export_rows(path: str | Path, *, limit: int | None = None) -> list[dict[str, str | None]]:
@@ -103,6 +109,9 @@ def normalize_export_row(row: dict[str, Any]) -> dict[str, str | None]:
         "supplier_orderpro_id": _first_value(normalized, SUPPLIER_ID_COLUMNS),
         "supplier_name": _first_value(normalized, SUPPLIER_NAME_COLUMNS),
         "supplier_sku": _first_value(normalized, SUPPLIER_SKU_COLUMNS),
+        "lead_time_days": _first_value(normalized, LEAD_TIME_COLUMNS),
+        "cost_price": _first_value(normalized, COST_PRICE_COLUMNS),
+        "min_order_qty": _first_value(normalized, MOQ_COLUMNS),
     }
 
 
@@ -151,6 +160,9 @@ def apply_orderpro_product_supplier_export(
     created = 0
     updated = 0
     confirmed = 0
+    lead_times_applied = 0
+    cost_prices_applied = 0
+    moqs_applied = 0
     now = datetime.utcnow()
     for row in plan.rows:
         product_id = row.get("product_id")
@@ -169,26 +181,45 @@ def apply_orderpro_product_supplier_export(
         else:
             updated += 1
         _apply_row_to_review(review, row)
-        if confirm_exact_code and row["can_confirm_exact_code"]:
+        if confirm_exact_code and row["can_apply_verified_inputs"]:
             if product.supplier_id is None or product.supplier_id == row["supplier_id"]:
+                if product.supplier_id is None:
+                    confirmed += 1
                 product.supplier_id = row["supplier_id"]
                 product.supplier_sku = row["supplier_sku"] or product.supplier_sku
+                lead_time_days = positive_int(row.get("lead_time_days"), maximum=365)
+                if lead_time_days is not None and product.lead_time_days != lead_time_days:
+                    product.lead_time_days = lead_time_days
+                    lead_times_applied += 1
+                cost_price = positive_float(row.get("cost_price"))
+                if cost_price is not None and product.cost_price != cost_price:
+                    product.cost_price = cost_price
+                    cost_prices_applied += 1
+                min_order_qty = positive_float(row.get("min_order_qty"))
+                if min_order_qty is not None and product.min_order_qty != min_order_qty:
+                    product.min_order_qty = min_order_qty
+                    moqs_applied += 1
                 review.status = "confirmed"
                 review.reviewed_supplier_id = row["supplier_id"]
                 review.reviewed_by = "orderpro_product_export"
                 review.reviewed_at = now
-                confirmed += 1
     db.commit()
     plan.mode = "apply"
     plan.records_created = created
     plan.records_updated = updated
     plan.products_confirmed = confirmed
+    plan.lead_times_applied = lead_times_applied
+    plan.cost_prices_applied = cost_prices_applied
+    plan.moqs_applied = moqs_applied
     raw_rows = read_export_rows(path, limit=limit)
     product_lookup = _build_product_lookup(db)
     plan.summary = _summarize_rows(db, plan.rows, _header_diagnostics(raw_rows), product_lookup.get("diagnostics"))
     plan.summary["review_suggestions_created"] = created
     plan.summary["review_suggestions_updated"] = updated
     plan.summary["products_confirmed"] = confirmed
+    plan.summary["lead_times_applied"] = lead_times_applied
+    plan.summary["cost_prices_applied"] = cost_prices_applied
+    plan.summary["moqs_applied"] = moqs_applied
     return plan
 
 
@@ -383,6 +414,9 @@ def _plan_row(
         "supplier_orderpro_id": row["supplier_orderpro_id"],
         "supplier_name": row["supplier_name"],
         "supplier_sku": row["supplier_sku"],
+        "lead_time_days": row["lead_time_days"],
+        "cost_price": row["cost_price"],
+        "min_order_qty": row["min_order_qty"],
         "product_match_method": product_method,
         "product_match_diagnostic": product_match_diagnostic,
         "product_sku_matched_field": product_sku_matched_field,
@@ -402,9 +436,20 @@ def _plan_row(
         "supplier_name": supplier.name if supplier else row["supplier_name"],
         "supplier_match_method": supplier_method,
         "supplier_sku": row["supplier_sku"],
+        "lead_time_days": row["lead_time_days"],
+        "cost_price": row["cost_price"],
+        "min_order_qty": row["min_order_qty"],
         "confidence_label": confidence_label,
         "confidence_score": confidence_score,
         "can_confirm_exact_code": can_confirm,
+        "can_apply_verified_inputs": bool(
+            valid
+            and product
+            and supplier
+            and product_method in {"orderpro_id", "sku", "unique_barcode"}
+            and supplier_method in {"supplier_code", "supplier_orderpro_id"}
+            and product.supplier_id in {None, supplier.id}
+        ),
         "evidence_summary": evidence,
         "warnings": warnings,
     }
@@ -621,6 +666,9 @@ def _header_diagnostics(rows: list[dict[str, str | None]]) -> dict[str, Any]:
         "supplier_orderpro_id": SUPPLIER_ID_COLUMNS,
         "supplier_name": SUPPLIER_NAME_COLUMNS,
         "supplier_sku": SUPPLIER_SKU_COLUMNS,
+        "lead_time_days": LEAD_TIME_COLUMNS,
+        "cost_price": COST_PRICE_COLUMNS,
+        "min_order_qty": MOQ_COLUMNS,
     }
     mapped = {
         canonical: sorted(set(detected).intersection(names))
@@ -641,3 +689,23 @@ def _header_diagnostics(rows: list[dict[str, str | None]]) -> dict[str, Any]:
         "missing_optional_columns": optional,
         "missing_required_columns": missing_required,
     }
+
+
+def positive_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def positive_int(value: Any, *, maximum: int | None = None) -> int | None:
+    parsed = positive_float(value)
+    if parsed is None:
+        return None
+    rounded = int(round(parsed))
+    if rounded <= 0 or (maximum is not None and rounded > maximum):
+        return None
+    return rounded

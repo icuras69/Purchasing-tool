@@ -34,6 +34,12 @@ Supplier identity:
 - `supplier_sku`
 - `supplier_product_code`
 
+Verified purchasing inputs:
+
+- `lead_time`, `lead_time_days`, or `leadtime`
+- `cost_price` or `cost`
+- `min_order_qty`, `minimum_order_quantity`, or `moq`
+
 Each row needs at least one product identifier and at least one supplier identifier.
 
 ## Product Matching
@@ -77,6 +83,8 @@ Name-only supplier matches are suggestions only. They are never auto-confirmed.
 
 Existing matching supplier assignments are treated as idempotent. Existing conflicting supplier assignments are reported and not overwritten.
 
+For an exact product and exact supplier code/id match, `--confirm-exact-code` also applies positive verified lead time, cost price, and minimum-order-quantity values. These values are applied even when the product already has the same supplier assignment, which lets a current export repair incomplete forecast inputs without changing supplier ownership. API values remain authoritative during the normal OrderPro sync; export/CSV values are fallbacks when the API field is absent.
+
 ## Commands
 
 Dry-run:
@@ -105,4 +113,4 @@ Supplier assignment changes directly affect supplier forecasts and draft purchas
 
 ## Forecast Impact
 
-Unconfirmed export suggestions do not affect forecasts or purchase order generation. Once an exact supplier assignment is confirmed locally, `products.supplier_id` becomes available to the existing forecast and supplier forecast logic.
+Unconfirmed export suggestions do not affect forecasts or purchase order generation. Once an exact supplier assignment and verified purchasing inputs are confirmed locally, `products.supplier_id`, product lead time, cost, and MOQ become available to the existing forecast and supplier forecast logic.

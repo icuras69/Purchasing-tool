@@ -57,6 +57,9 @@ def main() -> int:
         "records_created": plan.records_created,
         "records_updated": plan.records_updated,
         "products_confirmed": plan.products_confirmed,
+        "lead_times_applied": plan.lead_times_applied,
+        "cost_prices_applied": plan.cost_prices_applied,
+        "moqs_applied": plan.moqs_applied,
         "warnings": [
             "This workflow is local-only and does not write to OrderPro.",
             "Name-only supplier matches are review suggestions only.",

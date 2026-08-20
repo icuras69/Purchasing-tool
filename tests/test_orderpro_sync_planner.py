@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from app.models.inventory_position import InventoryPosition
 from app.models.orderpro_order import OrderProOrder, OrderProOrderItem
@@ -89,6 +90,73 @@ def test_supplier_planning_matches_existing_supplier_by_normalized_name(db_sessi
     assert report["summary"]["linked_existing_by_name"] == 1
     assert report["matched_by_name"][0]["local_id"] == local.id
     assert report["matched_by_name"][0]["changes"]["orderpro_id"]["desired"] == "55"
+
+
+def test_supplier_planning_links_edf_man_alias_and_preserves_lead_time(db_session):
+    local = Supplier(
+        name="ED&F Man",
+        normalized_name="ED&F MAN",
+        lead_time_days=7,
+    )
+    db_session.add(local)
+    db_session.flush()
+
+    report = plan_supplier_sync(
+        db_session,
+        [{"id": 18, "code": "ED&FMAN", "name": "EDF Man"}],
+    )
+
+    assert report["summary"]["to_create"] == 0
+    assert report["summary"]["matched_by_name"] == 1
+    assert report["matched_by_name"][0]["local_id"] == local.id
+    assert local.lead_time_days == 7
+
+
+def test_product_csv_normalizes_purchasing_headers_and_rejects_duplicate_skus(tmp_path):
+    path = tmp_path / "products.csv"
+    path.write_text(
+        "SKU,Supplier Code,Lead_time,Cost Price,Minimum Order Quantity\n"
+        "MOLASSES1000LITRE,ED&FMAN,10,320,2\n",
+        encoding="utf-8",
+    )
+
+    rows = load_product_csv(path)
+
+    assert rows["MOLASSES1000LITRE"]["supplier_code"] == "ED&FMAN"
+    assert rows["MOLASSES1000LITRE"]["lead_time"] == "10"
+    assert rows["MOLASSES1000LITRE"]["cost_price"] == "320"
+    assert rows["MOLASSES1000LITRE"]["minimum_order_quantity"] == "2"
+
+    path.write_text(
+        "sku,supplier_code\nDUP-1,SUP1\ndup-1,SUP1\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate SKU"):
+        load_product_csv(path)
+
+
+def test_apply_product_sync_uses_verified_csv_lead_time_cost_and_moq(db_session):
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[{"id": 18, "code": "ED&FMAN", "name": "EDF Man", "is_active": True}],
+        products=[{"id": 976, "sku": "MOLASSES1000LITRE", "name": "Organic Molasses", "is_active": True}],
+        product_csv_rows={
+            "MOLASSES1000LITRE": {
+                "sku": "MOLASSES1000LITRE",
+                "supplier_code": "ED&FMAN",
+                "lead_time": "10",
+                "cost_price": "320",
+                "minimum_order_quantity": "2",
+            }
+        },
+    )
+
+    product = db_session.query(Product).filter_by(orderpro_sku="MOLASSES1000LITRE").one()
+    assert report["products"]["summary"]["created"] == 1
+    assert product.supplier_record.orderpro_code == "ED&FMAN"
+    assert product.lead_time_days == 10
+    assert product.cost_price == 320
+    assert product.min_order_qty == 2
 
 
 def test_product_planning_maps_csv_supplier_code_and_reports_missing_or_unknown_codes(db_session):

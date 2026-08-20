@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -110,9 +111,19 @@ def load_product_csv(path: str | Path) -> dict[str, dict[str, Any]]:
     rows_by_sku: dict[str, dict[str, Any]] = {}
     with csv_path.open(newline="", encoding="utf-8-sig") as csv_file:
         reader = csv.DictReader(csv_file)
-        for row in reader:
+        for row_number, raw_row in enumerate(reader, start=2):
+            row = {
+                normalize_csv_header(key): value
+                for key, value in raw_row.items()
+                if key is not None
+            }
             sku = normalize_product_code(row.get("sku"))
             if sku:
+                if sku in rows_by_sku:
+                    raise ValueError(
+                        f"Product CSV contains duplicate SKU {sku!r}; "
+                        f"refusing to let row {row_number} silently overwrite an earlier row."
+                    )
                 rows_by_sku[sku] = row
     return rows_by_sku
 
@@ -582,6 +593,7 @@ def apply_product_sync(
         local_supplier = supplier_by_code.get(supplier_code) if supplier_code in orderpro_supplier_codes else None
         desired = desired_product_fields(
             row,
+            product_csv_row=csv_row,
             supplier_sku=supplier_sku,
             local_supplier_id=local_supplier.id if local_supplier else None,
         )
@@ -793,7 +805,12 @@ def plan_product_sync(
         if local is None and sku:
             local = local_by_sku.get(sku)
             matched_by = "orderpro_sku" if local is not None else None
-        desired = desired_product_fields(row, supplier_sku=supplier_sku, local_supplier_id=local_supplier.id if local_supplier else None)
+        desired = desired_product_fields(
+            row,
+            product_csv_row=csv_row,
+            supplier_sku=supplier_sku,
+            local_supplier_id=local_supplier.id if local_supplier else None,
+        )
         field_limit_violations.extend(product_field_limit_violations(row, desired))
         if local is None:
             to_create.append(desired)
@@ -1144,7 +1161,13 @@ def desired_supplier_fields(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def desired_product_fields(row: dict[str, Any], *, supplier_sku: str | None, local_supplier_id: int | None) -> dict[str, Any]:
+def desired_product_fields(
+    row: dict[str, Any],
+    *,
+    product_csv_row: dict[str, Any] | None = None,
+    supplier_sku: str | None,
+    local_supplier_id: int | None,
+) -> dict[str, Any]:
     desired = {
         "orderpro_id": clean_text(row.get("id")),
         "orderpro_sku": clean_text(row.get("sku")),
@@ -1155,6 +1178,8 @@ def desired_product_fields(row: dict[str, Any], *, supplier_sku: str | None, loc
     }
     for field in PRODUCT_FIELDS:
         value = row.get(field)
+        if value in (None, "") and product_csv_row is not None:
+            value = product_csv_row.get(field)
         if field in {"weight_kg", "cost_price", "sell_price"}:
             desired[field] = to_float(value) if value not in (None, "") else None
         elif field == "is_active":
@@ -1163,6 +1188,22 @@ def desired_product_fields(row: dict[str, Any], *, supplier_sku: str | None, loc
             desired[field] = clean_preserved_text(value)
         else:
             desired[field] = clean_text(value)
+    lead_time_days = first_positive_int(
+        product_csv_row,
+        "lead_time_days",
+        "lead_time",
+        "leadtime",
+    ) or first_positive_int(row, "lead_time_days", "lead_time")
+    if lead_time_days is not None:
+        desired["lead_time_days"] = lead_time_days
+    min_order_qty = first_positive_float(
+        product_csv_row,
+        "min_order_qty",
+        "minimum_order_quantity",
+        "moq",
+    ) or first_positive_float(row, "min_order_qty", "minimum_order_quantity", "moq")
+    if min_order_qty is not None:
+        desired["min_order_qty"] = min_order_qty
     desired["name"] = desired["name"] or clean_text(row.get("sku")) or "Unnamed Product"
     return desired
 
@@ -1475,6 +1516,28 @@ def to_optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def normalize_csv_header(value: Any) -> str:
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower())).strip("_")
+
+
+def first_positive_float(row: dict[str, Any] | None, *keys: str) -> float | None:
+    if not row:
+        return None
+    for key in keys:
+        parsed = to_optional_float(row.get(key))
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def first_positive_int(row: dict[str, Any] | None, *keys: str) -> int | None:
+    parsed = first_positive_float(row, *keys)
+    if parsed is None or parsed > 365:
+        return None
+    rounded = int(round(parsed))
+    return rounded if rounded > 0 else None
 
 
 def parse_datetime(value: Any) -> datetime | None:

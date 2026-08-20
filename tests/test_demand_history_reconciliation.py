@@ -15,6 +15,7 @@ from app.services.demand_history_reconciliation import (
     inspect_demand_file,
     list_demand_coverage_products,
     plan_demand_import,
+    normalize_demand_rows,
     save_ambiguous_review_reports,
     save_demand_report,
 )
@@ -112,6 +113,89 @@ def base_row(**overrides):
     row = {"Date": "2026-01-02", "Quantity": "3", "SKU": "SKU-1", "Barcode": "", "Description": "Demand Product", "Gross": "30"}
     row.update(overrides)
     return row
+
+
+def test_mixed_excel_dates_are_reinterpreted_from_us_autoconversion_to_day_first():
+    source_rows = [
+        {
+            "source_sheet": "2025",
+            "source_row_number": 2,
+            "raw": base_row(Date="13/01/2025", SKU="MOLASSES1000LITRE"),
+        },
+        {
+            "source_sheet": "2025",
+            "source_row_number": 3,
+            "raw": base_row(Date="17/02/2025", SKU="MOLASSES1000LITRE"),
+        },
+        {
+            "source_sheet": "2025",
+            "source_row_number": 4,
+            "raw": base_row(Date="21/01/2025", SKU="MOLASSES1000LITRE"),
+        },
+        {
+            "source_sheet": "2025",
+            "source_row_number": 5,
+            "raw": base_row(Date=datetime(2025, 10, 2), SKU="MOLASSES1000LITRE"),
+        },
+    ]
+
+    rows = normalize_demand_rows(source_rows, "Sales History.xlsx")
+
+    assert rows[-1]["date"] == date(2025, 2, 10)
+    assert rows[-1]["date_reinterpreted_day_first"] is True
+
+
+def test_replace_existing_demand_source_repairs_dates_and_forecast(db_session, tmp_path):
+    supplier = make_supplier(db_session, name="EDF Man")
+    supplier.lead_time_days = 10
+    product = make_product(
+        db_session,
+        name="Organic Molasses",
+        orderpro_sku="MOLASSES1000LITRE",
+        barcode="MOLASSES1000LITRE",
+        supplier_id=supplier.id,
+        current_stock=0,
+    )
+    db_session.add(
+        UsageHistory(
+            product_id=product.id,
+            date=date(2025, 10, 2),
+            qty_used=24,
+            net_qty=24,
+            source_system="demand_history_import",
+        )
+    )
+    db_session.commit()
+    path = tmp_path / "corrected_demand.csv"
+    write_csv(
+        path,
+        [
+            base_row(Date="20/02/2024", Quantity="16", SKU="MOLASSES1000LITRE"),
+            base_row(Date="17/02/2025", Quantity="8", SKU="MOLASSES1000LITRE"),
+        ],
+    )
+
+    plan = apply_demand_import(
+        db_session,
+        path,
+        reviewed_by="Maged",
+        replace_existing_source=True,
+    )
+
+    dates = [
+        row.date
+        for row in db_session.query(UsageHistory)
+        .filter_by(product_id=product.id, source_system="demand_history_import")
+        .order_by(UsageHistory.date.asc())
+        .all()
+    ]
+    forecast = build_forecast(db_session, product, today=date(2026, 8, 20))
+    assert plan.summary["replaced_usage_rows"] == 1
+    assert dates == [date(2024, 2, 20), date(2025, 2, 17)]
+    assert forecast["shipped_units_in_window"] == 24
+    assert forecast["lead_time_days_used"] == 10
+    assert forecast["recommended_action"] == "reorder"
+    assert forecast["recommended_qty"] == 1
 
 
 def test_csv_and_xlsx_inspection(tmp_path):

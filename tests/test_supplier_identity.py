@@ -40,6 +40,12 @@ def test_supplier_code_and_name_normalization():
     assert normalize_supplier_name("  Acme   Supplies  ") == "acme supplies"
 
 
+def test_edf_man_legacy_and_orderpro_names_share_an_explicit_alias():
+    assert normalize_supplier_name("ED&F Man") == "ed&f man"
+    assert normalize_supplier_name("EDF Man") == "ed&f man"
+    assert normalize_supplier_name("ED&FMAN") == "ed&f man"
+
+
 def test_supplier_display_prefers_product_supplier_record_over_legacy_text():
     canonical = supplier(1, name="OrderPro Supplier", orderpro_code="OP")
     item = product(

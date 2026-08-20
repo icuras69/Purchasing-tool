@@ -39,7 +39,18 @@ def main():
     parser.add_argument("--save-report", action="store_true", help="Save JSON and row-level reconciliation CSV reports under tmp/.")
     parser.add_argument("--save-ambiguous-review", action="store_true", help="Save ambiguous-row review and grouped ambiguity CSV reports under tmp/.")
     parser.add_argument("--mapping-file", default=None, help="Optional reviewed mapping CSV used only for planning/matching.")
+    parser.add_argument(
+        "--replace-existing-source",
+        action="store_true",
+        help=(
+            "With --apply, replace existing demand_history_import rows for products matched in this file. "
+            "Use after reviewing a corrected dry-run, such as the mixed Excel day/month date repair."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.replace_existing_source and not args.apply:
+        parser.error("--replace-existing-source requires --apply.")
 
     path = Path(args.file)
     sheets = parse_sheet_names(args.sheets)
@@ -55,9 +66,16 @@ def main():
                 sheets=sheets,
                 all_sheets=args.all_sheets,
                 mapping_file=args.mapping_file,
+                replace_existing_source=args.replace_existing_source,
             )
         else:
-            plan = plan_demand_import(db, path, sheets=sheets, all_sheets=args.all_sheets, mapping_file=args.mapping_file)
+            plan = plan_demand_import(
+                db,
+                path,
+                sheets=sheets,
+                all_sheets=args.all_sheets,
+                mapping_file=args.mapping_file,
+            )
         print_section("Demand import summary", plan.summary)
         if args.save_report:
             print_section("Saved reports", save_demand_report(plan))

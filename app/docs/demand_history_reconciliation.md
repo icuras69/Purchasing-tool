@@ -105,6 +105,10 @@ Negative quantities are preserved as returns. For inserted `usage_history` rows:
 - negative quantities go to `qty_returned`
 - `net_qty` preserves the signed net demand
 
+### Mixed Excel day/month dates
+
+Some legacy year sheets contain both text dates in `DD/MM/YYYY` form and Excel datetime cells. Excel can silently store ambiguous values such as `10/02/2025` as 2 October even though the surrounding sheet is day-first. When a sheet contains clear day-first evidence, the importer reinterprets ambiguous Excel datetime cells consistently and reports both the sheet-level and total `dates_reinterpreted_day_first` counts. Review those counts in the dry-run before applying.
+
 ## Duplicate Strategy
 
 The importer is idempotent for the dedicated source system `demand_history_import`.
@@ -144,6 +148,14 @@ Apply reviewed local import:
 ```powershell
 .\.venv\Scripts\python.exe scripts\plan_demand_history_import.py --file "PATH_TO_FILE.xlsx" --apply --reviewed-by "Maged" --save-report
 ```
+
+Replace previously imported rows after reviewing a corrected dry-run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\plan_demand_history_import.py --file "PATH_TO_FILE.xlsx" --apply --replace-existing-source --reviewed-by "Maged" --save-report
+```
+
+`--replace-existing-source` is deliberately guarded: it requires `--apply` and only replaces existing `demand_history_import` rows for products safely matched in the current file. It is intended for corrections such as the mixed Excel day/month repair, not for routine incremental imports.
 
 Reports are written under:
 

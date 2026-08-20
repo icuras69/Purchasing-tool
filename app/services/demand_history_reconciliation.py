@@ -184,13 +184,19 @@ def plan_demand_import(
     sheets: list[str] | None = None,
     all_sheets: bool = False,
     mapping_file: str | Path | None = None,
+    replace_existing_source: bool = False,
 ) -> DemandImportPlan:
     source_path = Path(file_path)
     source_rows, inspection = load_source_file(source_path, sheets=sheets, all_sheets=all_sheets)
     normalized = normalize_demand_rows(source_rows, source_path.name)
     matched = match_demand_rows_to_products(db, normalized, source_path=source_path, mapping_file=mapping_file)
     validated = validate_demand_rows(matched)
-    planned_usage_rows, duplicate_summary = build_planned_usage_rows(db, validated, source_system=source_system)
+    planned_usage_rows, duplicate_summary = build_planned_usage_rows(
+        db,
+        validated,
+        source_system=source_system,
+        ignore_existing=replace_existing_source,
+    )
     summary = summarize_plan(source_path, validated, planned_usage_rows, duplicate_summary, inspection=inspection)
     return DemandImportPlan(summary=summary, rows=validated, planned_usage_rows=planned_usage_rows, warnings=summary["warnings"])
 
@@ -204,9 +210,30 @@ def apply_demand_import(
     sheets: list[str] | None = None,
     all_sheets: bool = False,
     mapping_file: str | Path | None = None,
+    replace_existing_source: bool = False,
 ) -> DemandImportPlan:
-    plan = plan_demand_import(db, file_path, source_system=source_system, sheets=sheets, all_sheets=all_sheets, mapping_file=mapping_file)
+    plan = plan_demand_import(
+        db,
+        file_path,
+        source_system=source_system,
+        sheets=sheets,
+        all_sheets=all_sheets,
+        mapping_file=mapping_file,
+        replace_existing_source=replace_existing_source,
+    )
     try:
+        replaced_usage_rows = 0
+        if replace_existing_source:
+            affected_product_ids = sorted({row["product_id"] for row in plan.planned_usage_rows})
+            if affected_product_ids:
+                replaced_usage_rows = (
+                    db.query(UsageHistory)
+                    .filter(
+                        UsageHistory.source_system == source_system,
+                        UsageHistory.product_id.in_(affected_product_ids),
+                    )
+                    .delete(synchronize_session=False)
+                )
         for row in plan.planned_usage_rows:
             db.add(
                 UsageHistory(
@@ -226,6 +253,8 @@ def apply_demand_import(
     plan.summary["mode"] = "apply"
     plan.summary["reviewed_by"] = reviewed_by
     plan.summary["inserted_usage_rows"] = len(plan.planned_usage_rows)
+    plan.summary["replace_existing_source"] = replace_existing_source
+    plan.summary["replaced_usage_rows"] = replaced_usage_rows
     return plan
 
 
@@ -649,11 +678,17 @@ def excel_column_index(ref: str) -> int:
 def normalize_demand_rows(source_rows: list[dict[str, Any]], source_file: str) -> list[dict[str, Any]]:
     columns = sorted({str(key) for row in source_rows for key in row["raw"].keys()})
     mapped = {name: find_column(columns, candidates) for name, candidates in COLUMN_CANDIDATES.items()}
+    reinterpret_day_first_sheets = infer_day_first_excel_datetime_sheets(source_rows, mapped.get("date"))
     rows = []
     for item in source_rows:
         raw = item["raw"]
         quantity = parse_float(raw.get(mapped["quantity"])) if mapped.get("quantity") else None
-        parsed_date = parse_date(raw.get(mapped["date"])) if mapped.get("date") else None
+        raw_date = raw.get(mapped["date"]) if mapped.get("date") else None
+        reinterpret_day_first = item["source_sheet"] in reinterpret_day_first_sheets
+        parsed_date = parse_date(
+            raw_date,
+            reinterpret_ambiguous_datetime_day_first=reinterpret_day_first,
+        ) if mapped.get("date") else None
         product_id = parse_int(raw.get(mapped["product_id"])) if mapped.get("product_id") else None
         orderpro_sku = clean_text(raw.get(mapped["orderpro_sku"])) if mapped.get("orderpro_sku") else None
         sku = clean_text(raw.get(mapped["sku"])) if mapped.get("sku") else None
@@ -677,6 +712,9 @@ def normalize_demand_rows(source_rows: list[dict[str, Any]], source_file: str) -
                 "product_name": product_name,
                 "normalized_name": normalize_name(product_name),
                 "date": parsed_date,
+                "date_reinterpreted_day_first": bool(
+                    reinterpret_day_first and is_ambiguous_datetime_value(raw_date)
+                ),
                 "quantity": quantity,
                 "gross_revenue": gross_revenue or 0.0,
                 "external_ref": clean_text(raw.get(mapped["external_ref"])) if mapped.get("external_ref") else None,
@@ -1149,8 +1187,9 @@ def build_planned_usage_rows(
     rows: list[dict[str, Any]],
     *,
     source_system: str,
+    ignore_existing: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    existing = {
+    existing = set() if ignore_existing else {
         (product_id, demand_date)
         for product_id, demand_date in db.query(UsageHistory.product_id, UsageHistory.date)
         .filter(UsageHistory.source_system == source_system)
@@ -1213,6 +1252,12 @@ def summarize_plan(
         warnings.append("Unmatched rows require review.")
     if status_counts["excluded_non_inventory"]:
         warnings.append("Non-product service/fee rows were excluded.")
+    reinterpreted_date_count = sum(1 for row in rows if row.get("date_reinterpreted_day_first"))
+    if reinterpreted_date_count:
+        warnings.append(
+            f"Reinterpreted {reinterpreted_date_count} ambiguous Excel date cells as day-first "
+            "because the same sheet contained strong DD/MM/YYYY text evidence."
+        )
     mapping_warnings = next((row.get("mapping_file_warnings") for row in rows if row.get("mapping_file_warnings")), [])
     per_sheet = {}
     for sheet_name in sorted({row["source_sheet"] for row in rows}):
@@ -1233,6 +1278,9 @@ def summarize_plan(
             "excluded_non_inventory_rows": sheet_status["excluded_non_inventory"],
             "invalid_rows": sheet_status["invalid"],
             "duplicate_rows": sheet_status["duplicate"],
+            "dates_reinterpreted_day_first": sum(
+                1 for row in sheet_rows if row.get("date_reinterpreted_day_first")
+            ),
             "total_positive_quantity": round(sum(qty for qty in sheet_quantities if qty > 0), 4),
             "total_returned_quantity": round(sum(qty for qty in sheet_quantities if qty < 0), 4),
         }
@@ -1254,6 +1302,7 @@ def summarize_plan(
         "matched_service_rows_excluded": sum(1 for row in rows if row.get("_matched_service_excluded")),
         "invalid_rows": status_counts["invalid"],
         "duplicate_rows": status_counts["duplicate"],
+        "dates_reinterpreted_day_first": reinterpreted_date_count,
         "rows_already_in_database": duplicate_summary["rows_already_in_database"],
         "rows_planned_for_insert": len(planned_usage_rows),
         "source_rows_planned_for_insert": duplicate_summary["safe_source_rows_aggregated"],
@@ -1612,9 +1661,18 @@ def build_demand_coverage_csv(db: Session, **filters: Any) -> CsvExport:
     return CsvExport(content=("\ufeff" + handle.getvalue()).encode("utf-8"), filename=filename)
 
 
-def parse_date(value: Any) -> date | None:
+def parse_date(
+    value: Any,
+    *,
+    reinterpret_ambiguous_datetime_day_first: bool = False,
+) -> date | None:
     if value is None or value == "":
         return None
+    if isinstance(value, (datetime, date)):
+        parsed_date = value.date() if isinstance(value, datetime) else value
+        if reinterpret_ambiguous_datetime_day_first and is_ambiguous_datetime_value(parsed_date):
+            return date(parsed_date.year, parsed_date.day, parsed_date.month)
+        return parsed_date
     numeric_value = parse_float(value)
     if numeric_value is not None and numeric_value > 20000:
         return date(1899, 12, 30) + timedelta(days=int(numeric_value))
@@ -1625,6 +1683,39 @@ def parse_date(value: Any) -> date | None:
     if pd.isna(parsed):
         return None
     return parsed.date()
+
+
+def is_ambiguous_datetime_value(value: Any) -> bool:
+    if not isinstance(value, (datetime, date)):
+        return False
+    parsed_date = value.date() if isinstance(value, datetime) else value
+    return parsed_date.month <= 12 and parsed_date.day <= 12 and parsed_date.month != parsed_date.day
+
+
+def infer_day_first_excel_datetime_sheets(
+    source_rows: list[dict[str, Any]],
+    date_column: str | None,
+) -> set[str]:
+    if not date_column:
+        return set()
+    strong_day_first_strings: Counter[str] = Counter()
+    ambiguous_datetime_values: Counter[str] = Counter()
+    for item in source_rows:
+        value = item["raw"].get(date_column)
+        sheet = item["source_sheet"]
+        if is_ambiguous_datetime_value(value):
+            ambiguous_datetime_values[sheet] += 1
+            continue
+        if not isinstance(value, str):
+            continue
+        match = re.fullmatch(r"\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*", value)
+        if match and int(match.group(1)) > 12 and int(match.group(2)) <= 12:
+            strong_day_first_strings[sheet] += 1
+    return {
+        sheet
+        for sheet, ambiguous_count in ambiguous_datetime_values.items()
+        if ambiguous_count > 0 and strong_day_first_strings[sheet] >= 3
+    }
 
 
 def parse_float(value: Any) -> float | None:

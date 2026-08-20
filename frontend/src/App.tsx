@@ -3484,6 +3484,7 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
   const openDemandCount = (forecast?.forecasts ?? []).filter(forecastHasOpenDemand).length;
   const missingLeadTimeCount = (forecast?.forecasts ?? []).filter(forecastMissingLeadTime).length;
   const noHistoryCount = (forecast?.forecasts ?? []).filter(forecastHasNoDemandHistory).length;
+  const forecastIncomplete = missingLeadTimeCount > 0 || noHistoryCount > 0;
 
   return (
     <section className="detail-panel" aria-label="Supplier forecast">
@@ -3579,7 +3580,11 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
               </button>
             </form>
             {forecast.products_needing_reorder.length === 0 && (
-              <div className="action-state">No products currently require reorder.</div>
+              <div className="action-state">
+                {forecastIncomplete
+                  ? "Draft generation is blocked because this forecast has unresolved data gaps."
+                  : "No products currently require reorder."}
+              </div>
             )}
             {draftError && (
               <div className="state error">Supplier forecast draft generation failed: {draftError}</div>
@@ -3592,16 +3597,22 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
             )}
           </section>
           {forecast.products_needing_reorder.length === 0 && (
-            <div className="state">No products need reorder for this supplier.</div>
+            <div className={forecastIncomplete ? "state warning" : "state"}>
+              {forecastIncomplete
+                ? "Forecast incomplete: zero recommended quantity is not a safe no-order decision until the missing inputs are resolved."
+                : "No products need reorder for this supplier."}
+            </div>
           )}
           {noHistoryCount > 0 && (
             <div className="state warning">
-              Some products have no usable demand history and are being monitored.
+              {noHistoryCount} product(s) have no usable demand history; their zero recommendation
+              is not a purchase decision.
             </div>
           )}
           {missingLeadTimeCount > 0 && (
             <div className="state warning">
-              Some products are missing lead time, so their recommendations need review.
+              {missingLeadTimeCount} product(s) are missing lead time; their reorder quantities
+              cannot be calculated yet.
             </div>
           )}
           <div className="filter-bar" role="group" aria-label="Supplier forecast filters">

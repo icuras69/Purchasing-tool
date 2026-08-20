@@ -3031,9 +3031,15 @@ describe("App mapping review workflow", () => {
     await userEvent.type(screen.getByLabelText("Supplier ID"), "53");
     await userEvent.click(screen.getByRole("button", { name: "Load Supplier Forecast" }));
 
-    expect(await screen.findByText("No products need reorder for this supplier.")).toBeInTheDocument();
     expect(
-      screen.getByText("Some products have no usable demand history and are being monitored."),
+      await screen.findByText(
+        "Forecast incomplete: zero recommended quantity is not a safe no-order decision until the missing inputs are resolved.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "1 product(s) have no usable demand history; their zero recommendation is not a purchase decision.",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -3141,7 +3147,11 @@ describe("App mapping review workflow", () => {
     await userEvent.type(screen.getByLabelText("Supplier ID"), "53");
     await userEvent.click(screen.getByRole("button", { name: "Load Supplier Forecast" }));
     await screen.findByText("No History Product");
-    expect(screen.getByText("Some products are missing lead time, so their recommendations need review.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "1 product(s) are missing lead time; their reorder quantities cannot be calculated yet.",
+      ),
+    ).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "No demand history" }));
     expect(screen.getByText("No History Product")).toBeInTheDocument();

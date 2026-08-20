@@ -77,6 +77,66 @@ def test_csv_column_normalization_works(tmp_path):
     assert normalized["supplier_sku"] == "S-ABC"
 
 
+def test_exact_existing_supplier_row_applies_verified_forecast_inputs(db_session, tmp_path):
+    supplier = _supplier(db_session, name="EDF Man", orderpro_id="18", orderpro_code="ED&FMAN")
+    product = _product(
+        db_session,
+        name="Organic Molasses",
+        orderpro_id="976",
+        sku="MOLASSES1000LITRE",
+        supplier_id=supplier.id,
+    )
+    path = _write_csv(
+        tmp_path,
+        [
+            {
+                "sku": "MOLASSES1000LITRE",
+                "supplier_code": "ED&FMAN",
+                "Lead_time": "10",
+                "cost_price": "320",
+                "moq": "2",
+            }
+        ],
+    )
+
+    plan = apply_orderpro_product_supplier_export(
+        db_session,
+        path,
+        apply_suggestions=True,
+        confirm_exact_code=True,
+    )
+
+    db_session.refresh(product)
+    assert plan.products_confirmed == 0
+    assert plan.lead_times_applied == 1
+    assert plan.cost_prices_applied == 1
+    assert plan.moqs_applied == 1
+    assert product.lead_time_days == 10
+    assert product.cost_price == 320
+    assert product.min_order_qty == 2
+
+
+def test_supplier_name_alias_matches_edf_man_for_review(db_session, tmp_path):
+    supplier = _supplier(db_session, name="ED&F Man", orderpro_id=None, orderpro_code=None)
+    product = _product(
+        db_session,
+        name="Organic Molasses",
+        orderpro_id="976",
+        sku="MOLASSES1000LITRE",
+    )
+    path = _write_csv(
+        tmp_path,
+        [{"sku": "MOLASSES1000LITRE", "supplier_name": "EDF Man"}],
+    )
+
+    plan = plan_orderpro_product_supplier_export(db_session, path)
+
+    assert plan.rows[0]["product_id"] == product.id
+    assert plan.rows[0]["supplier_id"] == supplier.id
+    assert plan.rows[0]["classification"] == "suggestion"
+    assert plan.rows[0]["supplier_match_method"] == "unique_name"
+
+
 def test_header_diagnostics_include_detected_mapping_and_invalid_reasons(db_session, tmp_path):
     path = _write_csv(
         tmp_path,
