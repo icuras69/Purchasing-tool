@@ -11,7 +11,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -238,10 +239,40 @@ button:disabled {
 }
 
 .detail-panel select,
-.detail-panel input {
+.detail-panel input,
+.detail-panel textarea {
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   padding: 8px 9px;
+}
+
+.supplier-edit-form {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 16px;
+}
+
+.supplier-edit-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.supplier-notes-field,
+.supplier-form-actions {
+  grid-column: 1 / -1;
+}
+
+.supplier-notes-field textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.supplier-form-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .muted-text {
@@ -509,7 +540,8 @@ button:disabled {
   .forecast-grid,
   .filter-grid,
   .summary-grid,
-  .mapping-form {
+  .mapping-form,
+  .supplier-edit-form {
     display: grid;
     grid-template-columns: 1fr;
   }

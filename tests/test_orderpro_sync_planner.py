@@ -963,6 +963,44 @@ def test_apply_updates_existing_suppliers_and_products(db_session):
     assert product.supplier_sku == "NEW-SKU"
 
 
+def test_apply_preserves_locally_managed_supplier_contact_fields(db_session):
+    supplier = Supplier(
+        name="ED&F Man",
+        normalized_name="ed&f man",
+        orderpro_id="18",
+        orderpro_code="ED&FMAN",
+        email="local@example.test",
+        phone="local-phone",
+        local_profile_override=True,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    report = apply_orderpro_supplier_product_sync(
+        db_session,
+        suppliers=[
+            {
+                "id": 18,
+                "code": "ED&FMAN",
+                "name": "ED&F Man Updated",
+                "email": "orderpro@example.test",
+                "phone": "orderpro-phone",
+                "is_active": False,
+            }
+        ],
+        products=[],
+        product_csv_rows={},
+    )
+
+    db_session.refresh(supplier)
+
+    assert report["suppliers"]["summary"]["updated"] == 1
+    assert supplier.name == "ED&F Man Updated"
+    assert supplier.is_active is False
+    assert supplier.email == "local@example.test"
+    assert supplier.phone == "local-phone"
+
+
 def test_apply_missing_supplier_code_leaves_product_supplier_id_null_and_reports_warning(db_session):
     report = apply_orderpro_supplier_product_sync(
         db_session,

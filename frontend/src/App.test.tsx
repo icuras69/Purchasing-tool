@@ -64,6 +64,7 @@ import {
   loginAdmin,
   listRecommendations,
   listPurchaseOrders,
+  listSupplierRecords,
   listSuppliers,
   receivePurchaseOrder,
   rejectRecommendation,
@@ -76,6 +77,7 @@ import {
   setUnauthorizedHandler,
   submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
+  updateSupplier,
 } from "./api";
 import type {
   ForecastResponse,
@@ -106,6 +108,7 @@ import type {
   SupplierAssignmentReviewSummary,
   SupplierForecastResponse,
   SupplierOption,
+  SupplierRecord,
   WeakMapping,
 } from "./types";
 
@@ -140,6 +143,8 @@ vi.mock("./api", () => ({
   assignManualSupplierCleanupCandidate: vi.fn(),
   reviewManualSupplierCleanupCandidate: vi.fn(),
   listSuppliers: vi.fn(),
+  listSupplierRecords: vi.fn(),
+  updateSupplier: vi.fn(),
   confirmSupplierAssignmentReview: vi.fn(),
   rejectSupplierAssignmentReview: vi.fn(),
   getSeasonalitySummary: vi.fn(),
@@ -638,6 +643,36 @@ function mockSupplierOption(overrides: Partial<SupplierOption> = {}): SupplierOp
     orderpro_code: "SUG",
     is_active: true,
     lead_time_days: 7,
+    ...overrides,
+  };
+}
+
+function mockSupplierRecord(overrides: Partial<SupplierRecord> = {}): SupplierRecord {
+  return {
+    ...mockSupplierOption({
+      id: 18,
+      name: "ED&F Man",
+      orderpro_id: "18",
+      orderpro_code: "ED&FMAN",
+      lead_time_days: null,
+    }),
+    source_system: "orderpro",
+    local_profile_override: false,
+    last_synced_at: "2026-08-21T09:00:00",
+    email: "sales@edfman.test",
+    phone: null,
+    website: null,
+    contact_method: null,
+    payment_terms: null,
+    lead_time_raw: null,
+    lead_time_min_days: null,
+    lead_time_max_days: null,
+    notes: null,
+    active_skus: 2,
+    lead_time_needs_review: true,
+    product_count: 2,
+    active_product_count: 2,
+    writes_to_orderpro: false,
     ...overrides,
   };
 }
@@ -1334,6 +1369,15 @@ beforeEach(() => {
   vi.mocked(assignManualSupplierCleanupCandidate).mockResolvedValue({});
   vi.mocked(reviewManualSupplierCleanupCandidate).mockResolvedValue({});
   vi.mocked(listSuppliers).mockResolvedValue([mockSupplierOption()]);
+  vi.mocked(listSupplierRecords).mockResolvedValue([mockSupplierRecord()]);
+  vi.mocked(updateSupplier).mockImplementation(async (_supplierId, payload) =>
+    mockSupplierRecord({
+      ...payload,
+      local_profile_override: true,
+      lead_time_raw: payload.lead_time_days ? `${payload.lead_time_days} days` : null,
+      lead_time_needs_review: !payload.lead_time_days,
+    }),
+  );
   vi.mocked(confirmSupplierAssignmentReview).mockResolvedValue({});
   vi.mocked(rejectSupplierAssignmentReview).mockResolvedValue({});
   vi.mocked(getSeasonalitySummary).mockResolvedValue(mockSeasonalitySummary());
@@ -1541,6 +1585,7 @@ describe("App mapping review workflow", () => {
     render(<App />);
 
     expect(screen.getByRole("button", { name: "Products" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Suppliers" })).toBeInTheDocument();
     expect(screen.getByLabelText("Suggested demo flow")).toBeInTheDocument();
     expect(
       screen.getByText("Search and review the current product catalogue using our internal Product ID."),
@@ -1559,6 +1604,37 @@ describe("App mapping review workflow", () => {
     expect(screen.getByRole("button", { name: "Recommendations" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Seasonality" })).toBeInTheDocument();
     expect(await screen.findByText("No products found.")).toBeInTheDocument();
+  });
+
+  it("edits supplier details locally and makes the lead time visible", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Suppliers" }));
+
+    const workspace = await screen.findByLabelText("Supplier management workspace");
+    expect(
+      within(workspace).getByText(
+        "Changes made here are saved in Purchasing AI only and are never sent to OrderPro.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(workspace).getByText("ED&F Man")).toBeInTheDocument();
+    expect(within(workspace).getByText("2 active / 2 total")).toBeInTheDocument();
+
+    await userEvent.click(within(workspace).getByRole("button", { name: "Edit" }));
+    const editPanel = await screen.findByLabelText("Edit supplier");
+    await userEvent.type(within(editPanel).getByLabelText("Lead time (days)"), "10");
+    await userEvent.type(within(editPanel).getByLabelText("Payment terms"), "Net 30");
+    await userEvent.click(within(editPanel).getByRole("button", { name: "Save supplier" }));
+
+    expect(updateSupplier).toHaveBeenCalledWith(
+      18,
+      expect.objectContaining({
+        email: "sales@edfman.test",
+        lead_time_days: 10,
+        payment_terms: "Net 30",
+      }),
+    );
+    expect(await screen.findByText("ED&F Man supplier data saved in Purchasing AI.")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Supplier records")).getByText("10 days")).toBeInTheDocument();
   });
 
   it("forecast reconciliation summary, categories, and source labels render", async () => {

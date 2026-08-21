@@ -49,6 +49,8 @@ import type {
   SupplierForecastDraftRequest,
   SupplierForecastResponse,
   SupplierOption,
+  SupplierRecord,
+  SupplierUpdate,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
@@ -234,6 +236,20 @@ export function fetchProductSuppliers(): Promise<ProductSupplierMapping[]> {
 
 export function listSuppliers(): Promise<SupplierOption[]> {
   return fetchJson<SupplierOption[]>("/suppliers", "suppliers");
+}
+
+export function listSupplierRecords(): Promise<SupplierRecord[]> {
+  return fetchJson<SupplierRecord[]>("/suppliers", "supplier records");
+}
+
+export function updateSupplier(
+  supplierId: number,
+  payload: SupplierUpdate,
+): Promise<SupplierRecord> {
+  return sendJson<SupplierRecord>(`/suppliers/${supplierId}`, "supplier", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function fetchProductForecast(productId: number): Promise<ForecastResponse> {

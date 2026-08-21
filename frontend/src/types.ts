@@ -98,6 +98,38 @@ export interface SupplierOption {
   lead_time_days: number | null;
 }
 
+export interface SupplierRecord extends SupplierOption {
+  source_system: string | null;
+  local_profile_override: boolean;
+  last_synced_at: string | null;
+  email: string | null;
+  phone: string | null;
+  website: string | null;
+  contact_method: string | null;
+  payment_terms: string | null;
+  lead_time_raw: string | null;
+  lead_time_min_days: number | null;
+  lead_time_max_days: number | null;
+  notes: string | null;
+  active_skus: number;
+  lead_time_needs_review: boolean;
+  product_count: number;
+  active_product_count: number;
+  writes_to_orderpro: false;
+}
+
+export interface SupplierUpdate {
+  email?: string | null;
+  phone?: string | null;
+  website?: string | null;
+  contact_method?: string | null;
+  payment_terms?: string | null;
+  lead_time_days?: number | null;
+  lead_time_min_days?: number | null;
+  lead_time_max_days?: number | null;
+  notes?: string | null;
+}
+
 export interface SupplierAssignmentReviewSummary {
   total_orderpro_products: number;
   missing_supplier_products: number;

@@ -61,6 +61,7 @@ import {
   issuePurchaseOrder,
   listRecommendations,
   listPurchaseOrders,
+  listSupplierRecords,
   listSuppliers,
   receivePurchaseOrder,
   rejectRecommendation,
@@ -74,6 +75,7 @@ import {
   submitPurchaseOrderForApproval,
   unsetPreferredProductSupplier,
   updatePurchaseOrderLine,
+  updateSupplier,
 } from "./api";
 import { filterProductsByQuery, isProductMapped, supplierDisplayName } from "./productDisplay";
 import type {
@@ -113,6 +115,8 @@ import type {
   SupplierAssignmentReviewSummary,
   SupplierForecastResponse,
   SupplierOption,
+  SupplierRecord,
+  SupplierUpdate,
   UpdatePurchaseOrderLineRequest,
   WeakMapping,
 } from "./types";
@@ -122,6 +126,7 @@ type TabId =
   | "unmapped"
   | "weak"
   | "mappings"
+  | "suppliers"
   | "forecast"
   | "supplier-forecast"
   | "forecast-readiness"
@@ -154,6 +159,7 @@ interface ResourceState<T> {
 
 const tabs: Array<{ id: TabId; label: string }> = [
   { id: "products", label: "Products" },
+  { id: "suppliers", label: "Suppliers" },
   { id: "mappings", label: "Supplier Mapping" },
   { id: "supplier-cleanup", label: "Supplier Cleanup" },
   { id: "demand-history", label: "Demand History" },
@@ -983,6 +989,8 @@ function PurchasingApp({
           />
         </div>
       )}
+
+      {activeTab === "suppliers" && <SuppliersPanel />}
 
       {activeTab === "forecast" && <ForecastPanel />}
 
@@ -3404,6 +3412,356 @@ function RecommendationDetail({
         </dl>
       </section>
     </section>
+  );
+}
+
+type SupplierEditForm = {
+  email: string;
+  phone: string;
+  website: string;
+  contact_method: string;
+  payment_terms: string;
+  lead_time_days: string;
+  lead_time_min_days: string;
+  lead_time_max_days: string;
+  notes: string;
+};
+
+function supplierEditForm(supplier: SupplierRecord): SupplierEditForm {
+  return {
+    email: supplier.email ?? "",
+    phone: supplier.phone ?? "",
+    website: supplier.website ?? "",
+    contact_method: supplier.contact_method ?? "",
+    payment_terms: supplier.payment_terms ?? "",
+    lead_time_days: supplier.lead_time_days?.toString() ?? "",
+    lead_time_min_days: supplier.lead_time_min_days?.toString() ?? "",
+    lead_time_max_days: supplier.lead_time_max_days?.toString() ?? "",
+    notes: supplier.notes ?? "",
+  };
+}
+
+function optionalSupplierInteger(value: string, label: string): number | null {
+  if (!value.trim()) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
+    throw new Error(`${label} must be a whole number from 1 to 365.`);
+  }
+  return parsed;
+}
+
+function optionalSupplierText(value: string): string | null {
+  return value.trim() || null;
+}
+
+function SuppliersPanel() {
+  const [suppliers, setSuppliers] = useState<SupplierRecord[]>([]);
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<SupplierRecord | null>(null);
+  const [form, setForm] = useState<SupplierEditForm | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const loadSupplierRecords = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setSuppliers(await listSupplierRecords());
+    } catch (loadError) {
+      setError((loadError as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSupplierRecords();
+  }, [loadSupplierRecords]);
+
+  const visibleSuppliers = useMemo(() => {
+    const normalizedSearch = search.trim().toLocaleLowerCase();
+    if (!normalizedSearch) {
+      return suppliers;
+    }
+    return suppliers.filter((supplier) =>
+      [
+        supplier.name,
+        supplier.orderpro_code,
+        supplier.orderpro_id,
+        supplier.email,
+        supplier.phone,
+      ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch)),
+    );
+  }, [search, suppliers]);
+
+  function beginEditing(supplier: SupplierRecord) {
+    setSelected(supplier);
+    setForm(supplierEditForm(supplier));
+    setError(null);
+    setSuccess(null);
+  }
+
+  function updateSupplierField(field: keyof SupplierEditForm, value: string) {
+    setForm((current) => (current ? { ...current, [field]: value } : current));
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected || !form) {
+      return;
+    }
+
+    let payload: SupplierUpdate;
+    try {
+      const leadTimeDays = optionalSupplierInteger(form.lead_time_days, "Lead time");
+      const minimumLeadTime = optionalSupplierInteger(form.lead_time_min_days, "Minimum lead time");
+      const maximumLeadTime = optionalSupplierInteger(form.lead_time_max_days, "Maximum lead time");
+      if (minimumLeadTime !== null && maximumLeadTime !== null && minimumLeadTime > maximumLeadTime) {
+        throw new Error("Minimum lead time cannot be greater than maximum lead time.");
+      }
+      if (leadTimeDays !== null && minimumLeadTime !== null && leadTimeDays < minimumLeadTime) {
+        throw new Error("Lead time cannot be below the minimum lead time.");
+      }
+      if (leadTimeDays !== null && maximumLeadTime !== null && leadTimeDays > maximumLeadTime) {
+        throw new Error("Lead time cannot exceed the maximum lead time.");
+      }
+      payload = {
+        email: optionalSupplierText(form.email),
+        phone: optionalSupplierText(form.phone),
+        website: optionalSupplierText(form.website),
+        contact_method: optionalSupplierText(form.contact_method),
+        payment_terms: optionalSupplierText(form.payment_terms),
+        lead_time_days: leadTimeDays,
+        lead_time_min_days: minimumLeadTime,
+        lead_time_max_days: maximumLeadTime,
+        notes: optionalSupplierText(form.notes),
+      };
+    } catch (validationError) {
+      setError((validationError as Error).message);
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const saved = await updateSupplier(selected.id, payload);
+      setSuppliers((current) => current.map((supplier) => (supplier.id === saved.id ? saved : supplier)));
+      setSelected(saved);
+      setForm(supplierEditForm(saved));
+      setSuccess(`${saved.name} supplier data saved in Purchasing AI.`);
+    } catch (saveError) {
+      setError((saveError as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const activeSuppliers = suppliers.filter((supplier) => supplier.is_active).length;
+  const missingLeadTime = suppliers.filter(
+    (supplier) => supplier.lead_time_days === null || supplier.lead_time_days <= 0,
+  ).length;
+  const assignedProducts = suppliers.reduce((total, supplier) => total + supplier.active_product_count, 0);
+
+  return (
+    <div className="review-stack" aria-label="Supplier management workspace">
+      <section className="detail-panel">
+        <div className="section-header">
+          <div>
+            <h2>Suppliers</h2>
+            <p className="muted-text">
+              View supplier records and maintain the local purchasing details used by forecasts.
+            </p>
+          </div>
+          <button disabled={loading} onClick={() => void loadSupplierRecords()} type="button">
+            Refresh
+          </button>
+        </div>
+        <div className="state warning">
+          Changes made here are saved in Purchasing AI only and are never sent to OrderPro.
+        </div>
+        <dl className="summary-grid" aria-label="Supplier summary">
+          <div className="summary-card">
+            <dt>Total suppliers</dt>
+            <dd>{suppliers.length}</dd>
+          </div>
+          <div className="summary-card">
+            <dt>Active suppliers</dt>
+            <dd>{activeSuppliers}</dd>
+          </div>
+          <div className="summary-card">
+            <dt>Missing lead time</dt>
+            <dd>{missingLeadTime}</dd>
+          </div>
+          <div className="summary-card">
+            <dt>Assigned active products</dt>
+            <dd>{assignedProducts}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="detail-panel" aria-label="Supplier filters">
+        <label>
+          <span>Search suppliers</span>
+          <input
+            aria-label="Search suppliers"
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Name, code, ID, email, or phone"
+            value={search}
+          />
+        </label>
+      </section>
+
+      {loading && <div className="state">Loading suppliers...</div>}
+      {error && <div className="state error">Supplier data failed: {error}</div>}
+      {success && <div className="state success">{success}</div>}
+
+      {!loading && (
+        <section className="table-wrap" aria-label="Supplier records">
+          <table>
+            <thead>
+              <tr>
+                <th>Supplier</th>
+                <th>Products</th>
+                <th>Lead time</th>
+                <th>Contact</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleSuppliers.map((supplier) => (
+                <tr key={supplier.id}>
+                  <td>
+                    <strong>{supplier.name}</strong>
+                    <div className="muted-text">
+                      ID {supplier.id} · {supplier.orderpro_code ?? "No OrderPro code"}
+                    </div>
+                  </td>
+                  <td>
+                    {supplier.active_product_count} active / {supplier.product_count} total
+                  </td>
+                  <td>
+                    {supplier.lead_time_days ? `${supplier.lead_time_days} days` : "Missing"}
+                    {supplier.lead_time_needs_review && <div className="review-need">Needs review</div>}
+                  </td>
+                  <td>
+                    <div>{supplier.email ?? "No email"}</div>
+                    <div className="muted-text">{supplier.phone ?? supplier.contact_method ?? "No contact method"}</div>
+                  </td>
+                  <td>
+                    <span className={`status ${supplier.is_active ? "mapped" : "row-rejected"}`}>
+                      {supplier.is_active ? "Active" : "Inactive"}
+                    </span>
+                  </td>
+                  <td>
+                    <button onClick={() => beginEditing(supplier)} type="button">
+                      Edit
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {visibleSuppliers.length === 0 && (
+                <tr>
+                  <td colSpan={6}>No suppliers match the current search.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {selected && form && (
+        <section className="detail-panel" aria-label="Edit supplier">
+          <div className="section-header">
+            <div>
+              <h2>Edit {selected.name}</h2>
+              <p className="muted-text">
+                OrderPro ID {selected.orderpro_id ?? "-"} · code {selected.orderpro_code ?? "-"} · source {selected.source_system ?? "local"}
+              </p>
+            </div>
+            <button
+              disabled={saving}
+              onClick={() => {
+                setSelected(null);
+                setForm(null);
+                setError(null);
+              }}
+              type="button"
+            >
+              Close
+            </button>
+          </div>
+          <form className="supplier-edit-form" onSubmit={handleSave}>
+            <label>
+              <span>Email</span>
+              <input onChange={(event) => updateSupplierField("email", event.target.value)} value={form.email} />
+            </label>
+            <label>
+              <span>Phone</span>
+              <input onChange={(event) => updateSupplierField("phone", event.target.value)} value={form.phone} />
+            </label>
+            <label>
+              <span>Website</span>
+              <input onChange={(event) => updateSupplierField("website", event.target.value)} value={form.website} />
+            </label>
+            <label>
+              <span>Preferred contact method</span>
+              <input onChange={(event) => updateSupplierField("contact_method", event.target.value)} value={form.contact_method} />
+            </label>
+            <label>
+              <span>Payment terms</span>
+              <input onChange={(event) => updateSupplierField("payment_terms", event.target.value)} value={form.payment_terms} />
+            </label>
+            <label>
+              <span>Lead time (days)</span>
+              <input
+                aria-label="Lead time (days)"
+                max="365"
+                min="1"
+                onChange={(event) => updateSupplierField("lead_time_days", event.target.value)}
+                type="number"
+                value={form.lead_time_days}
+              />
+            </label>
+            <label>
+              <span>Minimum lead time (days)</span>
+              <input
+                max="365"
+                min="1"
+                onChange={(event) => updateSupplierField("lead_time_min_days", event.target.value)}
+                type="number"
+                value={form.lead_time_min_days}
+              />
+            </label>
+            <label>
+              <span>Maximum lead time (days)</span>
+              <input
+                max="365"
+                min="1"
+                onChange={(event) => updateSupplierField("lead_time_max_days", event.target.value)}
+                type="number"
+                value={form.lead_time_max_days}
+              />
+            </label>
+            <label className="supplier-notes-field">
+              <span>Notes</span>
+              <textarea onChange={(event) => updateSupplierField("notes", event.target.value)} value={form.notes} />
+            </label>
+            <div className="supplier-form-actions">
+              <button disabled={saving} type="submit">
+                {saving ? "Saving..." : "Save supplier"}
+              </button>
+              <span className="muted-text">This update will not call the OrderPro API.</span>
+            </div>
+          </form>
+        </section>
+      )}
+    </div>
   );
 }
 

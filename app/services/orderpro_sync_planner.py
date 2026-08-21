@@ -508,6 +508,7 @@ def apply_supplier_sync(
             continue
 
         desired = safe_supplier_update_fields(db, local, desired)
+        desired = preserve_local_supplier_profile(local, desired)
         changes = changed_fields(local, desired)
         if changes:
             for field, value in desired.items():
@@ -705,6 +706,7 @@ def plan_supplier_sync(db: Session, suppliers: list[dict[str, Any]]) -> dict[str
             to_create.append(desired)
             continue
 
+        desired = preserve_local_supplier_profile(local, desired)
         changes = changed_fields(local, desired)
         if changes:
             update_row = {"local_id": local.id, "orderpro_id": orderpro_id, "orderpro_code": code, "changes": changes}
@@ -1158,6 +1160,16 @@ def desired_supplier_fields(row: dict[str, Any]) -> dict[str, Any]:
         "phone": clean_text(row.get("phone")),
         "is_active": to_bool(row.get("is_active"), default=True),
         "source_system": "orderpro",
+    }
+
+
+def preserve_local_supplier_profile(local: Supplier, desired: dict[str, Any]) -> dict[str, Any]:
+    if not local.local_profile_override:
+        return desired
+    return {
+        **desired,
+        "email": local.email,
+        "phone": local.phone,
     }
 
 

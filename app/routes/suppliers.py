@@ -12,6 +12,7 @@ from app.schemas.purchase_order import (
     SupplierForecastResponse,
 )
 from app.schemas.product_supplier import ProductSupplierMappingResponse
+from app.schemas.supplier import SupplierResponse, SupplierUpdate
 from app.services.purchase_order_drafting import (
     DraftPurchaseOrderError,
     build_supplier_forecast,
@@ -21,20 +22,111 @@ from app.services.purchase_order_drafting import (
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 
 
-@router.get("")
+def serialize_supplier(supplier: Supplier) -> dict:
+    products = supplier.products
+    return {
+        "id": supplier.id,
+        "name": supplier.name,
+        "orderpro_id": supplier.orderpro_id,
+        "orderpro_code": supplier.orderpro_code,
+        "source_system": supplier.source_system,
+        "is_active": supplier.is_active,
+        "local_profile_override": supplier.local_profile_override,
+        "last_synced_at": supplier.last_synced_at,
+        "email": supplier.email,
+        "phone": supplier.phone,
+        "website": supplier.website,
+        "contact_method": supplier.contact_method,
+        "payment_terms": supplier.payment_terms,
+        "lead_time_raw": supplier.lead_time_raw,
+        "lead_time_days": supplier.lead_time_days,
+        "lead_time_min_days": supplier.lead_time_min_days,
+        "lead_time_max_days": supplier.lead_time_max_days,
+        "notes": supplier.notes,
+        "active_skus": supplier.active_skus,
+        "lead_time_needs_review": supplier.lead_time_needs_review,
+        "product_count": len(products),
+        "active_product_count": sum(1 for product in products if product.is_active),
+        "writes_to_orderpro": False,
+    }
+
+
+@router.get("", response_model=list[SupplierResponse])
 def list_suppliers(db: Session = Depends(get_db)):
-    suppliers = db.query(Supplier).order_by(Supplier.name.asc()).all()
-    return [
-        {
-            "id": supplier.id,
-            "name": supplier.name,
-            "orderpro_id": supplier.orderpro_id,
-            "orderpro_code": supplier.orderpro_code,
-            "is_active": supplier.is_active,
-            "lead_time_days": supplier.lead_time_days,
-        }
-        for supplier in suppliers
-    ]
+    suppliers = (
+        db.query(Supplier)
+        .options(selectinload(Supplier.products))
+        .order_by(Supplier.name.asc())
+        .all()
+    )
+    return [serialize_supplier(supplier) for supplier in suppliers]
+
+
+@router.get("/{supplier_id}", response_model=SupplierResponse)
+def get_supplier(supplier_id: int, db: Session = Depends(get_db)):
+    supplier = (
+        db.query(Supplier)
+        .options(selectinload(Supplier.products))
+        .filter(Supplier.id == supplier_id)
+        .one_or_none()
+    )
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found.")
+    return serialize_supplier(supplier)
+
+
+@router.patch("/{supplier_id}", response_model=SupplierResponse)
+def update_supplier(
+    supplier_id: int,
+    payload: SupplierUpdate,
+    db: Session = Depends(get_db),
+):
+    supplier = (
+        db.query(Supplier)
+        .options(selectinload(Supplier.products))
+        .filter(Supplier.id == supplier_id)
+        .one_or_none()
+    )
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found.")
+
+    changes = payload.model_dump(exclude_unset=True)
+    final_lead_time_days = changes.get("lead_time_days", supplier.lead_time_days)
+    final_min_days = changes.get("lead_time_min_days", supplier.lead_time_min_days)
+    final_max_days = changes.get("lead_time_max_days", supplier.lead_time_max_days)
+    if final_min_days is not None and final_max_days is not None and final_min_days > final_max_days:
+        raise HTTPException(
+            status_code=422,
+            detail="Minimum lead time cannot be greater than maximum lead time.",
+        )
+    if (
+        final_lead_time_days is not None
+        and final_min_days is not None
+        and final_lead_time_days < final_min_days
+    ):
+        raise HTTPException(status_code=422, detail="Lead time cannot be below the minimum lead time.")
+    if (
+        final_lead_time_days is not None
+        and final_max_days is not None
+        and final_lead_time_days > final_max_days
+    ):
+        raise HTTPException(status_code=422, detail="Lead time cannot exceed the maximum lead time.")
+
+    for field, value in changes.items():
+        setattr(supplier, field, value)
+    if changes:
+        supplier.local_profile_override = True
+    if "lead_time_days" in changes:
+        if final_lead_time_days is None:
+            supplier.lead_time_raw = None
+            supplier.lead_time_needs_review = True
+        else:
+            supplier.lead_time_raw = f"{final_lead_time_days} days"
+            supplier.lead_time_needs_review = False
+
+    db.commit()
+    db.refresh(supplier)
+    return serialize_supplier(supplier)
 
 
 @router.get("/{supplier_id}/products", response_model=list[ProductSupplierMappingResponse])

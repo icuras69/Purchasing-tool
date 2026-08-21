@@ -32,6 +32,7 @@ import {
   searchManualSupplierCleanupSuppliers,
   setUnauthorizedHandler,
   storeAccessToken,
+  updateSupplier,
 } from "./api";
 
 describe("apiUrl", () => {
@@ -104,6 +105,26 @@ describe("apiUrl", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/products/?search=3020"),
       expect.any(Object),
+    );
+  });
+
+  it("updates supplier data through the local supplier endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: 18, name: "ED&F Man", lead_time_days: 10 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateSupplier(18, { lead_time_days: 10, payment_terms: "Net 30" });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/suppliers/18"),
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ lead_time_days: 10, payment_terms: "Net 30" }),
+      }),
     );
   });
 

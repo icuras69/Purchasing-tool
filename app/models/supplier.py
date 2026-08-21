@@ -14,6 +14,7 @@ class Supplier(Base):
     orderpro_code: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True, index=True)
     source_system: Mapped[str | None] = mapped_column(String(50), nullable=True, default="local")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    local_profile_override: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
