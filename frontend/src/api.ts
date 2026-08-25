@@ -5,6 +5,7 @@ import type {
   ForecastReconciliationSummary,
   ForecastInputAudit,
   ForecastReadinessSummary,
+  InventorySyncResult,
   AddPurchaseOrderLineRequest,
   ApprovePurchaseOrderRequest,
   AuthTokenResponse,
@@ -254,6 +255,12 @@ export function updateSupplier(
 
 export function fetchProductForecast(productId: number): Promise<ForecastResponse> {
   return fetchJson<ForecastResponse>(`/products/${productId}/forecast`, "product forecast");
+}
+
+export function refreshOrderProInventory(): Promise<InventorySyncResult> {
+  return sendJson<InventorySyncResult>("/inventory/sync/orderpro", "OrderPro inventory refresh", {
+    method: "POST",
+  });
 }
 
 export function getForecastReadinessSummary(): Promise<ForecastReadinessSummary> {

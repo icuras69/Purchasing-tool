@@ -263,6 +263,12 @@ button:disabled {
   grid-column: 1 / -1;
 }
 
+.supplier-stock-controls {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+}
+
 .supplier-notes-field textarea {
   min-height: 96px;
   resize: vertical;
@@ -541,7 +547,8 @@ button:disabled {
   .filter-grid,
   .summary-grid,
   .mapping-form,
-  .supplier-edit-form {
+  .supplier-edit-form,
+  .supplier-stock-controls {
     display: grid;
     grid-template-columns: 1fr;
   }

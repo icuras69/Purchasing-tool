@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PurchaseOrderCreate(BaseModel):
@@ -92,10 +92,19 @@ class DraftPurchaseOrderFromProductsResponse(BaseModel):
 class SupplierForecastResponse(BaseModel):
     supplier_id: int
     supplier_name: str | None
+    supplier_code: str | None = None
     product_count: int
     forecasts: list[dict]
     products_needing_reorder: list[int]
     products_missing_data: list[int]
+    low_stock_products: list[int] = Field(default_factory=list)
+    out_of_stock_products: list[int] = Field(default_factory=list)
+    incoming_covered_products: list[int] = Field(default_factory=list)
+    high_risk_products: list[int] = Field(default_factory=list)
+    stock_status: str = "healthy"
+    inventory_last_synced_at: datetime | None = None
+    total_current_stock: float = 0
+    total_incoming_quantity: float = 0
     total_recommended_quantity: float
     total_estimated_cost: float | None
 

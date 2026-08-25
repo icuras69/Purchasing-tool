@@ -67,6 +67,7 @@ class ForecastResponse(BaseModel):
 
     current_stock: float
     inventory_source: str
+    inventory_last_synced_at: datetime | None = None
 
     avg_daily_usage: float
     demand_source: str | None = None

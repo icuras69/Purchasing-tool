@@ -272,13 +272,44 @@ def build_supplier_forecast(db: Session, supplier_id: int) -> dict:
         .all()
     )
     forecasts = [build_forecast(db, product) for product in products]
+    inventory_forecasts = [
+        forecast for forecast in forecasts if forecast.get("recommended_action") != "ignore"
+    ]
     products_needing_reorder = [
-        forecast["product_id"] for forecast in forecasts if float(forecast.get("recommended_qty") or 0) > 0
+        forecast["product_id"]
+        for forecast in inventory_forecasts
+        if float(forecast.get("recommended_qty") or 0) > 0
     ]
     products_missing_data = [
         forecast["product_id"]
-        for forecast in forecasts
-        if forecast.get("recommended_action") in {"needs_supplier_mapping", "needs_inventory_sync"}
+        for forecast in inventory_forecasts
+        if supplier_forecast_row_has_missing_data(forecast)
+    ]
+    low_stock_products = [
+        forecast["product_id"]
+        for forecast in inventory_forecasts
+        if supplier_forecast_row_is_low_stock(forecast)
+    ]
+    out_of_stock_products = [
+        forecast["product_id"]
+        for forecast in inventory_forecasts
+        if float(forecast.get("current_stock") or 0) <= 0
+    ]
+    incoming_covered_products = [
+        forecast["product_id"]
+        for forecast in inventory_forecasts
+        if supplier_forecast_row_is_incoming_covered(forecast)
+    ]
+    high_risk_products = [
+        forecast["product_id"]
+        for forecast in inventory_forecasts
+        if forecast.get("risk_level") in {"high", "critical"}
+        or float(forecast.get("net_available_stock") or 0) < 0
+    ]
+    inventory_synced_times = [
+        forecast.get("inventory_last_synced_at")
+        for forecast in inventory_forecasts
+        if forecast.get("inventory_last_synced_at") is not None
     ]
     total_recommended_quantity = round(
         sum(float(forecast.get("recommended_qty") or 0) for forecast in forecasts),
@@ -289,17 +320,70 @@ def build_supplier_forecast(db: Session, supplier_id: int) -> dict:
         for forecast in forecasts
         if forecast.get("estimated_unit_cost") is not None and float(forecast.get("recommended_qty") or 0) > 0
     ]
+    if high_risk_products:
+        stock_status = "critical"
+    elif products_needing_reorder:
+        stock_status = "low_stock"
+    elif low_stock_products or incoming_covered_products or out_of_stock_products or products_missing_data:
+        stock_status = "watch"
+    else:
+        stock_status = "healthy"
 
     return {
         "supplier_id": supplier.id,
         "supplier_name": supplier.name,
+        "supplier_code": supplier.orderpro_code,
         "product_count": len(products),
         "forecasts": forecasts,
         "products_needing_reorder": products_needing_reorder,
         "products_missing_data": products_missing_data,
+        "low_stock_products": low_stock_products,
+        "out_of_stock_products": out_of_stock_products,
+        "incoming_covered_products": incoming_covered_products,
+        "high_risk_products": high_risk_products,
+        "stock_status": stock_status,
+        "inventory_last_synced_at": max(inventory_synced_times) if inventory_synced_times else None,
+        "total_current_stock": round(
+            sum(float(forecast.get("current_stock") or 0) for forecast in inventory_forecasts),
+            2,
+        ),
+        "total_incoming_quantity": round(
+            sum(float(forecast.get("incoming_qty") or 0) for forecast in inventory_forecasts),
+            2,
+        ),
         "total_recommended_quantity": total_recommended_quantity,
         "total_estimated_cost": round(sum(estimated_costs), 2) if estimated_costs else None,
     }
+
+
+def supplier_forecast_row_has_missing_data(forecast: dict) -> bool:
+    if forecast.get("recommended_action") in {"needs_supplier_mapping", "needs_inventory_sync"}:
+        return True
+    if forecast.get("inventory_source") != "orderpro_current_stock_cache":
+        return True
+    if forecast.get("input_blocking_issues"):
+        return True
+    if float(forecast.get("lead_time_days_used") or 0) <= 0:
+        return True
+    return forecast.get("demand_source") == "none" or int(forecast.get("shipped_order_count") or 0) <= 0
+
+
+def supplier_forecast_row_is_low_stock(forecast: dict) -> bool:
+    has_forecast_inputs = (
+        float(forecast.get("avg_daily_usage") or 0) > 0
+        and float(forecast.get("lead_time_days_used") or 0) > 0
+    )
+    if not has_forecast_inputs:
+        return False
+    return float(forecast.get("current_stock") or 0) <= float(forecast.get("reorder_point") or 0)
+
+
+def supplier_forecast_row_is_incoming_covered(forecast: dict) -> bool:
+    return (
+        float(forecast.get("incoming_qty") or 0) > 0
+        and float(forecast.get("recommended_qty_before_inbound") or 0) > 0
+        and float(forecast.get("recommended_qty_after_inbound") or 0) <= 0
+    )
 
 
 def create_draft_po_from_supplier_forecast(

@@ -147,3 +147,23 @@ def test_supplier_lead_time_update_is_used_by_linked_product_forecast(client, db
 
     assert context["lead_time_days_used"] == 10
     assert context["lead_time_source"] == "supplier_record"
+
+
+def test_supplier_forecast_includes_supplier_level_stock_warning_summary(client, db_session):
+    supplier = seed_supplier(db_session)
+    active_product = (
+        db_session.query(Product)
+        .filter(Product.supplier_id == supplier.id, Product.is_active.is_(True))
+        .one()
+    )
+
+    response = client.get(f"/suppliers/{supplier.id}/forecast")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["supplier_code"] == "ED&FMAN"
+    assert body["total_current_stock"] == 0
+    assert body["out_of_stock_products"] == [active_product.id]
+    assert body["products_missing_data"] == [active_product.id]
+    assert body["stock_status"] == "watch"
+    assert body["inventory_last_synced_at"] is None

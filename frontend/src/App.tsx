@@ -64,6 +64,7 @@ import {
   listSupplierRecords,
   listSuppliers,
   receivePurchaseOrder,
+  refreshOrderProInventory,
   rejectRecommendation,
   rejectProductSupplier,
   rejectSupplierAssignmentReview,
@@ -87,6 +88,7 @@ import type {
   DemandHistoryProduct,
   DemandHistorySummary,
   ForecastSupplierContext,
+  InventorySyncResult,
   CurrentAdmin,
   ManualSupplierCleanupCandidate,
   ManualSupplierCleanupSummary,
@@ -127,6 +129,7 @@ type TabId =
   | "weak"
   | "mappings"
   | "suppliers"
+  | "supplier-stock"
   | "forecast"
   | "supplier-forecast"
   | "forecast-readiness"
@@ -145,6 +148,15 @@ type SupplierForecastFilter =
   | "no_history"
   | "missing_lead_time";
 
+type SupplierStockFilter =
+  | "all"
+  | "low_stock"
+  | "needs_reorder"
+  | "out_of_stock"
+  | "high_risk"
+  | "incoming_covered"
+  | "incomplete";
+
 type StaleDemandDecisionDraft = {
   decision: string;
   reviewed_by: string;
@@ -160,6 +172,7 @@ interface ResourceState<T> {
 const tabs: Array<{ id: TabId; label: string }> = [
   { id: "products", label: "Products" },
   { id: "suppliers", label: "Suppliers" },
+  { id: "supplier-stock", label: "Supplier Stock" },
   { id: "mappings", label: "Supplier Mapping" },
   { id: "supplier-cleanup", label: "Supplier Cleanup" },
   { id: "demand-history", label: "Demand History" },
@@ -355,6 +368,48 @@ function forecastHasNoDemandHistory(row: ForecastResponse): boolean {
 
 function forecastMissingLeadTime(row: ForecastResponse): boolean {
   return Number(row.lead_time_days_used || 0) <= 0 || row.lead_time_source === "missing";
+}
+
+function supplierStockStatusLabel(status: string): string {
+  if (status === "critical") return "Critical stock risk";
+  if (status === "low_stock") return "Low stock — reorder required";
+  if (status === "watch") return "Watch stock and data gaps";
+  if (status === "healthy") return "Stock healthy";
+  return status;
+}
+
+function supplierStockStatusClassName(status: string): string {
+  if (status === "critical") return "state error";
+  if (status === "low_stock" || status === "watch") return "state warning";
+  return "state success";
+}
+
+function supplierStockRowStatus(
+  row: ForecastResponse,
+  forecast: SupplierForecastResponse,
+): string {
+  if (forecast.high_risk_products.includes(row.product_id)) return "Critical";
+  if (forecast.products_needing_reorder.includes(row.product_id)) return "Needs reorder";
+  if (forecast.incoming_covered_products.includes(row.product_id)) return "Incoming covers shortage";
+  if (forecast.low_stock_products.includes(row.product_id)) return "Low stock";
+  if (forecast.out_of_stock_products.includes(row.product_id)) return "Out of stock";
+  if (forecast.products_missing_data.includes(row.product_id)) return "Data incomplete";
+  return "Healthy";
+}
+
+function supplierStockRowMatchesFilter(
+  row: ForecastResponse,
+  forecast: SupplierForecastResponse,
+  filter: SupplierStockFilter,
+): boolean {
+  const productId = row.product_id;
+  if (filter === "low_stock") return forecast.low_stock_products.includes(productId);
+  if (filter === "needs_reorder") return forecast.products_needing_reorder.includes(productId);
+  if (filter === "out_of_stock") return forecast.out_of_stock_products.includes(productId);
+  if (filter === "high_risk") return forecast.high_risk_products.includes(productId);
+  if (filter === "incoming_covered") return forecast.incoming_covered_products.includes(productId);
+  if (filter === "incomplete") return forecast.products_missing_data.includes(productId);
+  return true;
 }
 
 function seasonalityStatusLabel(status: string | null | undefined): string {
@@ -681,6 +736,8 @@ function PurchasingApp({
   const [creatingMapping, setCreatingMapping] = useState(false);
   const [selectedProductIdsForDraft, setSelectedProductIdsForDraft] = useState<number[]>([]);
   const [poToViewId, setPoToViewId] = useState<number | null>(null);
+  const [supplierForecastInitialSupplierId, setSupplierForecastInitialSupplierId] =
+    useState<number | null>(null);
 
   const loadProducts = useCallback((active = true, search = debouncedProductSearch) => {
     setProducts((current) => ({ ...current, loading: true, error: null }));
@@ -808,6 +865,11 @@ function PurchasingApp({
   function handleViewGeneratedPo(poId: number) {
     setPoToViewId(poId);
     setActiveTab("purchase-orders");
+  }
+
+  function handleViewSupplierForecast(supplierId: number) {
+    setSupplierForecastInitialSupplierId(supplierId);
+    setActiveTab("supplier-forecast");
   }
 
   const filteredUnmappedProducts = useMemo(
@@ -992,10 +1054,17 @@ function PurchasingApp({
 
       {activeTab === "suppliers" && <SuppliersPanel />}
 
+      {activeTab === "supplier-stock" && (
+        <SupplierStockPanel onViewForecast={handleViewSupplierForecast} />
+      )}
+
       {activeTab === "forecast" && <ForecastPanel />}
 
       {activeTab === "supplier-forecast" && (
-        <SupplierForecastPanel onViewPurchaseOrder={handleViewGeneratedPo} />
+        <SupplierForecastPanel
+          initialSupplierId={supplierForecastInitialSupplierId}
+          onViewPurchaseOrder={handleViewGeneratedPo}
+        />
       )}
 
       {activeTab === "forecast-readiness" && <ForecastReadinessPanel onNavigate={setActiveTab} />}
@@ -3765,7 +3834,369 @@ function SuppliersPanel() {
   );
 }
 
-function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (poId: number) => void }) {
+function SupplierStockPanel({ onViewForecast }: { onViewForecast: (supplierId: number) => void }) {
+  const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
+  const [selection, setSelection] = useState("");
+  const [forecast, setForecast] = useState<SupplierForecastResponse | null>(null);
+  const [unassignedProducts, setUnassignedProducts] = useState<Product[]>([]);
+  const [filter, setFilter] = useState<SupplierStockFilter>("all");
+  const [search, setSearch] = useState("");
+  const [loadingSuppliers, setLoadingSuppliers] = useState(true);
+  const [loadingStock, setLoadingStock] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [syncResult, setSyncResult] = useState<InventorySyncResult | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoadingSuppliers(true);
+    listSuppliers()
+      .then((loadedSuppliers) => {
+        if (active) {
+          setSuppliers(loadedSuppliers.filter((supplier) => supplier.is_active));
+        }
+      })
+      .catch((loadError: Error) => {
+        if (active) {
+          setError(loadError.message);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setLoadingSuppliers(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const loadStockSelection = useCallback(async (value: string) => {
+    setLoadingStock(true);
+    setError(null);
+    setForecast(null);
+    setUnassignedProducts([]);
+    try {
+      if (value === "unassigned") {
+        setUnassignedProducts(await fetchUnmappedProducts());
+      } else {
+        const supplierId = Number(value);
+        if (!Number.isInteger(supplierId) || supplierId <= 0) {
+          throw new Error("Select a valid supplier.");
+        }
+        setForecast(await getSupplierForecast(supplierId));
+      }
+    } catch (loadError) {
+      setError((loadError as Error).message);
+    } finally {
+      setLoadingStock(false);
+    }
+  }, []);
+
+  async function handleSelectionChange(value: string) {
+    setSelection(value);
+    setFilter("all");
+    setSearch("");
+    if (!value) {
+      setForecast(null);
+      setUnassignedProducts([]);
+      setError(null);
+      return;
+    }
+    await loadStockSelection(value);
+  }
+
+  async function handleRefreshStock() {
+    if (
+      !window.confirm(
+        "Refresh current stock from OrderPro? This reads OrderPro and updates only Purchasing AI's local stock cache.",
+      )
+    ) {
+      return;
+    }
+    setRefreshing(true);
+    setError(null);
+    setSyncResult(null);
+    try {
+      const result = await refreshOrderProInventory();
+      setSyncResult(result);
+      if (selection) {
+        await loadStockSelection(selection);
+      }
+    } catch (refreshError) {
+      setError((refreshError as Error).message);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const visibleRows = useMemo(() => {
+    if (!forecast) {
+      return [];
+    }
+    return sortSupplierForecastRows(forecast.forecasts).filter(
+      (row) =>
+        supplierStockRowMatchesFilter(row, forecast, filter) &&
+        matchesText([row.product_id, row.orderpro_sku, row.product_name], search),
+    );
+  }, [filter, forecast, search]);
+
+  const visibleUnassignedProducts = useMemo(
+    () =>
+      unassignedProducts.filter((product) => {
+        const matchesFilter =
+          filter === "all" ||
+          filter === "incomplete" ||
+          (filter === "out_of_stock" && Number(product.current_stock || 0) <= 0);
+        return (
+          matchesFilter &&
+          matchesText([product.id, product.orderpro_sku, product.name], search)
+        );
+      }),
+    [filter, search, unassignedProducts],
+  );
+
+  const unassignedStockTotal = unassignedProducts.reduce(
+    (total, product) => total + Number(product.current_stock || 0),
+    0,
+  );
+  const unassignedOutOfStock = unassignedProducts.filter(
+    (product) => Number(product.current_stock || 0) <= 0,
+  ).length;
+
+  return (
+    <div className="review-stack" aria-label="Supplier stock workspace">
+      <section className="detail-panel">
+        <div className="section-header">
+          <div>
+            <h2>Supplier Stock</h2>
+            <p className="muted-text">
+              Review current OrderPro stock by supplier, identify low-stock risk, and open the
+              supplier forecast without entering a supplier ID.
+            </p>
+          </div>
+          <button disabled={refreshing} onClick={() => void handleRefreshStock()} type="button">
+            {refreshing ? "Refreshing OrderPro stock..." : "Refresh Stock from OrderPro"}
+          </button>
+        </div>
+        <div className="state">
+          Refresh reads OrderPro and updates Purchasing AI only. It does not change OrderPro stock
+          or create a purchase order.
+        </div>
+      </section>
+
+      <section className="detail-panel" aria-label="Supplier stock filters">
+        <div className="supplier-stock-controls">
+          <label>
+            <span>Supplier</span>
+            <select
+              aria-label="Supplier stock supplier"
+              disabled={loadingSuppliers || refreshing}
+              onChange={(event) => void handleSelectionChange(event.target.value)}
+              value={selection}
+            >
+              <option value="">Select a supplier</option>
+              {suppliers.map((supplier) => (
+                <option key={supplier.id} value={supplier.id}>
+                  {supplier.name}{supplier.orderpro_code ? ` (${supplier.orderpro_code})` : ""}
+                </option>
+              ))}
+              <option value="unassigned">Unassigned products</option>
+            </select>
+          </label>
+          <label>
+            <span>Product search</span>
+            <input
+              aria-label="Supplier stock product search"
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Product ID, SKU, or name"
+              value={search}
+            />
+          </label>
+        </div>
+      </section>
+
+      {loadingSuppliers && <div className="state">Loading suppliers...</div>}
+      {loadingStock && <div className="state">Loading supplier stock and forecast...</div>}
+      {error && <div className="state error">Supplier stock failed: {error}</div>}
+      {syncResult && (
+        <div className={syncResult.warnings.length ? "state warning" : "state success"}>
+          {syncResult.message} Received {syncResult.records_received} rows; updated {syncResult.records_upserted}
+          {" "}positions and {syncResult.products_current_stock_updated} product stock totals.
+          {syncResult.products_current_stock_zeroed > 0 &&
+            ` Zeroed ${syncResult.products_current_stock_zeroed} products absent from the complete snapshot.`}
+          {syncResult.warnings.length > 0 && ` Warnings: ${syncResult.warnings.join(" ")}`}
+        </div>
+      )}
+      {!selection && !loadingSuppliers && (
+        <div className="state">Select a supplier to load its current stock and warning status.</div>
+      )}
+
+      {forecast && !loadingStock && (
+        <>
+          <section className="detail-panel" aria-label="Supplier stock summary">
+            <div className="section-header">
+              <div>
+                <h2>{forecast.supplier_name}</h2>
+                <p className="muted-text">
+                  {forecast.supplier_code ?? "No OrderPro supplier code"} · inventory last synced {formatDate(forecast.inventory_last_synced_at)}
+                </p>
+              </div>
+              <button onClick={() => onViewForecast(forecast.supplier_id)} type="button">
+                View Full Supplier Forecast
+              </button>
+            </div>
+            <div className={supplierStockStatusClassName(forecast.stock_status)}>
+              <strong>{supplierStockStatusLabel(forecast.stock_status)}</strong>
+              {forecast.stock_status !== "healthy" && (
+                <span>
+                  {" "}Review the affected products below before making a purchase decision.
+                </span>
+              )}
+            </div>
+            <dl className="summary-grid">
+              <div className="summary-card"><dt>Active products</dt><dd>{forecast.product_count}</dd></div>
+              <div className="summary-card"><dt>Total current stock</dt><dd>{forecast.total_current_stock}</dd></div>
+              <div className="summary-card"><dt>Out of stock</dt><dd>{forecast.out_of_stock_products.length}</dd></div>
+              <div className="summary-card"><dt>Low stock</dt><dd>{forecast.low_stock_products.length}</dd></div>
+              <div className="summary-card"><dt>Needs reorder</dt><dd>{forecast.products_needing_reorder.length}</dd></div>
+              <div className="summary-card"><dt>Incoming covers</dt><dd>{forecast.incoming_covered_products.length}</dd></div>
+              <div className="summary-card"><dt>High risk</dt><dd>{forecast.high_risk_products.length}</dd></div>
+              <div className="summary-card"><dt>Data incomplete</dt><dd>{forecast.products_missing_data.length}</dd></div>
+              <div className="summary-card"><dt>Total incoming</dt><dd>{forecast.total_incoming_quantity}</dd></div>
+              <div className="summary-card"><dt>Recommended quantity</dt><dd>{forecast.total_recommended_quantity}</dd></div>
+              <div className="summary-card"><dt>Estimated purchase value</dt><dd>{formatValue(forecast.total_estimated_cost)}</dd></div>
+            </dl>
+          </section>
+
+          <div className="filter-bar" role="group" aria-label="Supplier stock status filters">
+            {[
+              ["all", "All products"],
+              ["low_stock", "Low stock"],
+              ["needs_reorder", "Needs reorder"],
+              ["out_of_stock", "Out of stock"],
+              ["high_risk", "High risk"],
+              ["incoming_covered", "Incoming covers"],
+              ["incomplete", "Data incomplete"],
+            ].map(([value, label]) => (
+              <button
+                className={filter === value ? "tab active" : "tab"}
+                key={value}
+                onClick={() => setFilter(value as SupplierStockFilter)}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <section className="table-wrap" aria-label="Supplier stock rows">
+            <table>
+              <thead>
+                <tr>
+                  <th>Product ID</th>
+                  <th>OrderPro SKU</th>
+                  <th>Product</th>
+                  <th>Current stock</th>
+                  <th>Effective stock</th>
+                  <th>Incoming</th>
+                  <th>Reorder point</th>
+                  <th>Days of cover</th>
+                  <th>Recommended qty</th>
+                  <th>Status</th>
+                  <th>Risk</th>
+                  <th>Stock synced</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRows.map((row) => (
+                  <tr key={row.product_id}>
+                    <td>{row.product_id}</td>
+                    <td>{formatValue(row.orderpro_sku)}</td>
+                    <td>{row.product_name}</td>
+                    <td>{formatValue(row.current_stock)}</td>
+                    <td>{formatValue(row.effective_available_stock)}</td>
+                    <td>{formatValue(row.incoming_qty)}</td>
+                    <td>{formatValue(row.reorder_point)}</td>
+                    <td>{formatValue(row.days_until_stockout)}</td>
+                    <td>{formatValue(row.recommended_qty)}</td>
+                    <td>{supplierStockRowStatus(row, forecast)}</td>
+                    <td><span className={forecastRiskClassName(row.risk_level)}>{row.risk_level}</span></td>
+                    <td>{formatDate(row.inventory_last_synced_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {forecast.forecasts.length > 0 && visibleRows.length === 0 && (
+              <div className="state">No products match the selected stock filters.</div>
+            )}
+            {forecast.forecasts.length === 0 && (
+              <div className="state">No active products are assigned to this supplier.</div>
+            )}
+          </section>
+        </>
+      )}
+
+      {selection === "unassigned" && !loadingStock && (
+        <>
+          <section className="detail-panel" aria-label="Unassigned stock summary">
+            <h2>Unassigned products</h2>
+            <div className="state warning">
+              These products have no canonical supplier assignment. Their stock can be reviewed,
+              but a supplier forecast cannot be generated until products.supplier_id is resolved.
+            </div>
+            <dl className="summary-grid">
+              <div className="summary-card"><dt>Unassigned products</dt><dd>{unassignedProducts.length}</dd></div>
+              <div className="summary-card"><dt>Total current stock</dt><dd>{unassignedStockTotal}</dd></div>
+              <div className="summary-card"><dt>Out of stock</dt><dd>{unassignedOutOfStock}</dd></div>
+            </dl>
+          </section>
+          <div className="filter-bar" role="group" aria-label="Unassigned stock filters">
+            {[
+              ["all", "All products"],
+              ["out_of_stock", "Out of stock"],
+              ["incomplete", "Data incomplete"],
+            ].map(([value, label]) => (
+              <button
+                className={filter === value ? "tab active" : "tab"}
+                key={value}
+                onClick={() => setFilter(value as SupplierStockFilter)}
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <section className="table-wrap" aria-label="Unassigned supplier stock rows">
+            <table>
+              <thead><tr><th>Product ID</th><th>OrderPro SKU</th><th>Product</th><th>Current stock</th><th>Status</th></tr></thead>
+              <tbody>
+                {visibleUnassignedProducts.map((product) => (
+                  <tr key={product.id}>
+                    <td>{product.id}</td>
+                    <td>{formatValue(product.orderpro_sku)}</td>
+                    <td>{product.name}</td>
+                    <td>{formatValue(product.current_stock)}</td>
+                    <td>Needs supplier mapping</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {visibleUnassignedProducts.length === 0 && <div className="state">No unassigned products match the filters.</div>}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SupplierForecastPanel({
+  initialSupplierId = null,
+  onViewPurchaseOrder,
+}: {
+  initialSupplierId?: number | null;
+  onViewPurchaseOrder: (poId: number) => void;
+}) {
   const [supplierId, setSupplierId] = useState("");
   const [forecast, setForecast] = useState<SupplierForecastResponse | null>(null);
   const [filter, setFilter] = useState<SupplierForecastFilter>("all");
@@ -3776,14 +4207,7 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const parsedSupplierId = Number(supplierId);
-    if (!Number.isInteger(parsedSupplierId) || parsedSupplierId <= 0) {
-      setError("Supplier ID is required.");
-      return;
-    }
-
+  const loadForecast = useCallback(async (parsedSupplierId: number) => {
     setLoading(true);
     setError(null);
     setForecast(null);
@@ -3796,6 +4220,24 @@ function SupplierForecastPanel({ onViewPurchaseOrder }: { onViewPurchaseOrder: (
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (!initialSupplierId) {
+      return;
+    }
+    setSupplierId(String(initialSupplierId));
+    void loadForecast(initialSupplierId);
+  }, [initialSupplierId, loadForecast]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedSupplierId = Number(supplierId);
+    if (!Number.isInteger(parsedSupplierId) || parsedSupplierId <= 0) {
+      setError("Supplier ID is required.");
+      return;
+    }
+    await loadForecast(parsedSupplierId);
   }
 
   async function handleGenerateDraftFromForecast() {

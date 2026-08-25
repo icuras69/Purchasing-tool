@@ -235,11 +235,13 @@ def resolve_inventory_context(product: Product) -> dict:
     current_stock = round(float(product.current_stock or 0), 2)
     if product.inventory_positions:
         synced_total = round(sum(float(pos.quantity_on_hand or 0) for pos in product.inventory_positions), 2)
+        synced_times = [pos.last_synced_at for pos in product.inventory_positions if pos.last_synced_at]
         return {
             "current_stock": current_stock,
             "inventory_source": "orderpro_current_stock_cache",
             "has_live_inventory": True,
             "inventory_position_total": synced_total,
+            "inventory_last_synced_at": max(synced_times) if synced_times else None,
         }
 
     return {
@@ -247,6 +249,7 @@ def resolve_inventory_context(product: Product) -> dict:
         "inventory_source": "product_record",
         "has_live_inventory": False,
         "inventory_position_total": None,
+        "inventory_last_synced_at": None,
     }
 
 
@@ -289,6 +292,7 @@ def build_forecast(
             "orderpro_sku": product.orderpro_sku,
             "current_stock": product.current_stock,
             "inventory_source": "ignored",
+            "inventory_last_synced_at": None,
             "avg_daily_usage": 0.0,
             "demand_source": "not_applicable",
             "demand_lookback_days": None,
@@ -500,6 +504,7 @@ def build_forecast(
         "orderpro_sku": product.orderpro_sku,
         "current_stock": current_stock,
         "inventory_source": inventory_ctx["inventory_source"],
+        "inventory_last_synced_at": inventory_ctx["inventory_last_synced_at"],
         "avg_daily_usage": avg_daily_usage,
         "demand_source": demand_ctx.demand_source,
         "demand_lookback_days": demand_ctx.demand_lookback_days,

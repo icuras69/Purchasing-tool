@@ -67,6 +67,7 @@ import {
   listSupplierRecords,
   listSuppliers,
   receivePurchaseOrder,
+  refreshOrderProInventory,
   rejectRecommendation,
   rejectProductSupplier,
   rejectSupplierAssignmentReview,
@@ -155,6 +156,7 @@ vi.mock("./api", () => ({
   getRecommendationReviewSummary: vi.fn(),
   saveStaleDemandReviewDecision: vi.fn(),
   getSupplierForecast: vi.fn(),
+  refreshOrderProInventory: vi.fn(),
   createDraftPOFromSupplierForecast: vi.fn(),
   isAuthEnabled: vi.fn(),
   createProductSupplier: vi.fn(),
@@ -1165,10 +1167,19 @@ function mockSupplierForecast(overrides: Partial<SupplierForecastResponse> = {})
   return {
     supplier_id: 10,
     supplier_name: "Acme Supplies",
+    supplier_code: "ACME",
     product_count: 1,
     forecasts: [mockForecast({ recommended_action: "reorder", recommended_qty: 6 })],
     products_needing_reorder: [1],
     products_missing_data: [],
+    low_stock_products: [1],
+    out_of_stock_products: [],
+    incoming_covered_products: [],
+    high_risk_products: [],
+    stock_status: "low_stock",
+    inventory_last_synced_at: "2026-08-24T08:00:00",
+    total_current_stock: 5,
+    total_incoming_quantity: 0,
     total_recommended_quantity: 6,
     total_estimated_cost: 57,
     ...overrides,
@@ -1411,6 +1422,26 @@ beforeEach(() => {
     updated_at: "2026-07-14T10:00:00",
   });
   vi.mocked(getSupplierForecast).mockResolvedValue(mockSupplierForecast());
+  vi.mocked(refreshOrderProInventory).mockResolvedValue({
+    source_system: "orderpro",
+    records_received: 2,
+    records_upserted: 2,
+    records_skipped: 0,
+    message: "OrderPro stock refresh completed. Purchasing AI was updated; OrderPro was not modified.",
+    sync_completed_at: "2026-08-24T08:00:00",
+    complete_snapshot: true,
+    warehouses_created: 0,
+    warehouses_updated: 0,
+    inventory_positions_created: 0,
+    inventory_positions_updated: 2,
+    inventory_positions_zeroed: 0,
+    products_current_stock_updated: 2,
+    products_current_stock_zeroed: 0,
+    rows_missing_product_match: 0,
+    rows_missing_warehouse_id: 0,
+    unmatched_rows_sample: [],
+    warnings: [],
+  });
   vi.mocked(generateRecommendationLLMExplanation).mockResolvedValue(mockLLMExplanation());
   vi.mocked(createProductSupplier).mockResolvedValue(mockSupplierMapping());
   vi.mocked(confirmProductSupplier).mockResolvedValue(mockSupplierMapping({ match_status: "confirmed" }));
@@ -3032,6 +3063,102 @@ describe("App mapping review workflow", () => {
         "Purchase order action failed: Product belongs to a different OrderPro supplier.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("loads supplier stock by supplier and exposes the full supplier forecast", async () => {
+    vi.mocked(listSuppliers).mockResolvedValue([
+      mockSupplierOption({ id: 53, name: "Forecast Supplier", orderpro_code: "FORECAST" }),
+    ]);
+    vi.mocked(getSupplierForecast).mockResolvedValue(
+      mockSupplierForecast({
+        supplier_id: 53,
+        supplier_name: "Forecast Supplier",
+        supplier_code: "FORECAST",
+        stock_status: "critical",
+        total_current_stock: 5,
+        low_stock_products: [77],
+        products_needing_reorder: [77],
+        high_risk_products: [77],
+        forecasts: [
+          mockForecast({
+            product_id: 77,
+            orderpro_sku: "OP-77",
+            product_name: "Low Stock Product",
+            current_stock: 5,
+            reorder_point: 12,
+            recommended_qty: 8,
+            risk_level: "high",
+            inventory_last_synced_at: "2026-08-24T08:00:00",
+          }),
+        ],
+      }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Stock" }));
+    await userEvent.selectOptions(
+      await screen.findByLabelText("Supplier stock supplier"),
+      "53",
+    );
+
+    expect(getSupplierForecast).toHaveBeenCalledWith(53);
+    expect(await screen.findByText("Critical stock risk")).toBeInTheDocument();
+    expect(screen.getByText("Low Stock Product")).toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("Supplier stock rows")).getByText("Critical"),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "View Full Supplier Forecast" }));
+    expect(await screen.findByDisplayValue("53")).toBeInTheDocument();
+    expect(getSupplierForecast).toHaveBeenCalledWith(53);
+  });
+
+  it("refreshes OrderPro stock locally and reloads the selected supplier", async () => {
+    vi.mocked(listSuppliers).mockResolvedValue([
+      mockSupplierOption({ id: 53, name: "Forecast Supplier", orderpro_code: "FORECAST" }),
+    ]);
+    vi.mocked(getSupplierForecast).mockResolvedValue(
+      mockSupplierForecast({ supplier_id: 53, supplier_name: "Forecast Supplier" }),
+    );
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Stock" }));
+    await userEvent.selectOptions(
+      await screen.findByLabelText("Supplier stock supplier"),
+      "53",
+    );
+    await screen.findByRole("heading", { name: "Forecast Supplier" });
+    await userEvent.click(screen.getByRole("button", { name: "Refresh Stock from OrderPro" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      "Refresh current stock from OrderPro? This reads OrderPro and updates only Purchasing AI's local stock cache.",
+    );
+    expect(refreshOrderProInventory).toHaveBeenCalledTimes(1);
+    expect(getSupplierForecast).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText(/OrderPro stock refresh completed/)).toBeInTheDocument();
+  });
+
+  it("shows stocked products that still need a canonical supplier assignment", async () => {
+    vi.mocked(fetchUnmappedProducts).mockResolvedValue([
+      mockProduct({
+        id: 8182,
+        orderpro_sku: "UNASSIGNED-8182",
+        name: "Unassigned Stock Product",
+        supplier_id: null,
+        current_stock: 4,
+      }),
+    ]);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Supplier Stock" }));
+    await userEvent.selectOptions(
+      await screen.findByLabelText("Supplier stock supplier"),
+      "unassigned",
+    );
+
+    expect(await screen.findByText("Unassigned Stock Product")).toBeInTheDocument();
+    expect(screen.getByText("Needs supplier mapping")).toBeInTheDocument();
+    expect(screen.getByText(/supplier forecast cannot be generated/)).toBeInTheDocument();
   });
 
   it("supplier forecast page calls the supplier forecast endpoint and displays product rows", async () => {

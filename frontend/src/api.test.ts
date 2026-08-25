@@ -28,6 +28,7 @@ import {
   isAuthEnabled,
   loginAdmin,
   reviewManualSupplierCleanupCandidate,
+  refreshOrderProInventory,
   saveStaleDemandReviewDecision,
   searchManualSupplierCleanupSuppliers,
   setUnauthorizedHandler,
@@ -125,6 +126,29 @@ describe("apiUrl", () => {
         method: "PATCH",
         body: JSON.stringify({ lead_time_days: 10, payment_terms: "Net 30" }),
       }),
+    );
+  });
+
+  it("refreshes OrderPro inventory through the canonical local sync endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          source_system: "orderpro",
+          records_received: 2,
+          records_upserted: 2,
+          records_skipped: 0,
+          message: "OrderPro stock refresh completed.",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await refreshOrderProInventory();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/inventory/sync/orderpro"),
+      expect.objectContaining({ method: "POST" }),
     );
   });
 

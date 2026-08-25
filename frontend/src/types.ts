@@ -342,6 +342,7 @@ export interface ForecastResponse {
   orderpro_sku?: string | null;
   current_stock: number;
   inventory_source: string;
+  inventory_last_synced_at?: string | null;
   avg_daily_usage: number;
   demand_source?: string | null;
   demand_lookback_days?: number | null;
@@ -871,12 +872,42 @@ export interface DraftFromProductsResponse {
 export interface SupplierForecastResponse {
   supplier_id: number;
   supplier_name: string | null;
+  supplier_code: string | null;
   product_count: number;
   forecasts: ForecastResponse[];
   products_needing_reorder: number[];
   products_missing_data: number[];
+  low_stock_products: number[];
+  out_of_stock_products: number[];
+  incoming_covered_products: number[];
+  high_risk_products: number[];
+  stock_status: "critical" | "low_stock" | "watch" | "healthy" | string;
+  inventory_last_synced_at: string | null;
+  total_current_stock: number;
+  total_incoming_quantity: number;
   total_recommended_quantity: number;
   total_estimated_cost: number | null;
+}
+
+export interface InventorySyncResult {
+  source_system: string;
+  records_received: number;
+  records_upserted: number;
+  records_skipped: number;
+  message: string;
+  sync_completed_at: string | null;
+  complete_snapshot: boolean;
+  warehouses_created: number;
+  warehouses_updated: number;
+  inventory_positions_created: number;
+  inventory_positions_updated: number;
+  inventory_positions_zeroed: number;
+  products_current_stock_updated: number;
+  products_current_stock_zeroed: number;
+  rows_missing_product_match: number;
+  rows_missing_warehouse_id: number;
+  unmatched_rows_sample: Array<Record<string, unknown>>;
+  warnings: string[];
 }
 
 export interface SupplierForecastDraftRequest {

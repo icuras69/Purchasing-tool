@@ -223,6 +223,7 @@ def apply_inventory_sync(
     inventory: list[dict[str, Any]],
     *,
     synced_at: datetime,
+    complete_snapshot: bool = False,
 ) -> dict[str, Any]:
     sync_time = sync_time_without_timezone(synced_at)
     products = db.query(Product).all()
@@ -233,18 +234,28 @@ def apply_inventory_sync(
         for row in db.query(Warehouse).all()
         if row.orderpro_id
     }
+    local_positions = db.query(InventoryPosition).all()
     position_keys = {
         (row.product_id, row.warehouse_id, row.location_id, row.lot_id): row
-        for row in db.query(InventoryPosition).all()
+        for row in local_positions
+    }
+    position_by_orderpro_id = {
+        str(row.orderpro_inventory_id): row
+        for row in local_positions
+        if row.orderpro_inventory_id
     }
 
     warehouses_created = []
     warehouses_updated = []
     positions_created = []
     positions_updated = []
+    positions_zeroed = []
     rows_missing_product = []
     rows_missing_warehouse = []
     current_stock_by_product_id: dict[int, float] = defaultdict(float)
+    products_with_valid_inventory_rows: set[int] = set()
+    products_with_invalid_inventory_rows: set[int] = set()
+    seen_position_ids: set[int] = set()
 
     for row in inventory:
         orderpro_product_id = normalize_orderpro_id(row.get("product_id"))
@@ -260,6 +271,7 @@ def apply_inventory_sync(
         warehouse_orderpro_id = clean_text(row.get("warehouse_id"))
         if not warehouse_orderpro_id:
             rows_missing_warehouse.append(inventory_identity(row))
+            products_with_invalid_inventory_rows.add(product.id)
             continue
 
         desired_warehouse = desired_warehouse_fields(row)
@@ -279,14 +291,16 @@ def apply_inventory_sync(
                 warehouses_updated.append({"local_id": warehouse.id, "orderpro_id": warehouse_orderpro_id, "changed_fields": sorted(changes)})
 
         quantity = to_float(row.get("qty"))
+        products_with_valid_inventory_rows.add(product.id)
         current_stock_by_product_id[product.id] += quantity
         location_id_value = clean_text(row.get("location_id"))
         lot_id_value = clean_text(row.get("lot_id"))
+        orderpro_inventory_id = clean_text(row.get("id"))
         position_key = (product.id, warehouse.id, location_id_value, lot_id_value)
         desired_position = {
             "product_id": product.id,
             "warehouse_id": warehouse.id,
-            "orderpro_inventory_id": clean_text(row.get("id")),
+            "orderpro_inventory_id": orderpro_inventory_id,
             "orderpro_product_id": orderpro_product_id,
             "orderpro_warehouse_id": warehouse_orderpro_id,
             "source_system": "orderpro",
@@ -300,12 +314,18 @@ def apply_inventory_sync(
             "available": quantity,
             "last_synced_at": sync_time,
         }
-        position = position_keys.get(position_key)
+        position = (
+            position_by_orderpro_id.get(orderpro_inventory_id)
+            if orderpro_inventory_id
+            else None
+        ) or position_keys.get(position_key)
         if position is None:
             position = InventoryPosition(**desired_position)
             db.add(position)
             db.flush()
             position_keys[position_key] = position
+            if orderpro_inventory_id:
+                position_by_orderpro_id[orderpro_inventory_id] = position
             positions_created.append({"local_id": position.id, "product_id": product.id, "warehouse_id": warehouse.id})
         else:
             changes = changed_fields(position, desired_position)
@@ -313,13 +333,66 @@ def apply_inventory_sync(
                 for field, value in desired_position.items():
                     setattr(position, field, value)
                 positions_updated.append({"local_id": position.id, "changed_fields": sorted(changes)})
+        seen_position_ids.add(position.id)
+
+    protected_product_ids = products_with_invalid_inventory_rows - products_with_valid_inventory_rows
+    if complete_snapshot:
+        for position in local_positions:
+            if position.source_system != "orderpro" or position.id in seen_position_ids:
+                continue
+            if position.product_id in protected_product_ids:
+                continue
+            stock_fields = {
+                "quantity_on_hand": 0.0,
+                "quantity_available": 0.0,
+                "quantity_allocated": 0.0,
+                "quantity_incoming": 0.0,
+                "on_hand": 0.0,
+                "allocated": 0.0,
+                "incoming": 0.0,
+                "available": 0.0,
+                "last_synced_at": sync_time,
+            }
+            changes = changed_fields(position, stock_fields)
+            if changes:
+                for field, value in stock_fields.items():
+                    setattr(position, field, value)
+                positions_zeroed.append({"local_id": position.id, "product_id": position.product_id})
 
     products_current_stock_updated = []
-    for product_id, total_stock in current_stock_by_product_id.items():
-        product = db.get(Product, product_id)
-        if product is not None and normalize_compare_value(product.current_stock) != normalize_compare_value(total_stock):
-            product.current_stock = total_stock
-            products_current_stock_updated.append({"product_id": product_id, "current_stock": total_stock})
+    products_current_stock_zeroed = []
+    products_by_id = {product.id: product for product in products}
+    stock_targets = dict(current_stock_by_product_id)
+    if complete_snapshot:
+        for product in products:
+            has_orderpro_identity = bool(
+                product.orderpro_id
+                or product.orderpro_sku
+                or product.source_system == "orderpro"
+            )
+            if (
+                has_orderpro_identity
+                and product.is_active
+                and not product.is_non_inventory
+                and product.id not in products_with_valid_inventory_rows
+                and product.id not in protected_product_ids
+            ):
+                stock_targets[product.id] = 0.0
+
+    for product_id, total_stock in stock_targets.items():
+        product = products_by_id.get(product_id)
+        if product is None or normalize_compare_value(product.current_stock) == normalize_compare_value(total_stock):
+            continue
+        previous_stock = float(product.current_stock or 0)
+        product.current_stock = total_stock
+        change = {
+            "product_id": product_id,
+            "previous_stock": previous_stock,
+            "current_stock": total_stock,
+        }
+        products_current_stock_updated.append(change)
+        if total_stock == 0 and previous_stock != 0:
+            products_current_stock_zeroed.append(change)
 
     warnings = []
     if rows_missing_product:
@@ -334,19 +407,24 @@ def apply_inventory_sync(
             "warehouses_updated": len(warehouses_updated),
             "inventory_positions_created": len(positions_created),
             "inventory_positions_updated": len(positions_updated),
+            "inventory_positions_zeroed": len(positions_zeroed),
             "rows_missing_product_match": len(rows_missing_product),
             "rows_missing_warehouse_id": len(rows_missing_warehouse),
             "products_current_stock_updated": len(products_current_stock_updated),
+            "products_current_stock_zeroed": len(products_current_stock_zeroed),
+            "complete_snapshot": complete_snapshot,
         },
         "warehouses_created": warehouses_created,
         "warehouses_updated": warehouses_updated,
         "inventory_positions_created": positions_created,
         "inventory_positions_updated": positions_updated,
+        "inventory_positions_zeroed": positions_zeroed,
         "rows_missing_product_match": rows_missing_product,
         "rows_missing_product_match_sample": rows_missing_product[:10],
         "rows_missing_warehouse_id": rows_missing_warehouse,
         "rows_missing_warehouse_id_sample": rows_missing_warehouse[:10],
         "products_current_stock_updated": products_current_stock_updated,
+        "products_current_stock_zeroed": products_current_stock_zeroed,
         "warnings": warnings,
     }
 
